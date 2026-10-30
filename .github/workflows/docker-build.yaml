@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - local
     tags:
       - 'v*'
   workflow_dispatch:
