@@ -23,7 +23,7 @@ export interface AccountMetricsProps {
   enabledCount: number
   /** 已禁用账号数 */
   disabledCount: number
-  /** 异常账号数（deriveAccountState 为 error / warning；禁用与待查询不计入） */
+  /** 异常账号数（accountStateGroup 为 abnormal：不健康 / 降级；警告归入健康） */
   abnormalCount: number
   /** 已查询账号的剩余积分合计；null = 本会话尚无任何余额结果 */
   creditsTotal: number | null

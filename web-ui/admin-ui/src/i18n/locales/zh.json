@@ -215,6 +215,7 @@
     "refetchBalance": "重新查询余额",
     "stateHealthy": "健康",
     "stateWarning": "警告",
+    "stateDegraded": "降级",
     "healthDetail": "近 10 分钟：限流 {{throttled}} / 空响应 {{empty}}，连续失败 {{consecutive}}",
     "healthDegradedNote": "已降级：同优先级内最后被选中，已绑定的会话不受影响",
     "healthCooldown": "冷却中：剩余 {{secs}} 秒，期间选号时排除",

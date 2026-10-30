@@ -6,6 +6,7 @@ export type AccountState =
   | 'quota_exceeded'
   | 'disabled'
   | 'error'
+  | 'degraded'
   | 'warning'
   | 'pending'
   | 'healthy'
@@ -80,9 +81,10 @@ export function maskEmail(email: string): string {
  * 判定顺序即优先级，逐条对应 spec.md 状态映射表：
  *   1. disabled 为真              → disabled
  *   2. healthStatus 不健康        → error
- *   3. healthStatus 降级 / 警告   → warning（降级只是同优先级内最后被选中，仍可服务）
- *   4. 健康 + 零成功调用 + 未查额度 → pending
- *   5. 其余                       → healthy
+ *   3. healthStatus 降级          → degraded（同优先级内最后被选中，仍可服务）
+ *   4. healthStatus 警告          → warning（仅提示，不影响选号）
+ *   5. 健康 + 零成功调用 + 未查额度 → pending
+ *   6. 其余                       → healthy
  * @param hasBalance 该账号在 balanceMap 中是否已有余额结果（会话内内存态）
  */
 export function deriveAccountState(
@@ -94,11 +96,22 @@ export function deriveAccountState(
   if (item.disabled && item.disabledReason === 'quota_exceeded') return 'quota_exceeded'
   if (item.disabled) return 'disabled'
   if (item.healthStatus === 'unhealthy') return 'error'
-  if (item.healthStatus === 'degraded' || item.healthStatus === 'warning') return 'warning'
+  if (item.healthStatus === 'degraded') return 'degraded'
+  if (item.healthStatus === 'warning') return 'warning'
   if (item.healthStatus === 'healthy' && item.successCount === 0 && !hasBalance) return 'pending'
   if (item.healthStatus === 'healthy') return 'healthy'
   // 兜底：后端 HealthStatus 日后新增变体时宁可张扬为异常，不静默显示为「健康」
   return 'error'
+}
+
+/** 工具栏分段 / 指标条「异常」计数共用的分组 */
+export type AccountStateGroup = 'healthy' | 'abnormal' | 'disabled' | 'quota_exceeded' | 'pending'
+
+/** 状态归组：警告仅提示、不影响选号，归入「健康」；不健康与降级归入「异常」 */
+export function accountStateGroup(state: AccountState): AccountStateGroup {
+  if (state === 'warning') return 'healthy'
+  if (state === 'error' || state === 'degraded') return 'abnormal'
+  return state
 }
 
 /** 单状态展现配置：标签文案 key + 标签 / 圆点 / 头像的语义色类名 */
@@ -119,8 +132,15 @@ export const ACCOUNT_STATE_VISUAL: Record<AccountState, AccountStateVisual> = {
     pipClass: 'bg-ok ring-[2.5px] ring-ok-soft',
     avatarClass: 'bg-ok-soft text-ok',
   },
+  // 警告只是提示、不影响选号：描边无底色、中性文字，紧急程度低于降级的实心黄
   warning: {
     labelKey: 'credentials.stateWarning',
+    tagClass: 'text-ink-2 bg-transparent border-warn-line',
+    pipClass: 'bg-warn ring-[2.5px] ring-warn-soft',
+    avatarClass: 'bg-surface-3 text-ink-2',
+  },
+  degraded: {
+    labelKey: 'credentials.stateDegraded',
     tagClass: 'text-warn bg-warn-soft border-transparent',
     pipClass: 'bg-warn ring-[2.5px] ring-warn-soft',
     avatarClass: 'bg-warn-soft text-warn',
@@ -157,6 +177,7 @@ export const ACCOUNT_STATE_VISUAL: Record<AccountState, AccountStateVisual> = {
 export const ACCOUNT_STATE_ORDER: readonly AccountState[] = [
   'healthy',
   'warning',
+  'degraded',
   'error',
   'pending',
   'disabled',

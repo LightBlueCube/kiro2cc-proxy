@@ -215,6 +215,7 @@
     "refetchBalance": "Refresh balance",
     "stateHealthy": "Healthy",
     "stateWarning": "Warning",
+    "stateDegraded": "Degraded",
     "healthDetail": "Last 10 min: {{throttled}} throttled / {{empty}} empty responses, {{consecutive}} consecutive failures",
     "healthDegradedNote": "Degraded: picked last within its priority; bound sessions are unaffected",
     "healthCooldown": "Cooling down: {{secs}}s left, excluded from selection meanwhile",

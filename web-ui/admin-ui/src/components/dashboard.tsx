@@ -30,6 +30,7 @@ import { extractErrorMessage } from '@/lib/utils'
 import {
   accountLabel,
   deriveAccountState,
+  accountStateGroup,
   sortCredentials,
   type AccountSortKey,
   type SortDirection,
@@ -134,11 +135,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   // ===== 指标条派生数据（仅用现有接口，缺数据一律降级为 null）=====
   const allCredentials = data?.credentials ?? []
-  // 「异常」= error + warning；禁用与待查询不计入
-  const abnormalCount = allCredentials.filter(c => {
-    const state = deriveAccountState(c, balanceMap.has(c.id))
-    return state === 'error' || state === 'warning'
-  }).length
+  const abnormalCount = allCredentials.filter(c =>
+    accountStateGroup(deriveAccountState(c, balanceMap.has(c.id))) === 'abnormal',
+  ).length
   // 启用账号的剩余百分比：需已查到余额且 usageLimit > 0，否则跳过
   const enabledRemaining = allCredentials.flatMap(c => {
     if (c.disabled) return []
@@ -199,7 +198,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
         String(c.id).includes(q),
     )
   }, [allCredentials, searchQuery])
-  // 分段计数基于搜索后的集合；设计稿把 error + warning 合并为「异常」一段
+  // 分段计数基于搜索后的集合；分组口径见 accountStateGroup
   const stateCounts = useMemo(() => {
     const counts: Record<AccountStatusFilter, number> = {
       all: filtered.length,
@@ -210,18 +209,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
       pending: 0,
     }
     filtered.forEach(c => {
-      const state = deriveAccountState(c, balanceMap.has(c.id))
-      if (state === 'error' || state === 'warning') counts.abnormal += 1
-      else counts[state] += 1
+      counts[accountStateGroup(deriveAccountState(c, balanceMap.has(c.id)))] += 1
     })
     return counts
   }, [filtered, balanceMap])
   const visible = useMemo(() => {
     if (statusFilter === 'all') return filtered
-    return filtered.filter(c => {
-      const state = deriveAccountState(c, balanceMap.has(c.id))
-      return statusFilter === 'abnormal' ? state === 'error' || state === 'warning' : state === statusFilter
-    })
+    return filtered.filter(c => accountStateGroup(deriveAccountState(c, balanceMap.has(c.id))) === statusFilter)
   }, [filtered, statusFilter, balanceMap])
   // 排序键快照（T15 CR Medium ②）：按「剩余额度」排序时批量查询余额，每个结果到达都会改变
   // 排序键，实时重排会让行位置持续跳动。改为只在查询静止时刷新快照 —— 查询期间维持既有顺序，

@@ -1,15 +1,10 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 import { useTranslation } from 'react-i18next'
 import { SearchBox, Segmented, Toolbar, UpdatedAgo, type SegmentedOption } from '@/components/toolbar'
+import type { AccountStateGroup } from '@/lib/account-state'
 
-/** 分段筛选口径：设计稿把 warning + error 合并为「异常」一段（与指标条 abnormalCount 同源） */
-export type AccountStatusFilter =
-  | 'all'
-  | 'healthy'
-  | 'abnormal'
-  | 'disabled'
-  | 'quota_exceeded'
-  | 'pending'
+/** 分段筛选口径：按 accountStateGroup 归组（与指标条 abnormalCount 同源） */
+export type AccountStatusFilter = 'all' | AccountStateGroup
 
 const SEGMENTS: { key: AccountStatusFilter; labelKey: string; pipClass?: string }[] = [
   { key: 'all', labelKey: 'credentials.filterAll' },
