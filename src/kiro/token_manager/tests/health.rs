@@ -39,7 +39,7 @@ mod tests {
     fn scattered_failures(m: &MultiTokenManager, id: u64, n: usize) {
         for _ in 0..n {
             m.report_throttled(id);
-            m.report_response_completed(id);
+            m.report_response_completed(id, None);
         }
     }
 
@@ -104,7 +104,7 @@ mod tests {
         for _ in 0..3 {
             m.report_throttled(1);
         }
-        m.report_response_completed(1);
+        m.report_response_completed(1, None);
         // 连续中断，但窗口内仍有 3 次
         assert_eq!(health(&m, 1), HealthStatus::Warning);
 

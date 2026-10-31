@@ -358,6 +358,23 @@ pub(crate) fn stream_interrupted_error_event_after(elapsed: Duration) -> SseEven
     )
 }
 
+/// 上游拒答时的 error 事件：说明原文直接作为 message
+///
+/// 用 permission_error（不可重试）：拒答多与内容有关，客户端自动重试会把同一请求轮番发到
+/// 其它账号，可能连累它们也被上游限制。
+pub(crate) fn refusal_error_event(message: &str) -> SseEvent {
+    SseEvent::new(
+        "error",
+        serde_json::json!({
+            "type": "error",
+            "error": { "type": REFUSAL_ERROR_TYPE, "message": message }
+        }),
+    )
+}
+
+/// 上游拒答返回给客户端的错误类型（流式与非流式共用）
+pub(super) const REFUSAL_ERROR_TYPE: &str = "permission_error";
+
 /// 上游异常终止（见 `UpstreamTermination`）时的 error 事件：overloaded_error 保持可重试语义
 pub(crate) fn upstream_aborted_error_event(reason: &str) -> SseEvent {
     SseEvent::new(
@@ -511,7 +528,9 @@ fn create_sse_stream(
                             ctx.termination.observe_eof(decoder.buffer_len());
                             ctx.report_upstream_outcome_at_eof();
                             let mut out_events = Vec::new();
-                            if let Some(reason) = ctx.termination.failure() {
+                            if let Some(message) = ctx.termination.refusal() {
+                                out_events.push(refusal_error_event(message));
+                            } else if let Some(reason) = ctx.termination.failure() {
                                 tracing::warn!(
                                     reason = %reason,
                                     est_input_tokens = ctx.input_tokens,

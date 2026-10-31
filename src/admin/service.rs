@@ -165,6 +165,7 @@ impl AdminService {
                     .unwrap_or(0),
                 disabled_reason: entry.disabled_reason,
                 last_error: entry.last_error,
+                model_restrictions: entry.model_restrictions,
             })
             .collect();
 

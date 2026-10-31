@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use super::error::map_provider_error_with_context;
 use super::helpers::strip_json_fences;
-use super::stream::EMPTY_RESPONSE_RETRY_MESSAGE;
+use super::stream::{EMPTY_RESPONSE_RETRY_MESSAGE, REFUSAL_ERROR_TYPE};
 use crate::anthropic::stream::THINKING_ONLY_TRUNCATED_MESSAGE;
 
 /// 组装非流式响应的 content 数组
@@ -366,6 +366,16 @@ pub(crate) async fn handle_non_stream_request(
     }
 
     flush_native_reasoning(&mut native_reasoning, &mut native_thinking_blocks);
+
+    // 上游拒答：说明原文原样返回（与流式同口径，不按空响应处理）
+    if let Some(message) = termination.refusal() {
+        feedback.refused(message);
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(REFUSAL_ERROR_TYPE, message)),
+        )
+            .into_response();
+    }
 
     // 空响应 = 无正文、无工具调用、无推理（与流式 `is_empty_response` 同口径）。
     // 上下文过大导致的空响应换账号重试也一样：不计入健康度，原样返回

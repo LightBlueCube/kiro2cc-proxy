@@ -94,6 +94,7 @@ impl MultiTokenManager {
                     throttle_count: 0,
                     upstream_failures: UpstreamFailures::new(Instant::now()),
                     unreachable: Default::default(),
+                    model_refusals: Default::default(),
                     last_throttled_wall: None,
                     last_refreshed_at: None,
                     rotation_bias: 0,
@@ -296,11 +297,15 @@ impl MultiTokenManager {
             return None;
         }
 
-        // 优先选择健康状态不为 Unhealthy 的账号；全部不健康时才 fallback 避免完全不可用
+        // 优先选择健康状态不为 Unhealthy、且该模型未在拒答冷却期的账号；
+        // 全部不满足时才 fallback 避免完全不可用（拒答冷却的账号会把上游说明原文返回给客户端）
         let now = Instant::now();
         let preferred: Vec<_> = available
             .iter()
-            .filter(|e| Self::compute_health_at(e, now) != HealthStatus::Unhealthy)
+            .filter(|e| {
+                Self::compute_health_at(e, now) != HealthStatus::Unhealthy
+                    && !Self::model_restricted_at(e, model, now)
+            })
             .copied()
             .collect();
         let pool: &[&CredentialEntry] = if preferred.is_empty() {
@@ -416,6 +421,7 @@ impl MultiTokenManager {
                                 )
                                 && (!is_opus || e.credentials.supports_opus())
                                 && !self.is_known_unsupported(e.id, model)
+                                && !Self::model_restricted_at(e, model, Instant::now())
                         })
                         .map(|e| (e.id, e.credentials.clone()))
                 };
@@ -601,6 +607,7 @@ impl MultiTokenManager {
                                 && (allowed_ids.is_empty() || allowed_ids.contains(&e.id))
                                 && (!is_opus || e.credentials.supports_opus())
                                 && !self.is_known_unsupported(e.id, model)
+                                && !Self::model_restricted_at(e, model, Instant::now())
                         })
                         .map(|e| (e.id, e.credentials.clone()))
                 } else {

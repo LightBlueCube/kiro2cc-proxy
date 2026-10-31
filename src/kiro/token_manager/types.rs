@@ -100,6 +100,20 @@ pub struct CredentialEntrySnapshot {
     /// 本轮连续失败中最近一次账号报错；None = 无
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<AccountError>,
+    /// 因连续拒答处于冷却期的模型
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_restrictions: Vec<ModelRestriction>,
+}
+
+/// 账号某个模型因连续拒答处于冷却期（期间该模型的请求换用其它账号）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRestriction {
+    /// 模型 ID（小写）
+    pub model: String,
+    pub remaining_secs: u64,
+    /// 最近一次拒答的上游说明原文
+    pub message: String,
 }
 
 /// 账号管理器状态快照

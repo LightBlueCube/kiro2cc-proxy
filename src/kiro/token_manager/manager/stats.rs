@@ -1,6 +1,6 @@
 //! 凭据统计持久化：stats.json 防抖写入、缓存目录与统计文件路径管理。
 use super::super::entry::{CredentialEntry, DisabledReason, HealthStatus, StatsEntry};
-use super::super::types::{HealthDetail, MultiTokenManager, STATS_SAVE_DEBOUNCE};
+use super::super::types::{HealthDetail, ModelRestriction, MultiTokenManager, STATS_SAVE_DEBOUNCE};
 use super::super::upstream_failures::{
     DEGRADED_CONSECUTIVE, DEGRADED_RECENT, UNHEALTHY_CONSECUTIVE, UNHEALTHY_RECENT, WARNING_RECENT,
 };
@@ -334,6 +334,38 @@ impl MultiTokenManager {
             return HealthStatus::Warning;
         }
         HealthStatus::Healthy
+    }
+
+    /// 账号的该模型是否因连续拒答处于冷却期（只影响该模型的选号，不影响账号健康度）
+    pub(crate) fn model_restricted_at(
+        entry: &CredentialEntry,
+        model: Option<&str>,
+        now: Instant,
+    ) -> bool {
+        model
+            .and_then(|m| entry.model_refusals.get(&m.to_ascii_lowercase()))
+            .is_some_and(|r| r.cooldown.cooldown_remaining(now).is_some())
+    }
+
+    /// 处于拒答冷却期的模型（面板展示用）
+    pub(crate) fn model_restrictions_at(
+        entry: &CredentialEntry,
+        now: Instant,
+    ) -> Vec<ModelRestriction> {
+        let mut restrictions: Vec<ModelRestriction> = entry
+            .model_refusals
+            .iter()
+            .filter_map(|(model, refusals)| {
+                let remaining = refusals.cooldown.cooldown_remaining(now)?;
+                Some(ModelRestriction {
+                    model: model.clone(),
+                    remaining_secs: remaining.as_secs().max(1),
+                    message: refusals.message.clone(),
+                })
+            })
+            .collect();
+        restrictions.sort_by(|a, b| a.model.cmp(&b.model));
+        restrictions
     }
 
     /// [`Self::compute_health_at`] 用到的近期上游失败数据

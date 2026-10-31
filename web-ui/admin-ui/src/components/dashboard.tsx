@@ -434,10 +434,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const selectedCredentials = () =>
     (data?.credentials ?? []).filter(c => selectedIds.has(c.id))
 
-  // 批量恢复：重置失败计数、解除连接失败冷却并启用（已禁用、有失败计数或冷却中的账号）
+  // 批量恢复：重置失败计数、解除连接失败冷却与模型限制并启用（已禁用、有失败计数、冷却中或有模型限制的账号）
   const handleBatchRestore = async () => {
     const ids = selectedCredentials()
-      .filter(c => c.disabled || c.failureCount > 0 || c.unreachableCooldownSecs !== undefined)
+      .filter(
+        c =>
+          c.disabled ||
+          c.failureCount > 0 ||
+          c.unreachableCooldownSecs !== undefined ||
+          (c.modelRestrictions?.length ?? 0) > 0,
+      )
       .map(c => c.id)
     if (ids.length === 0) {
       toast.error(t('dashboard.toastNoRestorableSelected'))

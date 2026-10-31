@@ -119,7 +119,7 @@ pub(crate) mod tests {
         assert_eq!(last_error.status_code, Some(403));
         assert_eq!(last_error.message, "test failure");
 
-        manager.report_response_completed(1);
+        manager.report_response_completed(1, None);
         let snapshot = manager.snapshot();
         assert_eq!(snapshot.entries[0].failure_count, 0);
         assert!(snapshot.entries[0].last_error.is_none());
@@ -210,6 +210,63 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn test_model_refusals_restrict_only_that_model() {
+        // 同一账号的同一模型连续拒答 3 次：只冷却该模型，其它模型照常选它
+        // （不用 opus：测试账号没有订阅信息，opus 请求会被订阅过滤掉）
+        const MODEL: &str = "claude-sonnet-5.5";
+        const MESSAGE: &str = "Your access to this model has been temporarily restricted.";
+        let config = Config::default();
+        let manager = MultiTokenManager::new(
+            config,
+            vec![make_valid_cred("t1"), make_valid_cred("t2")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
+            manager.report_model_refused(1, Some("Claude-Sonnet-5.5"), MESSAGE);
+        }
+
+        let snapshot = manager.snapshot();
+        let entry = &snapshot.entries[0];
+        assert_eq!(
+            entry.health_status,
+            HealthStatus::Healthy,
+            "账号本身不受影响"
+        );
+        assert_eq!(entry.model_restrictions.len(), 1);
+        assert_eq!(entry.model_restrictions[0].model, MODEL);
+        assert_eq!(entry.model_restrictions[0].message, MESSAGE);
+
+        for _ in 0..4 {
+            let ctx = manager
+                .acquire_context_sticky(Some(MODEL), &[], None, &[])
+                .await
+                .unwrap();
+            assert_eq!(ctx.id, 2);
+        }
+        {
+            let entries = manager.entries.lock();
+            let now = std::time::Instant::now();
+            assert!(MultiTokenManager::model_restricted_at(
+                &entries[0],
+                Some(MODEL),
+                now
+            ));
+            assert!(!MultiTokenManager::model_restricted_at(
+                &entries[0],
+                Some("claude-haiku-4.5"),
+                now
+            ));
+        }
+
+        manager.report_response_completed(1, Some(MODEL));
+        assert!(manager.snapshot().entries[0].model_restrictions.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_unreachable_cools_down_instead_of_disabling() {
         // 请求发送连续失败 3 次：不禁用，冷却期内选号排除，正常完成后清零
         let config = Config::default();
@@ -240,7 +297,7 @@ pub(crate) mod tests {
             assert_eq!(manager.acquire_context(None).await.unwrap().id, 2);
         }
 
-        manager.report_response_completed(1);
+        manager.report_response_completed(1, None);
         let snapshot = manager.snapshot();
         assert_eq!(snapshot.entries[0].health_status, HealthStatus::Healthy);
         assert_eq!(

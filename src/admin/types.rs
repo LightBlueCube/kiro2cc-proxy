@@ -84,6 +84,9 @@ pub struct CredentialStatusItem {
     /// 本轮连续失败中最近一次账号报错（状态码、原文、时间）；None = 无
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<crate::kiro::token_manager::AccountError>,
+    /// 因连续拒答处于冷却期的模型（期间该模型的请求换用其它账号）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_restrictions: Vec<crate::kiro::token_manager::ModelRestriction>,
 }
 
 // ============ 操作请求 ============
@@ -208,6 +211,7 @@ mod tests {
             throttle_count: 0,
             disabled_reason: None,
             last_error: None,
+            model_restrictions: Vec::new(),
         }
     }
 

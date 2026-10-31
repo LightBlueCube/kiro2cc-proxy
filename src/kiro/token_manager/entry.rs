@@ -1,9 +1,10 @@
 //! 单凭据条目：健康状态（HealthStatus）、禁用原因（DisabledReason）与统计计数。
-use super::unreachable::Unreachable;
+use super::unreachable::FailureCooldown;
 use super::upstream_failures::UpstreamFailures;
 use crate::kiro::model::credentials::KiroCredentials;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Instant;
 
 // 多账号 Token 管理器
@@ -32,7 +33,9 @@ pub(crate) struct CredentialEntry {
     /// 近期上游失败（限流、空响应），健康度据此判定；仅内存
     pub(crate) upstream_failures: UpstreamFailures,
     /// 请求发送失败（代理错误、连接失败、超时）的连续计数与冷却；仅内存
-    pub(crate) unreachable: Unreachable,
+    pub(crate) unreachable: FailureCooldown,
+    /// 按模型（小写）的连续拒答与冷却；仅内存
+    pub(crate) model_refusals: HashMap<String, ModelRefusals>,
     /// 最后一次被限流时间（UTC，随统计持久化；健康度不使用）
     pub(crate) last_throttled_wall: Option<DateTime<Utc>>,
     /// 最后一次 token 刷新时间（用于冷却期控制）
@@ -44,6 +47,14 @@ pub(crate) struct CredentialEntry {
     /// 本轮连续失败中最近一次账号报错（请求失败或 Token 刷新失败，持久化）；
     /// 正常完成一次响应或手动启用时清除
     pub(crate) last_error: Option<AccountError>,
+}
+
+/// 账号某个模型的连续拒答
+#[derive(Debug, Default)]
+pub(crate) struct ModelRefusals {
+    pub(crate) cooldown: FailureCooldown,
+    /// 最近一次拒答的上游说明原文
+    pub(crate) message: String,
 }
 
 /// 账号报错原文（Admin 面板展示用）

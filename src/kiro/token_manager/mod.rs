@@ -32,7 +32,7 @@ pub(crate) use refresh::UsageLimitsUnsupportedError;
 #[cfg(test)]
 pub(crate) use refresh::{is_token_expired, is_token_expiring_soon, refresh_token};
 pub(crate) use types::QUOTA_EXHAUSTED_ALL_MARKER;
-pub use types::{CallContext, HealthDetail, MultiTokenManager};
+pub use types::{CallContext, HealthDetail, ModelRestriction, MultiTokenManager};
 
 #[cfg(test)]
 mod tests;

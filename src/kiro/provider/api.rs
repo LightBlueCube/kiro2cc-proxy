@@ -56,7 +56,16 @@ impl UpstreamFeedback {
     pub fn completed(&self) {
         self.provider
             .token_manager
-            .report_response_completed(self.route.credential_id);
+            .report_response_completed(self.route.credential_id, self.route.model.as_deref());
+    }
+
+    /// 模型拒答（stopReason=content_filtered，参数为上游说明原文）：计入该账号该模型的连续拒答
+    pub fn refused(&self, message: &str) {
+        self.provider.token_manager.report_model_refused(
+            self.route.credential_id,
+            self.route.model.as_deref(),
+            message,
+        );
     }
 }
 
@@ -265,7 +274,7 @@ impl KiroProvider {
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
                 // MCP 响应很短，拿到 200 即视为正常完成
-                self.token_manager.report_response_completed(ctx.id);
+                self.token_manager.report_response_completed(ctx.id, None);
                 if let Some(cid) = continuation_id.as_deref() {
                     self.token_manager.report_sticky_success(cid, ctx.id);
                 }

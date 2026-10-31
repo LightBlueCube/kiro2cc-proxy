@@ -117,6 +117,7 @@ impl MultiTokenManager {
                     throttle_count: e.throttle_count,
                     disabled_reason: e.disabled_reason,
                     last_error: e.last_error.clone(),
+                    model_restrictions: Self::model_restrictions_at(e, now),
                 })
                 .collect(),
             current_id,
@@ -289,6 +290,7 @@ impl MultiTokenManager {
                 entry.quota_exhausted_at = None;
                 entry.last_error = None;
                 entry.unreachable.reset();
+                entry.model_refusals.clear();
             } else {
                 entry.disabled_reason = Some(DisabledReason::Manual);
                 entry.quota_exhausted_at = None;
@@ -338,6 +340,7 @@ impl MultiTokenManager {
             entry.quota_exhausted_at = None;
             entry.last_error = None;
             entry.unreachable.reset();
+            entry.model_refusals.clear();
         }
         // 持久化更改（stats 承载自动禁用原因，必须同步落盘避免重启后复活）
         self.persist_credentials()?;
@@ -734,6 +737,7 @@ impl MultiTokenManager {
                 throttle_count: 0,
                 upstream_failures: UpstreamFailures::new(Instant::now()),
                 unreachable: Default::default(),
+                model_refusals: Default::default(),
                 last_throttled_wall: None,
                 last_refreshed_at: None,
                 rotation_bias: 0,

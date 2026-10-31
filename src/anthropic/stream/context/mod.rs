@@ -314,12 +314,17 @@ impl StreamContext {
 
     /// 上游流读到 EOF 后回报结果（须在 `termination.observe_eof` 之后调用）
     ///
-    /// 异常终止不回报（其中的限流帧已由 [`Self::report_upstream_throttle`] 回报）；
-    /// 空响应计入健康度，上下文过大导致的除外（换账号也一样）；其余视为正常完成。
+    /// 拒答回报给该账号的该模型；异常终止不回报（其中的限流帧已由
+    /// [`Self::report_upstream_throttle`] 回报）；空响应计入健康度，上下文过大导致的除外
+    /// （换账号也一样）；其余视为正常完成。
     pub(crate) fn report_upstream_outcome_at_eof(&self) {
         let Some(feedback) = &self.upstream_feedback else {
             return;
         };
+        if let Some(message) = self.termination.refusal() {
+            feedback.refused(message);
+            return;
+        }
         if self.termination.failure().is_some() {
             return;
         }

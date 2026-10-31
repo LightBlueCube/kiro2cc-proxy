@@ -9,6 +9,9 @@
 //! - 解码器因连续错误停止、缓冲区溢出，或 EOF 时残留半帧
 //!
 //! 流结束时 `failure()` 返回 Some 即改发可重试错误，而非正常收尾。
+//!
+//! 另外，metadataEvent.stopReason 为 CONTENT_FILTERED 表示模型拒答（流里往往没有任何内容），
+//! `refusal()` 给出上游的说明原文，流结束时原样返回给客户端，不按空响应处理。
 
 use crate::kiro::model::events::{Event, UpstreamStop};
 use crate::kiro::parser::error::ParseError;
@@ -29,6 +32,8 @@ pub(crate) struct UpstreamTermination {
     claimed_tool_use: bool,
     /// 是否收到过 toolUseEvent
     saw_tool_use: bool,
+    /// 上游拒答（stopReason=content_filtered）时的说明原文
+    refusal: Option<String>,
 }
 
 impl UpstreamTermination {
@@ -45,6 +50,16 @@ impl UpstreamTermination {
                 self.claimed_tool_use = stop == UpstreamStop::ToolUse;
                 if stop == UpstreamStop::Malformed {
                     self.mark_fatal(format!("stopReason={raw}"));
+                }
+                if stop == UpstreamStop::ContentFiltered {
+                    let details = metadata.refusal_details();
+                    tracing::warn!(
+                        category = ?details.and_then(|d| d.category.as_deref()),
+                        recommended_model = ?details.and_then(|d| d.recommended_model.as_deref()),
+                        explanation = ?details.and_then(|d| d.explanation.as_deref()),
+                        "上游拒答"
+                    );
+                    self.refusal = Some(metadata.refusal_message());
                 }
             }
             Event::Error {
@@ -102,6 +117,11 @@ impl UpstreamTermination {
         }
     }
 
+    /// 上游拒答说明原文：流结束时原样返回给客户端，优先于 [`Self::failure`] 与空响应判定
+    pub(crate) fn refusal(&self) -> Option<&str> {
+        self.refusal.as_deref()
+    }
+
     /// 异常终止原因；None 表示可以正常收尾
     pub(crate) fn failure(&self) -> Option<String> {
         if let Some(reason) = &self.fatal {
@@ -136,6 +156,7 @@ mod tests {
     fn metadata(stop_reason: &str) -> Event {
         Event::Metadata(MetadataEvent {
             stop_reason: Some(stop_reason.to_string()),
+            ..Default::default()
         })
     }
 
@@ -212,6 +233,23 @@ mod tests {
         });
         assert_eq!(t.failure().as_deref(), Some("InternalServerError"));
         assert_eq!(t.throttle_message(), Some("ThrottlingException: rate"));
+    }
+
+    #[test]
+    fn test_content_filtered_records_refusal_explanation() {
+        let mut t = UpstreamTermination::default();
+        t.observe_event(&metadata("END_TURN"));
+        assert_eq!(t.refusal(), None);
+
+        let event = Event::Metadata(
+            serde_json::from_str(
+                r#"{"stopReason":"content_filtered","stopDetails":{"refusal":{"explanation":"restricted"}}}"#,
+            )
+            .unwrap(),
+        );
+        t.observe_event(&event);
+        assert_eq!(t.refusal(), Some("restricted"));
+        assert_eq!(t.failure(), None, "拒答单独返回，不算异常终止");
     }
 
     #[test]

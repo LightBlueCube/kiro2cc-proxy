@@ -40,12 +40,16 @@ impl MultiTokenManager {
     ///
     /// 与 [`Self::report_success`] 分开：后者在拿到 200 响应头时调用，那时还不知道响应体是否为空。
     /// 账号失败计数（[`Self::report_failure`]）同样在此清零：拿到 200 响应头不代表账号正常。
-    pub fn report_response_completed(&self, id: u64) {
+    /// `model` 为本次请求的模型，其连续拒答一并清零（MCP 等不涉及模型的调用传 None）。
+    pub fn report_response_completed(&self, id: u64, model: Option<&str>) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             entry.upstream_failures.end_streak();
             entry.failure_count = 0;
             entry.unreachable.reset();
+            if let Some(model) = model {
+                entry.model_refusals.remove(&model.to_ascii_lowercase());
+            }
             if entry.last_error.take().is_some() {
                 self.stats_dirty.store(true, Ordering::Relaxed);
             }
@@ -181,6 +185,36 @@ impl MultiTokenManager {
         entry.last_error = Some(error);
         drop(entries);
         self.save_stats_debounced();
+    }
+
+    /// 报告指定账号的某个模型被上游拒答（stopReason=content_filtered，`message` 为说明原文）
+    ///
+    /// 连续 3 次后只冷却该账号的该模型，时长与请求发送失败相同（见 `unreachable` 模块）；
+    /// 其它模型照常可用。模型未知时只记日志。
+    pub fn report_model_refused(&self, id: u64, model: Option<&str>, message: &str) {
+        let Some(model) = model else {
+            tracing::warn!("账号 #{} 被上游拒答（模型未知）: {}", id, message);
+            return;
+        };
+        let mut entries = self.entries.lock();
+        let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+
+        tracing::warn!("账号 #{} 的模型 {} 被上游拒答: {}", id, model, message);
+        let refusals = entry
+            .model_refusals
+            .entry(model.to_ascii_lowercase())
+            .or_default();
+        refusals.message = message.to_string();
+        if let Some(cooldown) = refusals.cooldown.record(Instant::now()) {
+            tracing::error!(
+                "账号 #{} 的模型 {} 连续被拒答，该模型冷却 {} 分钟",
+                id,
+                model,
+                cooldown.as_secs() / 60
+            );
+        }
     }
 
     /// 选号时 Token 刷新失败：按错误类型分派到 invalid_grant、网络错误或其它失败，并记下报错原文

@@ -60,6 +60,16 @@ export interface CredentialStatusItem {
     | 'profile_arn_missing'
   /** 本轮连续失败中最近一次账号报错（请求失败或 Token 刷新失败）；正常完成一次响应后清除 */
   lastError?: AccountError
+  /** 因连续拒答处于冷却期的模型（期间该模型的请求换用其它账号）；无限制时缺省 */
+  modelRestrictions?: ModelRestriction[]
+}
+
+export interface ModelRestriction {
+  /** 模型 ID（小写） */
+  model: string
+  remainingSecs: number
+  /** 最近一次拒答的上游说明原文 */
+  message: string
 }
 
 export interface AccountError {

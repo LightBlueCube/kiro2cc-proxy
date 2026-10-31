@@ -31,7 +31,7 @@ import {
 import { ACCOUNT_STATE_VISUAL, accountLabel, deriveAccountState, maskEmail } from '@/lib/account-state'
 import { localeTag } from '@/lib/locale'
 import { extractErrorMessage, getSubscriptionColor } from '@/lib/utils'
-import type { BalanceResponse, CredentialStatusItem } from '@/types/api'
+import type { BalanceResponse, CredentialStatusItem, ModelRestriction } from '@/types/api'
 
 /** RPM 高压阈值：设计稿把 12 染成 danger、1–3 用 accent，取 10 作分界 */
 const RPM_DANGER = 10
@@ -102,6 +102,20 @@ function stateTitle(credential: CredentialStatusItem, t: TFunction): string {
   return parts.join('\n')
 }
 
+/** 模型限制标签悬停提示：每个受限模型的剩余时长与上游拒答原文 */
+function restrictionsTitle(restrictions: ModelRestriction[], t: TFunction): string {
+  return [
+    t('credentials.modelRestrictedNote'),
+    ...restrictions.map(r =>
+      t('credentials.modelRestrictedItem', {
+        model: r.model,
+        minutes: Math.ceil(r.remainingSecs / 60),
+        message: r.message,
+      }),
+    ),
+  ].join('\n')
+}
+
 /** 绝对时间小字（设计稿 `今天 17:56` / `08-10 14:22`）：跨年退化为整日期，避免误读 */
 function formatAbsolute(date: Date, t: TFunction): string {
   const now = new Date()
@@ -154,6 +168,7 @@ export function AccountRow({
   const { t } = useTranslation()
   const state = deriveAccountState(credential, balance !== null)
   const visual = ACCOUNT_STATE_VISUAL[state]
+  const restrictions = credential.modelRestrictions ?? []
   const label = accountLabel(credential)
   const displayName = credential.nickname || t('credentials.accountFallbackName', { id: credential.id })
   // 首字符按码点取，避免 emoji / 代理对昵称被截半
@@ -281,6 +296,14 @@ export function AccountRow({
           <span aria-hidden="true" className={`size-[5px] flex-none rounded-full ${visual.pipClass}`} />
           {t(visual.labelKey)}
         </span>
+        {restrictions.length > 0 && (
+          <span
+            className="ml-1 inline-flex h-5 items-center whitespace-nowrap rounded-[6px] border border-warn-line bg-warn-soft px-[7px] text-[11px] font-semibold text-warn"
+            title={restrictionsTitle(restrictions, t)}
+          >
+            {t('credentials.modelRestricted', { count: restrictions.length })}
+          </span>
+        )}
       </td>
       {/* 套餐（设计稿 .plan）：外形取设计稿中性徽标，文字色沿用既有 getSubscriptionColor 分级 */}
       <td className={CELL}>
@@ -490,12 +513,14 @@ export function AccountRow({
                 {t('credentials.viewModels')}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              {/* 与旧卡片同条件：失败计数为 0 时不可重置 */}
+              {/* 无失败计数、无冷却、无模型限制时不可重置 */}
               <DropdownMenuItem
                 onSelect={handleReset}
                 disabled={
                   resetFailure.isPending ||
-                  (credential.failureCount === 0 && credential.unreachableCooldownSecs === undefined)
+                  (credential.failureCount === 0 &&
+                    credential.unreachableCooldownSecs === undefined &&
+                    restrictions.length === 0)
                 }
               >
                 <RefreshCw className="size-[13px]" strokeWidth={1.7} />
