@@ -61,8 +61,43 @@ function healthTitle(credential: CredentialStatusItem, t: TFunction): string {
     }),
   ]
   if (credential.healthStatus === 'degraded') parts.push(t('credentials.healthDegradedNote'))
-  if (credential.cooldownRemainingSecs !== undefined) {
+  if (credential.unreachableCooldownSecs !== undefined) {
+    parts.push(
+      t('credentials.unreachableCooldown', {
+        minutes: Math.ceil(credential.unreachableCooldownSecs / 60),
+      }),
+    )
+  } else if (credential.cooldownRemainingSecs !== undefined) {
     parts.push(t('credentials.healthCooldown', { secs: credential.cooldownRemainingSecs }))
+  }
+  return parts.join('\n')
+}
+
+type DisabledReason = NonNullable<CredentialStatusItem['disabledReason']>
+
+const DISABLED_REASON_KEYS: Record<DisabledReason, string> = {
+  manual: 'credentials.disabledReasonManual',
+  too_many_failures: 'credentials.disabledReasonTooManyFailures',
+  quota_exceeded: 'credentials.disabledReasonQuotaExceeded',
+  invalid_refresh_token: 'credentials.disabledReasonInvalidRefreshToken',
+  too_many_refresh_failures: 'credentials.disabledReasonTooManyRefreshFailures',
+  profile_arn_missing: 'credentials.disabledReasonProfileArnMissing',
+}
+
+/** 状态标签悬停提示：禁用原因或健康度判定依据，有账号报错时附上原文 */
+function stateTitle(credential: CredentialStatusItem, t: TFunction): string {
+  const parts: string[] = []
+  if (!credential.disabled) {
+    parts.push(healthTitle(credential, t))
+  } else if (credential.disabledReason) {
+    parts.push(t(DISABLED_REASON_KEYS[credential.disabledReason]))
+  }
+
+  const error = credential.lastError
+  if (error) {
+    const detail =
+      error.statusCode === undefined ? error.message : `${error.statusCode} ${error.message}`
+    parts.push(t('credentials.lastError', { time: formatLastUsed(error.at, t), detail }))
   }
   return parts.join('\n')
 }
@@ -241,7 +276,7 @@ export function AccountRow({
         {/* .tag：20px 高 + 5px pip（pip 的 2.5px 外发光已在 ACCOUNT_STATE_VISUAL 里定义） */}
         <span
           className={`inline-flex h-5 items-center gap-[5px] whitespace-nowrap rounded-[6px] border px-[7px] text-[11px] font-semibold ${visual.tagClass}`}
-          title={credential.disabled ? undefined : healthTitle(credential, t)}
+          title={stateTitle(credential, t) || undefined}
         >
           <span aria-hidden="true" className={`size-[5px] flex-none rounded-full ${visual.pipClass}`} />
           {t(visual.labelKey)}
@@ -458,7 +493,10 @@ export function AccountRow({
               {/* 与旧卡片同条件：失败计数为 0 时不可重置 */}
               <DropdownMenuItem
                 onSelect={handleReset}
-                disabled={resetFailure.isPending || credential.failureCount === 0}
+                disabled={
+                  resetFailure.isPending ||
+                  (credential.failureCount === 0 && credential.unreachableCooldownSecs === undefined)
+                }
               >
                 <RefreshCw className="size-[13px]" strokeWidth={1.7} />
                 {t('credentials.resetFailureCount')}

@@ -81,6 +81,9 @@ pub struct CredentialStatusItem {
     /// 禁用原因（None = 未禁用；QuotaExceeded 时前端显示「额度已用尽」而非通用「已禁用」）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<crate::kiro::token_manager::DisabledReason>,
+    /// 本轮连续失败中最近一次账号报错（状态码、原文、时间）；None = 无
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<crate::kiro::token_manager::AccountError>,
 }
 
 // ============ 操作请求 ============
@@ -204,6 +207,7 @@ mod tests {
             health_detail: Default::default(),
             throttle_count: 0,
             disabled_reason: None,
+            last_error: None,
         }
     }
 

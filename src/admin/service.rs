@@ -164,6 +164,7 @@ impl AdminService {
                     .map(|s| s.count_within(entry.id, since) as u64)
                     .unwrap_or(0),
                 disabled_reason: entry.disabled_reason,
+                last_error: entry.last_error,
             })
             .collect();
 

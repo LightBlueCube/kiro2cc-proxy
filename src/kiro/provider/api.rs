@@ -7,6 +7,7 @@ use tokio::time::{Instant, sleep};
 use super::core::{KiroProvider, MAX_RETRIES_PER_CREDENTIAL, MAX_TOTAL_RETRIES};
 use super::errors::LOCAL_LIMIT_QUEUE;
 use super::retry::push_unique;
+use crate::kiro::token_manager::AccountError;
 
 /// 上游成功响应及其来历
 pub struct ApiResponse {
@@ -242,13 +243,17 @@ impl KiroProvider {
             {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let e = anyhow::Error::from(e);
                     tracing::warn!(
-                        "MCP 请求发送失败（尝试 {}/{}）: {}",
+                        "MCP 请求发送失败（尝试 {}/{}）: {:#}",
                         attempt + 1,
                         max_retries,
                         e
                     );
-                    last_error = Some(e.into());
+                    self.token_manager
+                        .report_unreachable(ctx.id, AccountError::new(None, &format!("{e:#}")));
+                    push_unique(&mut throttled_in_request, ctx.id);
+                    last_error = Some(e);
                     backoff = (attempt + 1 < max_retries).then(|| Self::retry_delay(attempt));
                     continue;
                 }
@@ -314,7 +319,10 @@ impl KiroProvider {
 
             // 401/403 账号问题
             if matches!(status.as_u16(), 401 | 403) {
-                let has_available = self.token_manager.report_failure(ctx.id);
+                let has_available = self
+                    .token_manager
+                    .report_failure(ctx.id, AccountError::new(Some(status.as_u16()), &body));
+                push_unique(&mut throttled_in_request, ctx.id);
                 if let Some(ref store) = self.failure_log_store {
                     store.record(ctx.id, "mcp", status.as_u16(), &body);
                 }

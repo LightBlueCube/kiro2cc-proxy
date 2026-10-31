@@ -15,6 +15,7 @@ pub(crate) mod tests {
     use crate::kiro::token_manager::tests::ext_idp::tests::{
         TempDirGuard, spawn_single_response_server,
     };
+    use crate::kiro::token_manager::tests::multi::tests::test_error;
     use crate::kiro::token_manager::tests::sticky::tests::make_valid_cred;
     use crate::model::config::Config;
     use chrono::{Duration, Utc};
@@ -184,13 +185,13 @@ pub(crate) mod tests {
 
         manager.report_quota_exhausted(1);
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_failure(2);
+            manager.report_failure(2, test_error());
         }
         manager.set_disabled(3, true).await.unwrap();
 
         let msg = manager.describe_unavailable(None, &[]);
         assert!(msg.contains("1 个额度用尽"), "实际: {}", msg);
-        assert!(msg.contains("1 个连续认证失败"), "实际: {}", msg);
+        assert!(msg.contains("1 个连续 401/403"), "实际: {}", msg);
         assert!(msg.contains("1 个手动禁用"), "实际: {}", msg);
         // 混合原因时不应带 402 标记（只有全部因额度耗尽才可判定不可重试）
         assert!(
@@ -432,7 +433,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_failure(1);
+            manager.report_failure(1, test_error());
         }
         manager.persist_credentials().unwrap();
 
@@ -452,6 +453,11 @@ pub(crate) mod tests {
                 entries[0].disabled_reason,
                 Some(DisabledReason::TooManyFailures),
                 "重启后禁用原因退化为 Manual，账号将被永久钉死"
+            );
+            assert_eq!(
+                entries[0].last_error.as_ref().map(|e| e.message.as_str()),
+                Some("test failure"),
+                "报错原文随统计落盘，重启后面板仍能看到"
             );
         }
     }
@@ -479,7 +485,7 @@ pub(crate) mod tests {
             true,
         )
         .unwrap();
-        manager.report_refresh_token_invalid(1);
+        manager.report_refresh_token_invalid(1, test_error());
         manager.persist_credentials().unwrap();
 
         let persisted: Vec<KiroCredentials> =
@@ -525,7 +531,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_refresh_failure(1);
+            manager.report_refresh_failure(1, test_error());
         }
         manager.persist_credentials().unwrap();
 

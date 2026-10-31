@@ -3,7 +3,7 @@
 #[cfg(test)]
 pub(crate) mod tests {
 
-    use super::super::super::entry::DisabledReason;
+    use super::super::super::entry::{DisabledReason, HealthStatus};
 
     use super::super::super::types::{
         MAX_FAILURES_PER_CREDENTIAL, MultiTokenManager, QUOTA_EXHAUSTED_ALL_MARKER,
@@ -16,6 +16,10 @@ pub(crate) mod tests {
     use crate::model::config::Config;
     use chrono::{Duration, Utc};
     use std::sync::Arc;
+
+    pub(crate) fn test_error() -> crate::kiro::token_manager::AccountError {
+        crate::kiro::token_manager::AccountError::new(Some(403), "test failure")
+    }
 
     #[test]
     fn test_multi_token_manager_new() {
@@ -71,38 +75,58 @@ pub(crate) mod tests {
 
         // 账号会自动分配 ID（从 1 开始）
         // 前两次失败不会禁用（使用 ID 1）
-        assert!(manager.report_failure(1));
-        assert!(manager.report_failure(1));
+        assert!(manager.report_failure(1, test_error()));
+        assert!(manager.report_failure(1, test_error()));
         assert_eq!(manager.available_count(), 2);
 
         // 第三次失败会禁用第一个账号
-        assert!(manager.report_failure(1));
+        assert!(manager.report_failure(1, test_error()));
         assert_eq!(manager.available_count(), 1);
 
         // 继续失败第二个账号（使用 ID 2）
-        assert!(manager.report_failure(2));
-        assert!(manager.report_failure(2));
-        assert!(!manager.report_failure(2)); // 所有账号都禁用了
+        assert!(manager.report_failure(2, test_error()));
+        assert!(manager.report_failure(2, test_error()));
+        assert!(!manager.report_failure(2, test_error())); // 所有账号都禁用了
         assert_eq!(manager.available_count(), 0);
     }
 
     #[test]
-    fn test_multi_token_manager_report_success() {
+    fn test_header_success_does_not_reset_failures() {
         let config = Config::default();
         let cred = KiroCredentials::default();
 
         let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
 
-        // 失败两次（使用 ID 1）
-        manager.report_failure(1);
-        manager.report_failure(1);
+        manager.report_failure(1, test_error());
+        manager.report_failure(1, test_error());
 
-        // 成功后重置计数（使用 ID 1）
+        // 只拿到 2xx 响应头不清零：第 3 次失败仍禁用
         manager.report_success(1);
+        manager.report_failure(1, test_error());
+        assert_eq!(manager.available_count(), 0);
+    }
 
-        // 再失败两次不会禁用
-        manager.report_failure(1);
-        manager.report_failure(1);
+    #[test]
+    fn test_completed_response_clears_failure_count_and_last_error() {
+        let config = Config::default();
+        let cred = KiroCredentials::default();
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+
+        manager.report_failure(1, test_error());
+        manager.report_failure(1, test_error());
+        let snapshot = manager.snapshot();
+        let last_error = snapshot.entries[0].last_error.as_ref().unwrap();
+        assert_eq!(last_error.status_code, Some(403));
+        assert_eq!(last_error.message, "test failure");
+
+        manager.report_response_completed(1);
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.entries[0].failure_count, 0);
+        assert!(snapshot.entries[0].last_error.is_none());
+
+        // 清零后再失败两次不会禁用
+        manager.report_failure(1, test_error());
+        manager.report_failure(1, test_error());
         assert_eq!(manager.available_count(), 1);
     }
 
@@ -154,69 +178,74 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_multi_token_manager_acquire_context_auto_recovers_all_disabled() {
+    async fn test_acquire_context_never_reenables_when_all_disabled() {
+        // 所有账号都被自动禁用时不自动启用任何账号，只能手动恢复
         let config = Config::default();
-        let mut cred1 = KiroCredentials::default();
-        cred1.access_token = Some("t1".to_string());
-        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
-        let mut cred2 = KiroCredentials::default();
-        cred2.access_token = Some("t2".to_string());
-        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let manager = MultiTokenManager::new(
+            config,
+            vec![make_valid_cred("t1"), make_valid_cred("t2")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
-        let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
-
-        // 账号会自动分配 ID（从 1 开始）
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_failure(1);
+            manager.report_failure(1, test_error());
+            manager.report_refresh_failure(2, test_error());
         }
-        for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_failure(2);
-        }
-
         assert_eq!(manager.available_count(), 0);
 
-        // 应触发自愈：重置失败计数并重新启用，避免必须重启进程
-        let ctx = manager.acquire_context(None).await.unwrap();
-        assert!(ctx.token == "t1" || ctx.token == "t2");
-        assert_eq!(manager.available_count(), 2);
+        assert!(manager.acquire_context(None).await.is_err());
+        assert_eq!(manager.available_count(), 0);
+        let entries = manager.entries.lock();
+        assert_eq!(
+            entries[0].disabled_reason,
+            Some(DisabledReason::TooManyFailures)
+        );
+        assert_eq!(
+            entries[1].disabled_reason,
+            Some(DisabledReason::TooManyRefreshFailures)
+        );
     }
 
     #[tokio::test]
-    async fn test_acquire_context_self_heal_excludes_invalid_refresh_token() {
-        // TooManyRefreshFailures 属于瞬态故障，应参与全灭自愈；InvalidRefreshToken 是
-        // 服务端确认的永久性失效，重置重试只会立即再次失败，因此不参与自愈（覆盖 T12）
+    async fn test_unreachable_cools_down_instead_of_disabling() {
+        // 请求发送连续失败 3 次：不禁用，冷却期内选号排除，正常完成后清零
         let config = Config::default();
-        let cred1 = make_valid_cred("t1");
-        let cred2 = make_valid_cred("t2");
-        let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+        let manager = MultiTokenManager::new(
+            config,
+            vec![make_valid_cred("t1"), make_valid_cred("t2")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_refresh_failure(1);
+            manager.report_unreachable(1, test_error());
         }
-        manager.report_refresh_token_invalid(2);
-        assert_eq!(manager.available_count(), 0);
+        assert_eq!(manager.available_count(), 2, "只冷却，不禁用");
 
-        // 触发自愈：#1（TooManyRefreshFailures）应被重置，#2（InvalidRefreshToken）应保持禁用
-        let ctx = manager.acquire_context(None).await.unwrap();
-        assert_eq!(ctx.id, 1);
-        assert_eq!(manager.available_count(), 1);
-
-        let entries = manager.entries.lock();
-        let entry1 = entries.iter().find(|e| e.id == 1).unwrap();
-        assert!(!entry1.disabled);
-        assert_eq!(entry1.disabled_reason, None);
-        assert_eq!(entry1.refresh_failure_count, 0);
-
-        let entry2 = entries.iter().find(|e| e.id == 2).unwrap();
+        let snapshot = manager.snapshot();
+        let entry = &snapshot.entries[0];
+        assert_eq!(entry.health_status, HealthStatus::Unhealthy);
+        let cooldown = entry.health_detail.unreachable_cooldown_secs.unwrap();
         assert!(
-            entry2.disabled,
-            "InvalidRefreshToken 不应参与全灭自愈，需人工更换凭证"
+            (10 * 60 - 5..=10 * 60).contains(&cooldown),
+            "首轮冷却 10 分钟，实际 {cooldown}s"
         );
+        assert!(entry.last_error.is_some());
+        for _ in 0..4 {
+            assert_eq!(manager.acquire_context(None).await.unwrap().id, 2);
+        }
+
+        manager.report_response_completed(1);
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.entries[0].health_status, HealthStatus::Healthy);
         assert_eq!(
-            entry2.disabled_reason,
-            Some(DisabledReason::InvalidRefreshToken)
+            snapshot.entries[0].health_detail.unreachable_cooldown_secs,
+            None
         );
     }
 
@@ -238,8 +267,8 @@ pub(crate) mod tests {
         let config = Config::default();
         let manager = MultiTokenManager::new(config, vec![cred1], None, None, false).unwrap();
 
-        manager.report_refresh_failure(1);
-        manager.report_refresh_failure(1);
+        manager.report_refresh_failure(1, test_error());
+        manager.report_refresh_failure(1, test_error());
         {
             let entries = manager.entries.lock();
             assert_eq!(entries[0].refresh_failure_count, 2);
@@ -264,7 +293,7 @@ pub(crate) mod tests {
         let manager = MultiTokenManager::new(config, vec![cred1], None, None, false).unwrap();
 
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_refresh_failure(1);
+            manager.report_refresh_failure(1, test_error());
         }
         assert_eq!(manager.available_count(), 0);
 
@@ -285,7 +314,7 @@ pub(crate) mod tests {
         let manager = MultiTokenManager::new(config, vec![cred1], None, None, false).unwrap();
 
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
-            manager.report_refresh_failure(1);
+            manager.report_refresh_failure(1, test_error());
         }
         assert_eq!(manager.available_count(), 0);
 
@@ -413,7 +442,7 @@ pub(crate) mod tests {
 
         assert_eq!(manager.available_count(), 2);
         // 单次调用即立即禁用，不像 report_refresh_failure 需要累计到阈值
-        assert!(manager.report_refresh_token_invalid(1));
+        assert!(manager.report_refresh_token_invalid(1, test_error()));
         assert_eq!(manager.available_count(), 1);
 
         let entries = manager.entries.lock();
@@ -439,12 +468,12 @@ pub(crate) mod tests {
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
         // 未达阈值前保持可用
-        assert!(manager.report_refresh_failure(1));
-        assert!(manager.report_refresh_failure(1));
+        assert!(manager.report_refresh_failure(1, test_error()));
+        assert!(manager.report_refresh_failure(1, test_error()));
         assert_eq!(manager.available_count(), 2);
 
         // 第 3 次达到 MAX_FAILURES_PER_CREDENTIAL 阈值，禁用并设置正确的 disabled_reason
-        assert!(manager.report_refresh_failure(1));
+        assert!(manager.report_refresh_failure(1, test_error()));
         assert_eq!(manager.available_count(), 1);
 
         let entries = manager.entries.lock();
@@ -488,7 +517,7 @@ pub(crate) mod tests {
     async fn test_report_failure_preserves_quota_disabled_reason() {
         // 回归：并发下账号已被 report_quota_exhausted 禁用后，
         // 再来一个普通失败（report_failure）不得覆盖 disabled_reason，
-        // 否则会被自愈逻辑（只重置 TooManyFailures）错误重新启用。
+        // 否则跨月后不会自动恢复，面板也会显示错误的禁用原因。
         let config = Config::default();
         let mut cred1 = KiroCredentials::default();
         cred1.access_token = Some("t1".to_string());
@@ -503,7 +532,7 @@ pub(crate) mod tests {
         // 账号 #1 额度用尽被禁用
         manager.report_quota_exhausted(1);
         // 模拟在途的另一请求随后对同一账号报告普通失败
-        manager.report_failure(1);
+        manager.report_failure(1, test_error());
 
         // disabled_reason 必须仍是 QuotaExceeded，不能被改写为 TooManyFailures
         {
@@ -517,7 +546,7 @@ pub(crate) mod tests {
             );
         }
 
-        // 仅 #2 可用，acquire 不应自愈被额度禁用的 #1
+        // 仅 #2 可用，acquire 不应重新启用被额度禁用的 #1
         let ctx = manager.acquire_context(None).await.unwrap();
         assert_eq!(ctx.token, "t2", "额度耗尽账号 #1 不应被重新启用");
         assert_eq!(manager.available_count(), 1);

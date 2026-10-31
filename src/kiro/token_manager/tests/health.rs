@@ -4,6 +4,7 @@
 mod tests {
     use super::super::super::entry::HealthStatus;
     use super::super::super::types::MultiTokenManager;
+    use super::super::multi::tests::test_error;
     use super::super::sticky::tests::make_valid_cred;
     use crate::model::config::Config;
     use std::time::{Duration, Instant};
@@ -137,9 +138,9 @@ mod tests {
     #[test]
     fn auth_failures_warn_then_degrade() {
         let m = manager(&[0, 0]);
-        m.report_failure(1);
+        m.report_failure(1, test_error());
         assert_eq!(health(&m, 1), HealthStatus::Warning);
-        m.report_failure(1);
+        m.report_failure(1, test_error());
         assert_eq!(health(&m, 1), HealthStatus::Degraded);
     }
 

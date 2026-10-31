@@ -1,8 +1,6 @@
 //! MultiTokenManager 核心：构造初始化、配置读取、每凭据 RPM 上限等基础能力。
 use super::super::entry::{CredentialEntry, DisabledReason, HealthStatus};
-use super::super::refresh::{
-    RefreshTokenInvalidError, is_token_expired, is_token_expiring_soon, refresh_token,
-};
+use super::super::refresh::{is_token_expired, is_token_expiring_soon, refresh_token};
 use super::super::types::{
     CallContext, MultiTokenManager, STICKY_CACHE_TTL, STICKY_THROTTLE_EVICT_THRESHOLD,
     StickyCacheEntry, TOKEN_REFRESH_COOLDOWN,
@@ -85,7 +83,7 @@ impl MultiTokenManager {
                     disabled: cred.disabled, // 从配置文件读取 disabled 状态
                     // 暂定 Manual；load_stats() 会用持久化的真实原因覆盖
                     // （额度耗尽/连续失败也会被 persist_credentials 写成 disabled: true，
-                    //   若在此直接认定 Manual，自愈逻辑将永远跳过它们）
+                    //   若在此直接认定 Manual，额度耗尽账号将无法跨月自动恢复）
                     disabled_reason: if cred.disabled {
                         Some(DisabledReason::Manual)
                     } else {
@@ -95,10 +93,12 @@ impl MultiTokenManager {
                     last_used_at: None,
                     throttle_count: 0,
                     upstream_failures: UpstreamFailures::new(Instant::now()),
+                    unreachable: Default::default(),
                     last_throttled_wall: None,
                     last_refreshed_at: None,
                     rotation_bias: 0,
                     quota_exhausted_at: None,
+                    last_error: None,
                 }
             })
             .collect();
@@ -424,43 +424,8 @@ impl MultiTokenManager {
                     hit
                 } else {
                     // 当前账号不可用或 balanced 模式，根据负载均衡策略选择
-                    let mut best = self.select_next_credential(model, &[]);
-
-                    // 没有可用账号：如果是"自动禁用导致全灭"，做一次类似重启的自愈
-                    if best.is_none() {
-                        let mut entries = self.entries.lock();
-                        if entries.iter().any(|e| {
-                            e.disabled
-                                && matches!(
-                                    e.disabled_reason,
-                                    Some(DisabledReason::TooManyFailures)
-                                        | Some(DisabledReason::TooManyRefreshFailures)
-                                )
-                        }) {
-                            tracing::warn!(
-                                "所有账号均已被自动禁用，执行自愈：重置失败计数并重新启用（等价于重启）"
-                            );
-                            for e in entries.iter_mut() {
-                                match e.disabled_reason {
-                                    Some(DisabledReason::TooManyFailures) => {
-                                        e.disabled = false;
-                                        e.disabled_reason = None;
-                                        e.failure_count = 0;
-                                    }
-                                    Some(DisabledReason::TooManyRefreshFailures) => {
-                                        e.disabled = false;
-                                        e.disabled_reason = None;
-                                        e.refresh_failure_count = 0;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            drop(entries);
-                            // 落盘清除的禁用原因，否则重启后 load_stats 会让禁用态复活
-                            self.save_stats();
-                            best = self.select_next_credential(model, &[]);
-                        }
-                    }
+                    // 没有可用账号时不自动启用任何被禁用的账号，只能手动恢复
+                    let best = self.select_next_credential(model, &[]);
 
                     if let Some((new_id, new_creds)) = best {
                         // 更新 current_id
@@ -483,11 +448,7 @@ impl MultiTokenManager {
                 Err(e) => {
                     tracing::warn!("账号 #{} Token 刷新失败，尝试下一个账号: {}", id, e);
 
-                    if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
-                        self.report_refresh_token_invalid(id);
-                    } else {
-                        self.report_refresh_failure(id);
-                    }
+                    self.report_refresh_error(id, &e);
 
                     // 切换到下一个优先级的账号
                     self.switch_to_next_by_priority();
@@ -541,11 +502,7 @@ impl MultiTokenManager {
                 Err(e) => {
                     tracing::warn!("绑定账号 #{} Token 刷新失败，尝试下一个: {}", id, e);
 
-                    if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
-                        self.report_refresh_token_invalid(id);
-                    } else {
-                        self.report_refresh_failure(id);
-                    }
+                    self.report_refresh_error(id, &e);
 
                     tried_ids.push(id);
                 }
@@ -590,7 +547,7 @@ impl MultiTokenManager {
     /// 同一会话优先路由到缓存中的同一账号，保证 Kiro prompt cache 命中率。
     /// 缓存条目 TTL 60 分钟（每次命中续期），不健康时自动驱逐并重选。
     ///
-    /// `avoid_ids` 是本次请求内已经限流过的账号：绑定命中这些账号时跳过复用改选其它
+    /// `avoid_ids` 是本次请求内已经限流或账号失败过的账号：绑定命中这些账号时跳过复用改选其它
     /// 账号，但**不删除绑定关系**，下一次请求仍可回到原账号继续命中 prompt cache。
     pub async fn acquire_context_sticky(
         &self,
@@ -601,7 +558,12 @@ impl MultiTokenManager {
     ) -> anyhow::Result<CallContext> {
         let Some(cid) = continuation_id else {
             // 新会话无 continuation_id 是正常流程，不计入 miss，避免稀释真实掉线率
-            return self.acquire_context_filtered(model, allowed_ids).await;
+            if avoid_ids.is_empty() {
+                return self.acquire_context_filtered(model, allowed_ids).await;
+            }
+            return self
+                .acquire_context_avoiding(model, allowed_ids, avoid_ids)
+                .await;
         };
 
         // 绑定是否指向本次请求内已限流的账号：决定后续是否保留绑定
@@ -669,11 +631,7 @@ impl MultiTokenManager {
                         e
                     );
 
-                    if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
-                        self.report_refresh_token_invalid(id);
-                    } else {
-                        self.report_refresh_failure(id);
-                    }
+                    self.report_refresh_error(id, &e);
 
                     self.sticky_cache.lock().remove(cid);
                     self.sticky_misses.fetch_add(1, Ordering::Relaxed);

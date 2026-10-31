@@ -1,5 +1,6 @@
 //! 凭据状态上报：限流（throttled）、成功（success）等运行时状态回报与轮转联动。
-use super::super::entry::{CredentialEntry, DisabledReason};
+use super::super::entry::{AccountError, CredentialEntry, DisabledReason};
+use super::super::refresh::RefreshTokenInvalidError;
 use super::super::types::{
     MAX_FAILURES_PER_CREDENTIAL, MultiTokenManager, QUOTA_EXHAUSTED_ALL_MARKER,
 };
@@ -38,10 +39,16 @@ impl MultiTokenManager {
     /// 报告指定账号完整返回了一次正常响应：中断健康度的连续失败计数
     ///
     /// 与 [`Self::report_success`] 分开：后者在拿到 200 响应头时调用，那时还不知道响应体是否为空。
+    /// 账号失败计数（[`Self::report_failure`]）同样在此清零：拿到 200 响应头不代表账号正常。
     pub fn report_response_completed(&self, id: u64) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             entry.upstream_failures.end_streak();
+            entry.failure_count = 0;
+            entry.unreachable.reset();
+            if entry.last_error.take().is_some() {
+                self.stats_dirty.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -57,9 +64,9 @@ impl MultiTokenManager {
         }
     }
 
-    /// 报告指定账号 API 调用成功
+    /// 报告指定账号 API 调用成功（拿到 2xx 响应头）
     ///
-    /// 重置该账号的失败计数
+    /// 不清零账号失败计数：响应体尚未完整返回，见 [`Self::report_response_completed`]
     ///
     /// # Arguments
     /// * `id` - 账号 ID（来自 CallContext）
@@ -67,7 +74,6 @@ impl MultiTokenManager {
         {
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                entry.failure_count = 0;
                 entry.success_count += 1;
                 entry.rotation_bias = 0;
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
@@ -81,14 +87,15 @@ impl MultiTokenManager {
         self.save_stats_debounced();
     }
 
-    /// 报告指定账号 API 调用失败
+    /// 报告指定账号返回 401/403（账号本身的问题）
     ///
-    /// 增加失败计数，达到阈值时禁用账号并切换到优先级最高的可用账号
+    /// 增加失败计数并记下报错原文，连续达到阈值时禁用账号并切换到优先级最高的可用账号
     /// 返回是否还有可用账号可以重试
     ///
     /// # Arguments
     /// * `id` - 账号 ID（来自 CallContext）
-    pub fn report_failure(&self, id: u64) -> bool {
+    /// * `error` - 本次报错（面板展示）
+    pub fn report_failure(&self, id: u64, error: AccountError) -> bool {
         let result = {
             let mut entries = self.entries.lock();
             let mut current_id = self.current_id.lock();
@@ -109,11 +116,13 @@ impl MultiTokenManager {
             let failure_count = entry.failure_count;
 
             tracing::warn!(
-                "账号 #{} API 调用失败（{}/{}）",
+                "账号 #{} API 调用失败（{}/{}）: {}",
                 id,
                 failure_count,
-                MAX_FAILURES_PER_CREDENTIAL
+                MAX_FAILURES_PER_CREDENTIAL,
+                error.message
             );
+            entry.last_error = Some(error);
 
             if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
                 entry.disabled = true;
@@ -152,12 +161,45 @@ impl MultiTokenManager {
         result
     }
 
+    /// 报告指定账号请求发送失败（代理错误、连接失败、超时）：可能自行恢复，只冷却不禁用
+    ///
+    /// 连续 3 次进入冷却，时长逐轮翻倍（见 `unreachable` 模块）
+    pub fn report_unreachable(&self, id: u64, error: AccountError) {
+        let mut entries = self.entries.lock();
+        let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+
+        tracing::warn!("账号 #{} 请求发送失败: {}", id, error.message);
+        if let Some(cooldown) = entry.unreachable.record(Instant::now()) {
+            tracing::error!(
+                "账号 #{} 连续请求发送失败，冷却 {} 分钟",
+                id,
+                cooldown.as_secs() / 60
+            );
+        }
+        entry.last_error = Some(error);
+        drop(entries);
+        self.save_stats_debounced();
+    }
+
+    /// 选号时 Token 刷新失败：按错误类型分派到 invalid_grant、网络错误或其它失败，并记下报错原文
+    pub(crate) fn report_refresh_error(&self, id: u64, error: &anyhow::Error) {
+        let account_error = AccountError::new(None, &format!("Token 刷新失败: {error:#}"));
+        if error.downcast_ref::<RefreshTokenInvalidError>().is_some() {
+            self.report_refresh_token_invalid(id, account_error);
+        } else if is_network_error(error) {
+            self.report_unreachable(id, account_error);
+        } else {
+            self.report_refresh_failure(id, account_error);
+        }
+    }
+
     /// 报告指定账号 refreshToken 已被服务端撤销（invalid_grant）
     ///
-    /// 立即禁用该账号，不计入 `refresh_failure_count`（永久性失效，需人工更换凭证，
-    /// 与瞬态刷新失败区分，因此不参与全灭自愈）
+    /// 立即禁用该账号，不计入 `refresh_failure_count`（永久性失效，需人工更换凭证）
     /// 返回是否还有可用账号
-    pub fn report_refresh_token_invalid(&self, id: u64) -> bool {
+    pub fn report_refresh_token_invalid(&self, id: u64, error: AccountError) -> bool {
         let result = {
             let mut entries = self.entries.lock();
 
@@ -172,6 +214,7 @@ impl MultiTokenManager {
 
             entry.disabled = true;
             entry.disabled_reason = Some(DisabledReason::InvalidRefreshToken);
+            entry.last_error = Some(error);
 
             tracing::error!(
                 "账号 #{} 的 refreshToken 已被服务端撤销（invalid_grant），已被禁用，需人工更换凭证",
@@ -190,7 +233,7 @@ impl MultiTokenManager {
     /// 增加 `refresh_failure_count`，达到 `MAX_FAILURES_PER_CREDENTIAL` 阈值后禁用账号
     /// （`disabled_reason = TooManyRefreshFailures`）
     /// 返回是否还有可用账号
-    pub fn report_refresh_failure(&self, id: u64) -> bool {
+    pub fn report_refresh_failure(&self, id: u64, error: AccountError) -> bool {
         let result = {
             let mut entries = self.entries.lock();
 
@@ -205,6 +248,7 @@ impl MultiTokenManager {
 
             entry.refresh_failure_count += 1;
             let refresh_failure_count = entry.refresh_failure_count;
+            entry.last_error = Some(error);
 
             tracing::warn!(
                 "账号 #{} Token 刷新失败（{}/{}）",
@@ -477,7 +521,7 @@ impl MultiTokenManager {
             parts.push(format!("{} 个额度用尽", quota));
         }
         if failures > 0 {
-            parts.push(format!("{} 个连续认证失败", failures));
+            parts.push(format!("{} 个连续 401/403", failures));
         }
         if profile_arn_missing > 0 {
             parts.push(format!("{} 个缺少 profileArn", profile_arn_missing));
@@ -504,4 +548,11 @@ impl MultiTokenManager {
             )
         }
     }
+}
+
+/// 没拿到 HTTP 响应的失败（连接失败、超时、发送中断），区别于上游返回的错误状态与解码失败
+fn is_network_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<reqwest::Error>()
+        .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
 }

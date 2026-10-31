@@ -8,6 +8,7 @@ export interface AccountPanelFootProps {
   selectedCount: number
   onBatchVerify: () => void
   onBatchRestore: () => void
+  onBatchDisable: () => void
   onBatchDelete: () => void
   onDeselectAll: () => void
   /** 当前筛选结果总数（分页依据），筛选生效时小于账号总量 */
@@ -25,6 +26,7 @@ export function AccountPanelFoot({
   selectedCount,
   onBatchVerify,
   onBatchRestore,
+  onBatchDisable,
   onBatchDelete,
   onDeselectAll,
   totalCount,
@@ -46,6 +48,9 @@ export function AccountPanelFoot({
           </button>
           <button type="button" className={FOOT_BTN} onClick={onBatchRestore}>
             {t('dashboard.batchRestore')}
+          </button>
+          <button type="button" className={FOOT_BTN} onClick={onBatchDisable}>
+            {t('dashboard.batchDisable')}
           </button>
           <button
             type="button"

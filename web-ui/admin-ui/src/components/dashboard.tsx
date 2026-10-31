@@ -16,7 +16,7 @@ import { FailureLogPage } from '@/components/failure-log-page'
 import { SettingsPanel } from '@/components/settings-panel'
 import { LogViewerPage } from '@/components/log-viewer-page'
 import { DocsPage } from '@/components/docs-page'
-import { useCredentials, useApiKeys, useDeleteCredential, useResetFailure, useRpm, useDailyUsage, useServerInfo } from '@/hooks/use-credentials'
+import { useCredentials, useApiKeys, useDeleteCredential, useResetFailure, useSetDisabled, useRpm, useDailyUsage, useServerInfo } from '@/hooks/use-credentials'
 import { useTheme } from '@/hooks/use-theme'
 import type { CustomRange } from '@/components/daily-shared'
 import { DailyStatsPage, type RangeKey } from '@/components/daily-stats-page'
@@ -107,7 +107,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data: apiKeys } = useApiKeys()
   const { data: rpmData } = useRpm()
   const { mutate: deleteCredential } = useDeleteCredential()
-  const { mutate: resetFailure } = useResetFailure()
+  const { mutateAsync: resetFailure } = useResetFailure()
+  const { mutateAsync: setDisabled } = useSetDisabled()
   const { data: dailyUsageData } = useDailyUsage()
   // 余额拉取逻辑群（缓存清理 / 首次拉取 / 返回刷新 / 切 tab 刷新 / 新增账号拉取 / 积分重算）
   const {
@@ -403,51 +404,64 @@ export function Dashboard({ onLogout }: DashboardProps) {
     deselectAll()
   }
 
-  // 批量恢复异常
-  const handleBatchResetFailure = async () => {
-    if (selectedIds.size === 0) {
-      toast.error(t('dashboard.toastSelectToRestore'))
-      return
-    }
-
-    const failedIds = Array.from(selectedIds).filter(id => {
-      const cred = data?.credentials.find(c => c.id === id)
-      return cred && cred.failureCount > 0
-    })
-
-    if (failedIds.length === 0) {
-      toast.error(t('dashboard.toastNoFailedSelected'))
-      return
-    }
-
-    let successCount = 0
-    let failCount = 0
-
-    for (const id of failedIds) {
+  /** 逐个执行批量操作（避免瞬时并发），汇总成功数与首个失败原因 */
+  const runBatch = async (ids: number[], op: (id: number) => Promise<unknown>) => {
+    let success = 0
+    const errors: string[] = []
+    for (const id of ids) {
       try {
-        await new Promise<void>((resolve, reject) => {
-          resetFailure(id, {
-            onSuccess: () => {
-              successCount++
-              resolve()
-            },
-            onError: (err) => {
-              failCount++
-              reject(err)
-            }
-          })
-        })
+        await op(id)
+        success++
       } catch (error) {
-        // 错误已在 onError 中处理
+        errors.push(`#${id} ${extractErrorMessage(error)}`)
       }
     }
+    return { success, errors }
+  }
 
-    if (failCount === 0) {
-      toast.success(t('dashboard.toastRestoreSuccess', { count: successCount }))
-    } else {
-      toast.warning(t('dashboard.toastRestorePartial', { success: successCount, fail: failCount }))
+  /** 批量结果提示：有失败时附首个失败原因（如启用前的订阅校验失败） */
+  const toastBatchResult = (successKey: string, result: { success: number; errors: string[] }) => {
+    if (result.errors.length === 0) {
+      toast.success(t(successKey, { count: result.success }))
+      return
+    }
+    toast.warning(
+      t('dashboard.toastRestorePartial', { success: result.success, fail: result.errors.length }),
+      { description: result.errors[0] },
+    )
+  }
+
+  const selectedCredentials = () =>
+    (data?.credentials ?? []).filter(c => selectedIds.has(c.id))
+
+  // 批量恢复：重置失败计数、解除连接失败冷却并启用（已禁用、有失败计数或冷却中的账号）
+  const handleBatchRestore = async () => {
+    const ids = selectedCredentials()
+      .filter(c => c.disabled || c.failureCount > 0 || c.unreachableCooldownSecs !== undefined)
+      .map(c => c.id)
+    if (ids.length === 0) {
+      toast.error(t('dashboard.toastNoRestorableSelected'))
+      return
     }
 
+    toastBatchResult('dashboard.toastRestoreSuccess', await runBatch(ids, resetFailure))
+    deselectAll()
+  }
+
+  // 批量禁用（已启用的账号）
+  const handleBatchDisable = async () => {
+    const ids = selectedCredentials()
+      .filter(c => !c.disabled)
+      .map(c => c.id)
+    if (ids.length === 0) {
+      toast.error(t('dashboard.toastNoEnabledSelected'))
+      return
+    }
+
+    toastBatchResult(
+      'dashboard.toastDisableSuccess',
+      await runBatch(ids, id => setDisabled({ id, disabled: true })),
+    )
     deselectAll()
   }
 
@@ -825,7 +839,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
           clearFilters={clearFilters}
           selectedIds={selectedIds}
           handleBatchVerify={handleBatchVerify}
-          handleBatchResetFailure={handleBatchResetFailure}
+          handleBatchRestore={handleBatchRestore}
+          handleBatchDisable={handleBatchDisable}
           handleBatchDelete={handleBatchDelete}
           deselectAll={deselectAll}
           page={page}

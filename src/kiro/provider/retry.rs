@@ -5,6 +5,7 @@ use tokio::time::{Instant, sleep};
 
 use crate::kiro::endpoint::{BUCKET_THROTTLE_DURATION, Endpoint, EndpointName};
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::token_manager::AccountError;
 use crate::model::throttle_log::ThrottleContext;
 
 use super::SignatureRepair;
@@ -235,7 +236,7 @@ impl KiroProvider {
 
         // 尝试从请求体中提取会话 ID（模型信息已在上方提取）
         let continuation_id = Self::extract_continuation_id_from_request(request_body);
-        // 本次请求内已限流的账号（上游限流或本地限额满）：重试时避开，但不销毁 sticky 绑定
+        // 本次请求内要避开的账号（上游限流、本地限额满、账号失败）：重试时避开，但不销毁 sticky 绑定
         let mut throttled_in_request: Vec<u64> = Vec::new();
         // 其中被上游限流的账号：没有别的可换、重回它时须先退避
         let mut upstream_throttled: Vec<u64> = Vec::new();
@@ -409,13 +410,18 @@ impl KiroProvider {
             {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let e = anyhow::Error::from(e);
                     tracing::warn!(
-                        "API 请求发送失败（尝试 {}/{}）: {}",
+                        "API 请求发送失败（尝试 {}/{}）: {:#}",
                         attempt + 1,
                         max_retries,
                         e
                     );
-                    last_error = Some(e.into());
+                    // 拿不到响应（账号代理失效、连接失败、超时等）：计入连续失败，满 3 次冷却；本请求内换号
+                    self.token_manager
+                        .report_unreachable(ctx.id, AccountError::new(None, &format!("{e:#}")));
+                    push_unique(&mut throttled_in_request, ctx.id);
+                    last_error = Some(e);
                     backoff = (attempt + 1 < attempt_limit).then(|| Self::retry_delay(attempt));
                     continue;
                 }
@@ -544,7 +550,10 @@ impl KiroProvider {
                     body
                 );
 
-                let has_available = self.token_manager.report_failure(ctx.id);
+                let has_available = self
+                    .token_manager
+                    .report_failure(ctx.id, AccountError::new(Some(status.as_u16()), &body));
+                push_unique(&mut throttled_in_request, ctx.id);
                 if let Some(ref store) = self.failure_log_store {
                     store.record(ctx.id, "api", status.as_u16(), &body);
                 }

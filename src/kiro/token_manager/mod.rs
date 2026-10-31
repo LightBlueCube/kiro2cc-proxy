@@ -24,9 +24,10 @@ mod entry;
 mod manager;
 mod refresh;
 mod types;
+mod unreachable;
 mod upstream_failures;
 
-pub use entry::{DisabledReason, HealthStatus};
+pub use entry::{AccountError, DisabledReason, HealthStatus};
 pub(crate) use refresh::UsageLimitsUnsupportedError;
 #[cfg(test)]
 pub(crate) use refresh::{is_token_expired, is_token_expiring_soon, refresh_token};

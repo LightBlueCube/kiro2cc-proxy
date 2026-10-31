@@ -1,4 +1,5 @@
 //! 单凭据条目：健康状态（HealthStatus）、禁用原因（DisabledReason）与统计计数。
+use super::unreachable::Unreachable;
 use super::upstream_failures::UpstreamFailures;
 use crate::kiro::model::credentials::KiroCredentials;
 use chrono::{DateTime, Utc};
@@ -14,13 +15,13 @@ pub(crate) struct CredentialEntry {
     pub(crate) id: u64,
     /// 账号信息
     pub(crate) credentials: KiroCredentials,
-    /// API 调用连续失败次数
+    /// API 调用连续 401/403 次数
     pub(crate) failure_count: u32,
     /// Token 刷新连续失败次数（独立于 failure_count，语义为"刷新失败"而非"API 调用失败"）
     pub(crate) refresh_failure_count: u32,
     /// 是否已禁用
     pub(crate) disabled: bool,
-    /// 禁用原因（用于区分手动禁用 vs 自动禁用，便于自愈）
+    /// 禁用原因（区分手动禁用与各类自动禁用）
     pub(crate) disabled_reason: Option<DisabledReason>,
     /// API 调用成功次数
     pub(crate) success_count: u64,
@@ -30,6 +31,8 @@ pub(crate) struct CredentialEntry {
     pub(crate) throttle_count: u64,
     /// 近期上游失败（限流、空响应），健康度据此判定；仅内存
     pub(crate) upstream_failures: UpstreamFailures,
+    /// 请求发送失败（代理错误、连接失败、超时）的连续计数与冷却；仅内存
+    pub(crate) unreachable: Unreachable,
     /// 最后一次被限流时间（UTC，随统计持久化；健康度不使用）
     pub(crate) last_throttled_wall: Option<DateTime<Utc>>,
     /// 最后一次 token 刷新时间（用于冷却期控制）
@@ -38,6 +41,33 @@ pub(crate) struct CredentialEntry {
     pub(crate) rotation_bias: u32,
     /// 被判定额度用尽的时间（UTC，持久化），用于跨自然月后自动恢复
     pub(crate) quota_exhausted_at: Option<DateTime<Utc>>,
+    /// 本轮连续失败中最近一次账号报错（请求失败或 Token 刷新失败，持久化）；
+    /// 正常完成一次响应或手动启用时清除
+    pub(crate) last_error: Option<AccountError>,
+}
+
+/// 账号报错原文（Admin 面板展示用）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountError {
+    /// 上游 HTTP 状态码；传输层错误（连接失败、超时等）与 Token 刷新失败为 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    pub message: String,
+    pub at: DateTime<Utc>,
+}
+
+impl AccountError {
+    /// 报错原文的最大字符数（上游错误体可能很长，面板只需看清原因）
+    const MAX_MESSAGE_CHARS: usize = 500;
+
+    pub(crate) fn new(status_code: Option<u16>, message: &str) -> Self {
+        Self {
+            status_code,
+            message: message.chars().take(Self::MAX_MESSAGE_CHARS).collect(),
+            at: Utc::now(),
+        }
+    }
 }
 
 /// 禁用原因
@@ -46,7 +76,7 @@ pub(crate) struct CredentialEntry {
 pub enum DisabledReason {
     /// Admin API 手动禁用
     Manual,
-    /// 连续失败达到阈值后自动禁用
+    /// 连续 401/403 达到阈值后自动禁用
     TooManyFailures,
     /// 额度已用尽（如 MONTHLY_REQUEST_COUNT）
     QuotaExceeded,
@@ -63,7 +93,7 @@ impl DisabledReason {
     pub(crate) fn describe(&self) -> &'static str {
         match self {
             DisabledReason::Manual => "已被手动禁用",
-            DisabledReason::TooManyFailures => "因连续认证失败被自动禁用",
+            DisabledReason::TooManyFailures => "因连续 401/403（账号异常）被自动禁用",
             DisabledReason::QuotaExceeded => "本月请求额度已用尽",
             DisabledReason::InvalidRefreshToken => "refreshToken 已被服务端撤销，需人工更换凭证",
             DisabledReason::ProfileArnMissing => {
@@ -84,7 +114,7 @@ pub enum HealthStatus {
     Warning,
     /// 近期上游失败较多或连续失败；同优先级内最后被选中
     Degraded,
-    /// 冷却期内且连续失败或近期失败很多；选号时排除
+    /// 冷却期内（限流 / 空响应连续或近期很多，或请求发送连续失败）；选号时排除
     Unhealthy,
     /// 已禁用（手动或自动）
     Disabled,
@@ -130,4 +160,6 @@ pub(crate) struct StatsEntry {
     /// 额度用尽时间（UTC RFC3339），用于跨自然月自动恢复
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) quota_exhausted_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_error: Option<AccountError>,
 }

@@ -1,5 +1,5 @@
 //! MultiTokenManager 类型定义：凭据快照（CredentialEntrySnapshot）、管理器快照与多账号管理器主体结构。
-use super::entry::{CredentialEntry, DisabledReason, HealthStatus};
+use super::entry::{AccountError, CredentialEntry, DisabledReason, HealthStatus};
 use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
 use std::path::PathBuf;
@@ -29,6 +29,9 @@ pub struct HealthDetail {
     /// 不健康时冷却期剩余秒数；其它状态为 None
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_remaining_secs: Option<u64>,
+    /// 请求发送连续失败导致的冷却剩余秒数（面板显示为异常，区别于限流冷却）；不在此冷却时为 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreachable_cooldown_secs: Option<u64>,
 }
 
 /// 账号条目快照（用于 Admin API 读取）
@@ -94,6 +97,9 @@ pub struct CredentialEntrySnapshot {
     /// too_many_refresh_failures）；None = 未禁用。Admin 面板据此区分「已禁用」与「额度已用尽」
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<DisabledReason>,
+    /// 本轮连续失败中最近一次账号报错；None = 无
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<AccountError>,
 }
 
 /// 账号管理器状态快照

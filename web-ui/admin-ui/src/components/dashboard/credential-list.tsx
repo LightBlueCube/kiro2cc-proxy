@@ -42,7 +42,8 @@ interface CredentialListProps {
   clearFilters: () => void
   selectedIds: Set<number>
   handleBatchVerify: () => void
-  handleBatchResetFailure: () => void
+  handleBatchRestore: () => void
+  handleBatchDisable: () => void
   handleBatchDelete: () => void
   deselectAll: () => void
   page: number
@@ -91,7 +92,8 @@ export function CredentialList({
   clearFilters,
   selectedIds,
   handleBatchVerify,
-  handleBatchResetFailure,
+  handleBatchRestore,
+  handleBatchDisable,
   handleBatchDelete,
   deselectAll,
   page,
@@ -159,7 +161,8 @@ export function CredentialList({
                 <AccountPanelFoot
                   selectedCount={selectedIds.size}
                   onBatchVerify={handleBatchVerify}
-                  onBatchRestore={handleBatchResetFailure}
+                  onBatchRestore={handleBatchRestore}
+                  onBatchDisable={handleBatchDisable}
                   onBatchDelete={handleBatchDelete}
                   onDeselectAll={deselectAll}
                   totalCount={sorted.length}

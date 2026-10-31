@@ -196,6 +196,7 @@ impl MultiTokenManager {
                 entry.success_count = s.success_count;
                 entry.last_used_at = s.last_used_at.clone();
                 entry.throttle_count = s.throttle_count;
+                entry.last_error = s.last_error.clone();
                 if let Some(ref ts) = s.last_throttled_wall {
                     entry.last_throttled_wall = ts.parse::<DateTime<Utc>>().ok();
                 }
@@ -252,6 +253,7 @@ impl MultiTokenManager {
                                 )
                             }),
                             quota_exhausted_at: e.quota_exhausted_at.map(|t| t.to_rfc3339()),
+                            last_error: e.last_error.clone(),
                         },
                     )
                 })
@@ -299,13 +301,18 @@ impl MultiTokenManager {
     /// | 状态   | 条件                                              | 选号时         |
     /// |--------|---------------------------------------------------|----------------|
     /// | 不健康 | 冷却期内，且 C ≥ 3 或 F ≥ 10                       | 排除           |
-    /// | 降级   | C ≥ 2，或 F ≥ 5，或认证失败 2 次                   | 同优先级内最后 |
-    /// | 警告   | F ≥ 2，或认证失败 1 次                             | 不变           |
+    /// | 降级   | C ≥ 2，或 F ≥ 5，或账号失败 2 次                   | 同优先级内最后 |
+    /// | 警告   | F ≥ 2，或账号失败 1 次                             | 不变           |
     ///
-    /// 认证失败第 3 次即自动禁用，故不单列不健康档。
+    /// 账号失败 = 连续 401/403 + 连续请求发送失败。401/403 第 3 次即自动禁用；
+    /// 请求发送失败第 3 次进入冷却（见 `unreachable` 模块），冷却期内判为不健康。
     pub(crate) fn compute_health_at(entry: &CredentialEntry, now: Instant) -> HealthStatus {
         if entry.disabled {
             return HealthStatus::Disabled;
+        }
+
+        if entry.unreachable.cooldown_remaining(now).is_some() {
+            return HealthStatus::Unhealthy;
         }
 
         let failures = &entry.upstream_failures;
@@ -316,13 +323,14 @@ impl MultiTokenManager {
         if failing_hard && failures.cooldown_remaining(now).is_some() {
             return HealthStatus::Unhealthy;
         }
+        let account_failures = entry.failure_count + entry.unreachable.streak();
         let degraded = consecutive >= DEGRADED_CONSECUTIVE
             || recent >= DEGRADED_RECENT
-            || entry.failure_count >= 2;
+            || account_failures >= 2;
         if degraded {
             return HealthStatus::Degraded;
         }
-        if recent >= WARNING_RECENT || entry.failure_count >= 1 {
+        if recent >= WARNING_RECENT || account_failures >= 1 {
             return HealthStatus::Warning;
         }
         HealthStatus::Healthy
@@ -339,6 +347,10 @@ impl MultiTokenManager {
             consecutive_failures: failures.consecutive(now),
             cooldown_remaining_secs: unhealthy
                 .then(|| failures.cooldown_remaining(now))
+                .flatten()
+                .map(|d| d.as_secs().max(1)),
+            unreachable_cooldown_secs: unhealthy
+                .then(|| entry.unreachable.cooldown_remaining(now))
                 .flatten()
                 .map(|d| d.as_secs().max(1)),
         }

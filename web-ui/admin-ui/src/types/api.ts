@@ -43,6 +43,8 @@ export interface CredentialStatusItem {
   consecutiveFailures: number
   /** 不健康时冷却期剩余秒数（冷却期内选号排除），其它状态缺省 */
   cooldownRemainingSecs?: number
+  /** 请求发送连续失败（代理错误、连接失败、超时）的冷却剩余秒数；显示为异常，到期自动重试 */
+  unreachableCooldownSecs?: number
   throttleCount: number
   /**
    * 禁用原因；与 `disabled` 配套使用。
@@ -55,6 +57,17 @@ export interface CredentialStatusItem {
     | 'quota_exceeded'
     | 'invalid_refresh_token'
     | 'too_many_refresh_failures'
+    | 'profile_arn_missing'
+  /** 本轮连续失败中最近一次账号报错（请求失败或 Token 刷新失败）；正常完成一次响应后清除 */
+  lastError?: AccountError
+}
+
+export interface AccountError {
+  /** 上游 HTTP 状态码；连接失败、超时等传输层错误与 Token 刷新失败时缺省 */
+  statusCode?: number
+  message: string
+  /** RFC3339 */
+  at: string
 }
 
 // 余额响应
