@@ -123,6 +123,11 @@ pub(crate) fn upstream_aborted_message(reason: &str) -> String {
     format!("Upstream aborted the response before it finished ({reason}). Please retry.")
 }
 
+/// 上游在 thinking 之后无 stopReason 地结束、没有正文也没有工具调用时的错误文案
+/// （流式 error 事件与非流式响应共用）
+pub(crate) const THINKING_ONLY_TRUNCATED_MESSAGE: &str =
+    "Upstream stopped after the thinking block without producing a reply. Please retry.";
+
 #[cfg(test)]
 mod tests {
     use super::*;

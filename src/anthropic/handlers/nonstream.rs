@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 use super::error::map_provider_error_with_context;
 use super::helpers::strip_json_fences;
+use super::stream::EMPTY_RESPONSE_RETRY_MESSAGE;
+use crate::anthropic::stream::THINKING_ONLY_TRUNCATED_MESSAGE;
 
 /// 组装非流式响应的 content 数组
 ///
@@ -28,7 +30,7 @@ use super::helpers::strip_json_fences;
 /// 返回 `(content, thinking_only)`。`thinking_only` 为 true 表示整段响应只有
 /// thinking、既无可见文本也无工具调用 —— 此时补一个占位空格 text 块，避免客户端
 /// 把 content 判定为空响应而卡住（流式路径在 `generate_final_events` 里有等价
-/// 兜底）。调用方需据此把 `stop_reason` 调整为 `max_tokens`。
+/// 兜底）。上游未给收尾理由时调用方据此改返回截断错误。
 pub(crate) fn build_non_stream_content(
     thinking_content: &str,
     text_content: &str,
@@ -365,13 +367,17 @@ pub(crate) async fn handle_non_stream_request(
 
     flush_native_reasoning(&mut native_reasoning, &mut native_thinking_blocks);
 
-    // 健康度记账：与流式 `report_upstream_outcome_at_eof` 同口径。空响应 = 无正文、无工具调用、
-    // 无推理，上下文过大导致的不计；只记账，返回给客户端的内容不变
+    // 空响应 = 无正文、无工具调用、无推理（与流式 `is_empty_response` 同口径）。
+    // 上下文过大导致的空响应换账号重试也一样：不计入健康度，原样返回
+    let empty = text_content.is_empty() && !has_tool_use && native_thinking_blocks.is_empty();
+    let oversized_context = input_tokens >= empty_response_oversized_threshold(model);
+    let retryable_empty = empty && !oversized_context;
+
+    // 健康度记账：与流式 `report_upstream_outcome_at_eof` 同口径
     if termination.failure().is_none() {
-        let empty = text_content.is_empty() && !has_tool_use && native_thinking_blocks.is_empty();
         if !empty {
             feedback.completed();
-        } else if input_tokens < empty_response_oversized_threshold(model) {
+        } else if retryable_empty {
             feedback.empty_response();
         }
     }
@@ -446,11 +452,10 @@ pub(crate) async fn handle_non_stream_request(
         super::super::stream::output_tokens_include_thinking(),
     );
 
-    // 退化响应（只有 thinking）与流式路径对齐报 max_tokens；但绝不覆盖 tool_use ——
-    // 那会让客户端只渲染工具块而不执行（见上方 [TOOLUSE-DIAG] 注释）。
-    if thinking_only && !has_tool_use {
-        stop_reason = "max_tokens".to_string();
-    }
+    // 只有 thinking 且上游没给收尾理由（仍是 end_turn）：回复被截断，记账后返回可重试错误。
+    // 上游报过 max_tokens / 上下文超限时按该理由正常返回（与流式路径同口径）；
+    // tool_use 已在上方覆盖 stop_reason，不会走到截断判定。
+    let truncated_after_thinking = thinking_only && stop_reason == "end_turn";
 
     // contextUsage 本地化后 input_tokens 来源优先级：metering 真值 → 本地 count_all_tokens 估算
     // `context_input_tokens` 已弃用（始终为 None），保留参数仅供 cap_input_tokens 签名兼容
@@ -583,6 +588,37 @@ pub(crate) async fn handle_non_stream_request(
                 api_format: Some(api_format),
             },
         );
+    }
+
+    // 空响应与流式一致返回可重试错误（用量已照常入库），不把空内容当成正常完成
+    if retryable_empty {
+        tracing::warn!(
+            est_input_tokens = input_tokens,
+            "上游返回空响应（无任何内容事件），返回可重试错误"
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new(
+                "overloaded_error",
+                EMPTY_RESPONSE_RETRY_MESSAGE,
+            )),
+        )
+            .into_response();
+    }
+
+    if truncated_after_thinking {
+        tracing::warn!(
+            est_input_tokens = input_tokens,
+            "上游在 thinking 之后无理由结束（无正文、无工具调用），返回可重试错误"
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new(
+                "overloaded_error",
+                THINKING_ONLY_TRUNCATED_MESSAGE,
+            )),
+        )
+            .into_response();
     }
 
     // 构建 Anthropic 响应

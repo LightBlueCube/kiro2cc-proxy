@@ -66,7 +66,9 @@ struct CreditCurve {
     signature_slope: f64,
     signature_intercept: f64,
     /// 回传历史推理按输入计费的量：每个隐藏推理 token 折合的本地输入 token
-    /// （与普通输入同享缓存折扣；opus 实测回传不计费）
+    /// （与普通输入同享缓存折扣；sonnet / haiku 按新一轮回传标定）。
+    /// opus 实测回传不计费：新一轮回传模型看不到，工具循环内回传模型看得到，
+    /// 但两种位置都不计费（2026-10-31，约 1 万隐藏推理 token 回传，credits 与不回传持平）
     replay_input_per_hidden_token: f64,
 }
 

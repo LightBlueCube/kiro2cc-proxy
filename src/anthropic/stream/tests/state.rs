@@ -299,9 +299,10 @@ mod tests {
     fn test_text_delta_after_tool_use_restarts_text_block() {
         let mut ctx = StreamContext::new_with_thinking("test-model", 1, false);
 
-        let initial_events = ctx.generate_initial_events();
+        let _ = ctx.generate_initial_events();
+        let first_text_events = ctx.process_assistant_response("before");
         assert!(
-            initial_events
+            first_text_events
                 .iter()
                 .any(|e| e.event == "content_block_start"
                     && e.data["content_block"]["type"] == "text")

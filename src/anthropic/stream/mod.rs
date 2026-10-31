@@ -27,7 +27,8 @@ pub(crate) use echo_guard::ResponseEchoGuard;
 pub(crate) use helpers::{generate_fake_signature, is_fake_signature};
 pub use state::SseEvent;
 pub(crate) use termination::{
-    CONTENT_LENGTH_EXCEEDED_EXCEPTION, UpstreamTermination, upstream_aborted_message,
+    CONTENT_LENGTH_EXCEEDED_EXCEPTION, THINKING_ONLY_TRUNCATED_MESSAGE, UpstreamTermination,
+    upstream_aborted_message,
 };
 pub(crate) use thinking::split_thinking_and_visible;
 pub use thinking_text::{

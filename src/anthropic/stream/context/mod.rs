@@ -21,6 +21,20 @@ mod metrics;
 mod native;
 mod tool_use;
 
+/// thinking 之后被截断时的 error 事件：overloaded_error 保持客户端可重试语义
+fn thinking_only_truncated_error_event() -> SseEvent {
+    SseEvent::new(
+        "error",
+        json!({
+            "type": "error",
+            "error": {
+                "type": "overloaded_error",
+                "message": super::THINKING_ONLY_TRUNCATED_MESSAGE
+            }
+        }),
+    )
+}
+
 /// 流处理上下文
 pub struct StreamContext {
     /// SSE 状态管理器
@@ -416,43 +430,16 @@ impl StreamContext {
         })
     }
 
-    /// 生成初始事件序列 (message_start + 文本块 start)
+    /// 生成初始事件序列（仅 message_start）
     ///
-    /// 当 thinking 启用时，不在初始化时创建文本块，而是等到实际收到内容时再创建。
-    /// 这样可以确保 thinking 块（索引 0）在文本块（索引 1）之前。
+    /// 文本块等到实际收到内容时再创建：上游推理无论客户端是否开启 thinking 都会下发，
+    /// 预建文本块会让 thinking 块排到一个空文本块之后。
     pub fn generate_initial_events(&mut self) -> Vec<SseEvent> {
-        let mut events = Vec::new();
-
-        // message_start
         let msg_start = self.create_message_start_event();
-        if let Some(event) = self.state_manager.handle_message_start(msg_start) {
-            events.push(event);
-        }
-
-        // 如果启用了 thinking，不在这里创建文本块
-        // thinking 块和文本块会在 process_content_with_thinking 中按正确顺序创建
-        if self.thinking_enabled {
-            return events;
-        }
-
-        // 创建初始文本块（仅在未启用 thinking 时）
-        let text_block_index = self.state_manager.next_block_index();
-        self.text_block_index = Some(text_block_index);
-        let text_block_events = self.state_manager.handle_content_block_start(
-            text_block_index,
-            "text",
-            json!({
-                "type": "content_block_start",
-                "index": text_block_index,
-                "content_block": {
-                    "type": "text",
-                    "text": ""
-                }
-            }),
-        );
-        events.extend(text_block_events);
-
-        events
+        self.state_manager
+            .handle_message_start(msg_start)
+            .into_iter()
+            .collect()
     }
 
     /// 处理 Kiro 事件并转换为 Anthropic SSE 事件
@@ -1024,14 +1011,14 @@ impl StreamContext {
             self.thinking_buffer.clear();
         }
 
-        // 如果整个流中只产生了 thinking 块，没有 text 也没有 tool_use，
-        // 则设置 stop_reason 为 max_tokens（表示模型耗尽了 token 预算在思考上），
-        // 并补发一套完整的 text 事件（内容为一个空格），确保 content 数组中有 text 块
-        if self.thinking_enabled
-            && (self.thinking_block_index.is_some() || self.native_thinking_seen)
-            && !self.state_manager.has_non_thinking_blocks()
-        {
-            self.state_manager.set_stop_reason("max_tokens");
+        // 整个流只产生了 thinking 块，没有 text 也没有 tool_use：
+        // - 上游给过收尾理由（MAX_TOKENS / 上下文超限）：预算确实用完，按该理由正常收尾，
+        //   补一个空格 text 块，确保 content 数组中有 text 块
+        // - 上游没给理由就结束：回复被截断，记账后改发可重试错误（见本函数末尾）
+        let thinking_only = (self.thinking_block_index.is_some() || self.native_thinking_seen)
+            && !self.state_manager.has_non_thinking_blocks();
+        let truncated_after_thinking = thinking_only && !self.state_manager.has_stop_reason();
+        if thinking_only && !truncated_after_thinking {
             events.extend(self.create_text_delta_events(" "));
         }
 
@@ -1161,6 +1148,20 @@ impl StreamContext {
         if let Some(acc) = &self.cache_accounting {
             acc.commit();
         }
+
+        if truncated_after_thinking {
+            tracing::warn!(
+                model = %self.model,
+                est_input_tokens = final_input_tokens,
+                "上游在 thinking 之后无理由结束（无正文、无工具调用），补发 error 事件"
+            );
+            events.extend(
+                self.state_manager
+                    .generate_error_final_events(thinking_only_truncated_error_event()),
+            );
+            return events;
+        }
+
         let (report_creation_5m, report_creation_1h) = match &self.cache_accounting {
             Some(acc)
                 if self.metering_cache_read_tokens.is_none()

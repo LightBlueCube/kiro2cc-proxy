@@ -23,7 +23,7 @@ mod tests {
     fn test_native_reasoning_signature_accumulates_per_block() {
         use serde_json::json;
 
-        // 账号关闭 thinking（thinking_enabled=false）时签名不下发客户端，但上游已计费，仍需统计
+        // 签名统计与客户端是否开启 thinking 无关
         for thinking_enabled in [true, false] {
             let mut ctx =
                 StreamContext::new_with_thinking("claude-opus-5-5", 100, thinking_enabled);
@@ -113,16 +113,23 @@ mod tests {
                     .iter()
                     .rposition(|e| e.data["delta"]["type"] == "signature_delta")
                     .unwrap();
-                let next_start = events
-                    .iter()
-                    .position(|e| e.event == "content_block_start" && e.data["index"] == 1)
-                    .unwrap();
-                assert!(last_signature < stop && stop < next_start);
+                assert!(last_signature < stop);
                 assert!(
                     !events[stop + 1..]
                         .iter()
                         .any(|e| { e.event == "content_block_delta" && e.data["index"] == 0 })
                 );
+
+                // 只有 thinking 就结束（eof）属截断，以 error 收尾，见 thinking-only 专项用例
+                if boundary == "eof" {
+                    assert_eq!(events.last().unwrap().event, "error");
+                    continue;
+                }
+                let next_start = events
+                    .iter()
+                    .position(|e| e.event == "content_block_start" && e.data["index"] == 1)
+                    .unwrap();
+                assert!(stop < next_start);
                 assert_eq!(
                     events.iter().filter(|e| e.event == "message_stop").count(),
                     1
@@ -132,15 +139,42 @@ mod tests {
     }
 
     #[test]
-    fn test_native_reasoning_respects_disabled_thinking() {
+    fn test_native_reasoning_forwarded_when_thinking_disabled() {
+        // 客户端未开启 thinking 时上游推理也原样下发，且 thinking 块排在首位（不预建空 text 块）
         let mut ctx = StreamContext::new_with_thinking("claude-opus-5", 100, false);
-        ctx.generate_initial_events();
-        let events = ctx.process_kiro_event(&upstream_event(
+        let mut events = ctx.generate_initial_events();
+        events.extend(ctx.process_kiro_event(&upstream_event(
             "reasoningContentEvent",
-            serde_json::json!({"text": "不应暴露", "signature": "real-signature"}),
-        ));
-        assert!(events.is_empty());
-        assert!(ctx.visible_full_text.is_empty());
+            serde_json::json!({"text": "推理", "signature": "real-signature"}),
+        )));
+        events.extend(ctx.process_kiro_event(&upstream_event(
+            "assistantResponseEvent",
+            serde_json::json!({"content": "答案"}),
+        )));
+        events.extend(ctx.generate_final_events());
+
+        let starts: Vec<(i64, &str)> = events
+            .iter()
+            .filter(|e| e.event == "content_block_start")
+            .map(|e| {
+                (
+                    e.data["index"].as_i64().unwrap(),
+                    e.data["content_block"]["type"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(starts, vec![(0, "thinking"), (1, "text")]);
+        let thinking: String = events
+            .iter()
+            .filter_map(|e| e.data["delta"]["thinking"].as_str())
+            .collect();
+        let signature: String = events
+            .iter()
+            .filter_map(|e| e.data["delta"]["signature"].as_str())
+            .collect();
+        assert_eq!(thinking, "推理");
+        assert_eq!(signature, "real-signature");
+        assert_eq!(ctx.visible_full_text, "答案");
     }
 
     #[test]
@@ -578,13 +612,74 @@ mod tests {
     }
 
     #[test]
-    fn test_thinking_only_sets_max_tokens_stop_reason() {
-        // 整个流只有 thinking 块，没有 text 也没有 tool_use，stop_reason 应为 max_tokens
+    fn test_thinking_only_without_stop_reason_ends_with_error() {
+        // 只有 thinking、上游没给收尾理由：thinking 块正常闭合后以可重试 error 收尾
+        for (thinking_enabled, event) in [
+            (
+                true,
+                upstream_event(
+                    "assistantResponseEvent",
+                    serde_json::json!({"content": "<thinking>\nabc</thinking>"}),
+                ),
+            ),
+            (
+                false,
+                upstream_event(
+                    "reasoningContentEvent",
+                    serde_json::json!({"text": "abc", "signature": "sig"}),
+                ),
+            ),
+        ] {
+            let mut ctx = StreamContext::new_with_thinking("test-model", 1, thinking_enabled);
+            let mut all_events = ctx.generate_initial_events();
+            all_events.extend(ctx.process_kiro_event(&event));
+            all_events.extend(ctx.generate_final_events());
+
+            let names: Vec<&str> = all_events.iter().map(|e| e.event.as_str()).collect();
+            assert_eq!(
+                names.last(),
+                Some(&"error"),
+                "thinking_enabled={thinking_enabled}"
+            );
+            let error = &all_events.last().unwrap().data["error"];
+            assert_eq!(error["type"], "overloaded_error");
+            assert_eq!(
+                error["message"],
+                crate::anthropic::stream::THINKING_ONLY_TRUNCATED_MESSAGE
+            );
+            assert!(!names.contains(&"message_delta"));
+            assert!(!names.contains(&"message_stop"));
+            assert!(
+                !all_events
+                    .iter()
+                    .any(|e| e.data["content_block"]["type"] == "text"),
+                "不补发占位 text 块"
+            );
+            let thinking_stop = all_events
+                .iter()
+                .position(|e| e.event == "content_block_stop" && e.data["index"] == 0);
+            assert!(thinking_stop.is_some(), "thinking 块应先闭合");
+            assert!(
+                !ctx.generate_final_events()
+                    .iter()
+                    .any(|e| e.event == "message_stop"),
+                "error 收尾后不再补发 message_stop"
+            );
+        }
+    }
+
+    #[test]
+    fn test_thinking_only_with_upstream_max_tokens_keeps_stop_reason() {
+        // 只有 thinking、上游报 MAX_TOKENS：预算用完，按 max_tokens 正常收尾并补占位 text
         let mut ctx = StreamContext::new_with_thinking("test-model", 1, true);
         let _initial_events = ctx.generate_initial_events();
 
         let mut all_events = Vec::new();
         all_events.extend(ctx.process_assistant_response("<thinking>\nabc</thinking>"));
+        all_events.extend(ctx.process_kiro_event(&upstream_event(
+            "metadataEvent",
+            serde_json::json!({"stopReason": "MAX_TOKENS"}),
+        )));
         all_events.extend(ctx.generate_final_events());
 
         let message_delta = all_events

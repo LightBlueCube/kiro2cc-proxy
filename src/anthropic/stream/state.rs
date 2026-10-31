@@ -116,6 +116,11 @@ impl SseStateManager {
         self.stop_reason = Some(reason.into());
     }
 
+    /// 上游是否给出过收尾理由（max_tokens / 上下文超限）
+    pub(crate) fn has_stop_reason(&self) -> bool {
+        self.stop_reason.is_some()
+    }
+
     /// 检查是否存在非 thinking 类型的内容块（如 text 或 tool_use）
     pub(crate) fn has_non_thinking_blocks(&self) -> bool {
         self.active_blocks
@@ -242,31 +247,18 @@ impl SseStateManager {
         None
     }
 
-    /// 生成最终事件序列
-    #[allow(clippy::too_many_arguments)]
-    pub fn generate_final_events(
-        &mut self,
-        input_tokens: i32,
-        output_tokens: i32,
-        cache_creation_input_tokens: Option<i32>,
-        cache_read_input_tokens: Option<i32>,
-        context_usage_percentage: Option<f64>,
-        cache_creation_5m_input_tokens: Option<i32>,
-        cache_creation_1h_input_tokens: Option<i32>,
-        model: &str,
-    ) -> Vec<SseEvent> {
+    /// 关闭所有未关闭的块，返回 `(content_block_stop 事件, 被动关闭的 tool_use 块数)`
+    ///
+    /// 计数必须在本循环内累加：循环结束后所有块都已置 stopped，事后再统计
+    /// "未闭合数"恒为 0，拿不到任何诊断信号。
+    ///
+    /// 只统计 tool_use 块 —— text 块没有 `handle_content_block_stop` 调用点，仅在
+    /// tool_use 开始时被 `handle_content_block_start` 批量关闭，其余情况一律由本循环
+    /// 终结；计入会让每个纯文本响应都被误判为异常。tool_use 块正常由 `process_tool_use`
+    /// 在收到 `stop=true` 时关闭，走到这里说明上游没发收尾帧，是真实异常。
+    /// 另注：上游中途断流 / deadline 截断时若有 tool_use 块未闭合，也会计入此处。
+    fn close_open_blocks(&mut self) -> (Vec<SseEvent>, usize) {
         let mut events = Vec::new();
-
-        // 关闭所有未关闭的块
-        //
-        // 计数必须在本循环内累加：循环结束后所有块都已置 stopped，事后再统计
-        // "未闭合数"恒为 0，拿不到任何诊断信号。
-        //
-        // 只统计 tool_use 块 —— text 块没有 `handle_content_block_stop` 调用点，仅在
-        // tool_use 开始时被 `handle_content_block_start` 批量关闭，其余情况一律由本循环
-        // 终结；计入会让每个纯文本响应都被误判为异常。tool_use 块正常由 `process_tool_use`
-        // 在收到 `stop=true` 时关闭，走到这里说明上游没发收尾帧，是真实异常。
-        // 另注：上游中途断流 / deadline 截断时若有 tool_use 块未闭合，也会计入此处。
         let mut auto_closed_tool = 0;
         for (index, block) in self.active_blocks.iter_mut() {
             if block.started && !block.stopped {
@@ -283,6 +275,32 @@ impl SseStateManager {
                 }
             }
         }
+        (events, auto_closed_tool)
+    }
+
+    /// 以 error 事件收尾：关闭未闭合块后发 `error`，代替 message_delta / message_stop
+    pub(crate) fn generate_error_final_events(&mut self, error: SseEvent) -> Vec<SseEvent> {
+        let (mut events, _) = self.close_open_blocks();
+        self.message_delta_sent = true;
+        self.message_ended = true;
+        events.push(error);
+        events
+    }
+
+    /// 生成最终事件序列
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_final_events(
+        &mut self,
+        input_tokens: i32,
+        output_tokens: i32,
+        cache_creation_input_tokens: Option<i32>,
+        cache_read_input_tokens: Option<i32>,
+        context_usage_percentage: Option<f64>,
+        cache_creation_5m_input_tokens: Option<i32>,
+        cache_creation_1h_input_tokens: Option<i32>,
+        model: &str,
+    ) -> Vec<SseEvent> {
+        let (mut events, auto_closed_tool) = self.close_open_blocks();
 
         // 发送 message_delta
         if !self.message_delta_sent {

@@ -32,7 +32,8 @@ impl StreamContext {
             }
         }
         self.in_native_signature_run = has_signature;
-        if !self.thinking_enabled || (reasoning.text.is_empty() && reasoning.signature.is_empty()) {
+        // 上游推理原样下发，与客户端是否开启 thinking 无关
+        if reasoning.text.is_empty() && reasoning.signature.is_empty() {
             return Vec::new();
         }
 

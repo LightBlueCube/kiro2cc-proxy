@@ -298,6 +298,10 @@ pub(crate) fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
 
+/// 小输入空响应的错误文案（流式 SSE error 事件与非流式错误响应共用）
+pub(super) const EMPTY_RESPONSE_RETRY_MESSAGE: &str =
+    "Upstream returned an empty response. Please retry.";
+
 /// 为上游空响应构造合适的 SSE error 事件。
 ///
 /// - 大输入（疑似上下文过大）：返回 invalid_request_error，提示压缩上下文，
@@ -311,10 +315,7 @@ fn empty_response_error_event(oversized_context: bool) -> SseEvent {
              Reduce conversation history (e.g. /compact), system prompt, or tools, then retry.",
         )
     } else {
-        (
-            "overloaded_error",
-            "Upstream returned an empty response. Please retry.",
-        )
+        ("overloaded_error", EMPTY_RESPONSE_RETRY_MESSAGE)
     };
     SseEvent::new(
         "error",
