@@ -60,13 +60,7 @@ pub(crate) fn build_non_stream_content(
     (content, thinking_only)
 }
 
-/// 剔除响应内容中的 thinking 块（账号关闭 thinking 时调用，须在构建内容之后）
-fn drop_thinking_blocks(content: &mut Vec<serde_json::Value>) {
-    content.retain(|b| b["type"] != "thinking");
-}
-
 /// 统计传入内容中的 thinking 块 token（BPE 口径）。
-/// 计费统计传入剔除前内容；落库观测统计传入剔除后内容。
 /// 无 thinking 块或仅有 0 token 空块
 /// （signature-only）时返回 None（未产生有效思考，与流式落库语义一致）。
 fn count_thinking_tokens(content: &[serde_json::Value]) -> Option<i32> {
@@ -82,30 +76,20 @@ fn count_thinking_tokens(content: &[serde_json::Value]) -> Option<i32> {
     (total > 0).then_some(total)
 }
 
-/// 分离客户端输出、计费输出与存留 thinking 观测值。
-fn finalize_non_stream_output_usage(
-    mut content: Vec<serde_json::Value>,
-    thinking_suppressed: bool,
+/// 返回 (客户端输出 tokens, 计费输出 tokens, thinking 观测值)。
+fn non_stream_output_usage(
+    content: &[serde_json::Value],
     include_thinking: bool,
-) -> (Vec<serde_json::Value>, i32, i32, Option<i32>) {
-    let billed_thinking_tokens = count_thinking_tokens(&content).unwrap_or(0);
-    if thinking_suppressed {
-        drop_thinking_blocks(&mut content);
-    }
-    let thinking_token_count = count_thinking_tokens(&content);
-    let visible_output_tokens = token::estimate_output_tokens(&content);
-    let billed_output_tokens = visible_output_tokens + billed_thinking_tokens;
+) -> (i32, i32, Option<i32>) {
+    let thinking_token_count = count_thinking_tokens(content);
+    let visible_output_tokens = token::estimate_output_tokens(content);
+    let billed_output_tokens = visible_output_tokens + thinking_token_count.unwrap_or(0);
     let output_tokens = if include_thinking {
-        visible_output_tokens + thinking_token_count.unwrap_or(0)
+        billed_output_tokens
     } else {
         visible_output_tokens
     };
-    (
-        content,
-        output_tokens,
-        billed_output_tokens,
-        thinking_token_count,
-    )
+    (output_tokens, billed_output_tokens, thinking_token_count)
 }
 
 fn flush_native_reasoning(
@@ -203,15 +187,10 @@ pub(crate) async fn handle_non_stream_request(
     fp_profile: Option<Vec<crate::cache::fingerprint::ContentSegment>>,
     // 是否为 Claude Code /compact 压缩请求（决定上游超时：普通 180s / 压缩 1000s）
     is_compact_request: bool,
-    // 客户端是否请求了 thinking adaptive（与账号级开关在 provider 侧共同决定注入）
-    thinking_adaptive_requested: bool,
     // 实际发往上游的 effort（ConversionResult::effort），随 usage 记录入库
     effort: Option<String>,
     // converter 注入的 thinking 文本标签预算（ConversionResult::thinking_budget_tokens）
     thinking_budget_tokens: Option<i32>,
-    // 客户端侧 thinking 请求状态（resolve_thinking_enabled 的结果，与流式分支同源）；
-    // 与账号开关在下方合成最终裁决，供预算入库口径与流式路径保持一致
-    thinking_client_enabled: bool,
     // 客户端 User-Agent（随 usage 记录入库）
     user_agent: Option<String>,
     // 断点缓存记账（promptCacheAccounting 开启时为 Some）
@@ -236,33 +215,13 @@ pub(crate) async fn handle_non_stream_request(
         credential_in_flight: _credential_in_flight,
         route,
     } = match provider
-        .call_api(
-            request_body,
-            is_compact_request,
-            thinking_adaptive_requested,
-            &bound_ids,
-        )
+        .call_api(request_body, is_compact_request, &bound_ids)
         .await
     {
         Ok(resp) => resp,
         Err(e) => return map_provider_error_with_context(e, model, input_tokens),
     };
     crate::anthropic::converter::remember_rejected_signatures(model, &signature_repair.rejected);
-
-    // 账号级 thinking 开关关闭 = 禁止思考：上游若仍返回推理内容，响应侧丢弃
-    // （开启时非流式本就无条件输出推理块，无需额外处理）
-    let thinking_suppressed =
-        provider.token_manager().thinking_adaptive_of(credential_id) == Some(false);
-    // 与流式路径同口径：账号开关 + 客户端请求 + 模型支持度合成最终裁决
-    let thinking_enabled = super::helpers::effective_thinking_enabled(
-        &provider,
-        credential_id,
-        model,
-        thinking_client_enabled,
-    );
-
-    // 账号开关关闭时 provider 已剥离 thinking 文本标签，预算不再生效
-    let thinking_budget_tokens = thinking_budget_tokens.filter(|_| thinking_enabled);
 
     // 读取响应体
     let body_bytes = match response.bytes().await {
@@ -482,13 +441,10 @@ pub(crate) async fn handle_non_stream_request(
         tool_uses,
     );
 
-    // 构建后再过滤，保留纯推理响应占位
-    let (content, output_tokens, billed_output_tokens, thinking_token_count) =
-        finalize_non_stream_output_usage(
-            content,
-            thinking_suppressed,
-            super::super::stream::output_tokens_include_thinking(),
-        );
+    let (output_tokens, billed_output_tokens, thinking_token_count) = non_stream_output_usage(
+        &content,
+        super::super::stream::output_tokens_include_thinking(),
+    );
 
     // 退化响应（只有 thinking）与流式路径对齐报 max_tokens；但绝不覆盖 tool_use ——
     // 那会让客户端只渲染工具块而不执行（见上方 [TOOLUSE-DIAG] 注释）。
@@ -723,36 +679,7 @@ mod native_tests {
         assert_eq!(text.trim(), "答案");
     }
 
-    #[test]
-    fn test_suppressed_thinking_only_response_keeps_placeholder_and_max_tokens_flag() {
-        // 账号关闭 thinking + 上游只返回推理：过滤发生在构建之后，
-        // 必须保留占位正文与 thinking_only 兜底标志，而不是变成 content=[]
-        let native = json!({"type": "thinking", "thinking": "推理", "signature": "sig"});
-        let (mut content, thinking_only) =
-            build_non_stream_content_with_native(vec![native], "", "", Vec::new());
-        drop_thinking_blocks(&mut content);
-        assert!(thinking_only);
-        assert_eq!(content, vec![json!({"type": "text", "text": " "})]);
-
-        // 旧文本标签协议同理
-        let (mut content, thinking_only) =
-            build_non_stream_content_with_native(Vec::new(), "推理", "", Vec::new());
-        drop_thinking_blocks(&mut content);
-        assert!(thinking_only);
-        assert_eq!(content, vec![json!({"type": "text", "text": " "})]);
-    }
-
-    #[test]
-    fn test_suppressed_drops_thinking_but_keeps_text_and_tools() {
-        let native = json!({"type": "thinking", "thinking": "推理", "signature": "sig"});
-        let tool = json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {}});
-        let (mut content, _) =
-            build_non_stream_content_with_native(vec![native], "", "答案", vec![tool.clone()]);
-        drop_thinking_blocks(&mut content);
-        assert_eq!(content, vec![json!({"type": "text", "text": "答案"}), tool]);
-    }
-
-    /// 任务 2：非流式 thinking token 统计（剔除后存留块才计入；无 thinking 返回 None）
+    /// 非流式 thinking token 统计（无 thinking 返回 None）
     #[test]
     fn test_nonstream_thinking_token_stats() {
         // 含 thinking 块 → Some(>0)
@@ -760,21 +687,7 @@ mod native_tests {
         let (content, _) =
             build_non_stream_content_with_native(vec![native], "", "答案", Vec::new());
         let count = count_thinking_tokens(&content);
-        assert!(
-            count.unwrap_or(0) > 0,
-            "存留 thinking 块应统计出 >0 的 token 数"
-        );
-
-        // 剔除后（账号关闭 thinking）→ None（被剔除内容不计）
-        let native = json!({"type": "thinking", "thinking": "推理内容", "signature": "sig"});
-        let (mut content, _) =
-            build_non_stream_content_with_native(vec![native], "", "答案", Vec::new());
-        drop_thinking_blocks(&mut content);
-        assert_eq!(
-            count_thinking_tokens(&content),
-            None,
-            "剔除后无存留 thinking 块应返回 None"
-        );
+        assert!(count.unwrap_or(0) > 0, "thinking 块应统计出 >0 的 token 数");
 
         // 无 thinking 的普通响应 → None
         let (content, _) =
@@ -822,53 +735,29 @@ mod native_tests {
             // 上游输出取摘要，与 credits 构造口径一致
             let (native_reasoning_tokens, signature_chars, signature_blocks) =
                 native_reasoning_stats(&content[..native as usize]);
-            for suppressed in [false, true] {
-                for include_thinking in [false, true] {
-                    let (filtered, output, billed_output, observed) =
-                        finalize_non_stream_output_usage(
-                            content.clone(),
-                            suppressed,
-                            include_thinking,
-                        );
-                    assert_eq!(billed_output, billed);
-                    assert_eq!(
-                        observed,
-                        if suppressed {
-                            None
-                        } else {
-                            Some(billed - visible)
-                        }
-                    );
-                    assert_eq!(
-                        output,
-                        if include_thinking && !suppressed {
-                            billed
-                        } else {
-                            visible
-                        }
-                    );
-                    assert_eq!(
-                        filtered.iter().any(|block| block["type"] == "thinking"),
-                        !suppressed
-                    );
-                    let output = crate::model::usage::BilledOutput {
-                        tokens: billed_output,
-                        native_reasoning_tokens,
-                        signature_chars,
-                        signature_blocks,
-                    };
-                    assert_eq!(
-                        crate::model::usage::refine_prefix_cache_read(
-                            "claude-haiku-5-5",
-                            prefix_estimated_tokens,
-                            final_input_tokens,
-                            &Default::default(),
-                            &output,
-                            Some(credits),
-                        ),
-                        20_000
-                    );
-                }
+            for include_thinking in [false, true] {
+                let (output, billed_output, observed) =
+                    non_stream_output_usage(&content, include_thinking);
+                assert_eq!(billed_output, billed);
+                assert_eq!(observed, Some(billed - visible));
+                assert_eq!(output, if include_thinking { billed } else { visible });
+                let output = crate::model::usage::BilledOutput {
+                    tokens: billed_output,
+                    native_reasoning_tokens,
+                    signature_chars,
+                    signature_blocks,
+                };
+                assert_eq!(
+                    crate::model::usage::refine_prefix_cache_read(
+                        "claude-haiku-5-5",
+                        prefix_estimated_tokens,
+                        final_input_tokens,
+                        &Default::default(),
+                        &output,
+                        Some(credits),
+                    ),
+                    20_000
+                );
             }
         }
     }

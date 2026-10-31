@@ -94,8 +94,6 @@ pub struct CredentialEntrySnapshot {
     /// too_many_refresh_failures）；None = 未禁用。Admin 面板据此区分「已禁用」与「额度已用尽」
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<DisabledReason>,
-    /// 账号级 thinking adaptive 注入开关
-    pub thinking_adaptive: bool,
 }
 
 /// 账号管理器状态快照

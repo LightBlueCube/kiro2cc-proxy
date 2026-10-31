@@ -111,6 +111,4 @@ pub use tools::{
 };
 pub(crate) use websearch::is_web_search_server_tool;
 
-pub(crate) use thinking::{
-    additional_fields_skipped, is_gpt_model, is_luna_model, native_thinking_supported,
-};
+pub(crate) use thinking::{additional_fields_skipped, is_gpt_model, is_luna_model};

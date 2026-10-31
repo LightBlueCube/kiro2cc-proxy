@@ -418,10 +418,6 @@ export function BalanceDialog({ credentialId, credential, open, onOpenChange }: 
                         : t('credentials.proxyNone')}
                   </span>
                 </span>
-
-                <span className="inline-flex items-center rounded border border-transparent bg-surface-3 px-2 py-0.5 text-[11px] font-medium text-ink-2">
-                  {t('credentials.adaptiveLabel')}: {credential.thinkingAdaptive ? t('credentials.switchOn') : t('credentials.switchOff')}
-                </span>
               </div>
 
               {/* 关键调用指标矩阵 */}

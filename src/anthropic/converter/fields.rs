@@ -62,8 +62,6 @@ pub(super) fn build_additional_model_request_fields(
     // thinking 注入：仅当客户端请求的 thinking 类型为 adaptive 且模型为 Claude 系时，
     // 注入 `thinking: {"type": "adaptive"}`（Kiro 私有协议唯一实证接受的原生 thinking
     // 形态），使上游产出 reasoningContentEvent，经 `process_native_reasoning` 转发。
-    // 账号级开关（`thinkingAdaptive`）在 provider 层按实际选中账号执行剥离
-    // （converter 层不持有凭据），此处仅做请求/模型侧判定。
     //
     // 不得对 `enabled` 类型注入（v3.4.1 曾放宽到 enabled，导致客户端规则遵从性回退）：
     // `enabled` 请求已由 `generate_thinking_prefix` 在 history[0] 注入

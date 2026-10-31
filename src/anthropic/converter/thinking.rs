@@ -17,8 +17,6 @@ pub(crate) fn is_gpt_model(model_id: &str) -> bool {
 ///    未经逐模型实测，按惯例并入）；minimax-m2.1 为对照组，不跳过。
 ///
 /// GPT 系不在此列：已改为发送 `reasoning.effort` 独立结构（见 `fields.rs`）。
-/// converter 侧 `build_additional_model_request_fields` 与 provider 侧
-/// thinking adaptive 注入共用本谓词，避免排除条件双份硬编码漂移。
 pub(crate) fn additional_fields_skipped(model_id: &str) -> bool {
     // "4.5" 代际（sonnet/opus/haiku）被 Kiro 后端拒绝该字段
     if model_id.ends_with("4.5") {
@@ -34,17 +32,6 @@ pub(crate) fn additional_fields_skipped(model_id: &str) -> bool {
         model_id,
         "qwen3-coder-next" | "glm-5" | "deepseek-3.2" | "minimax-m2.5" | "kimi-k3"
     )
-}
-
-/// 模型是否支持向 `additionalModelRequestFields` 注入原生 `thinking: {type: adaptive}`。
-///
-/// 即模型 ID 以 `claude-` 开头且未被 [`additional_fields_skipped`] 整体跳过的模型。
-/// 必须显式限定 Claude 前缀：黑名单之外的 `minimax-m2.1`（实测只证明接受
-/// output_config / max_tokens，未证明接受 thinking）、`auto` 等并非 Claude 系。账号级 thinking 开关开启时，仅这类模型会在
-/// 客户端未请求 thinking 的情况下被强制注入；其余模型开关只能"关闭"，不能"强制开启"。
-/// 入参为 Kiro 规范模型 ID（`map_model` 的输出 / 请求体里的 `modelId`）。
-pub(crate) fn native_thinking_supported(model_id: &str) -> bool {
-    model_id.starts_with("claude-") && !additional_fields_skipped(model_id)
 }
 
 /// 判断是否为 `gpt-5.6-luna`。

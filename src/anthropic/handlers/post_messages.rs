@@ -170,8 +170,6 @@ pub(crate) async fn post_messages_as(
 
     // 是否为 Claude Code /compact 压缩请求（决定上游超时：普通 180s / 压缩 1000s）
     let is_compact_request = conversion_result.is_compact_request;
-    // 客户端是否请求了 thinking adaptive（与账号级开关在 provider 侧共同决定注入）
-    let thinking_adaptive_requested = conversion_result.thinking_adaptive_requested;
     let prefix_cached = conversion_result.prefix_cached;
     // 实际发往上游的 effort 与 thinking 预算（随 usage 记录入库）
     let effort = conversion_result.effort.clone();
@@ -336,7 +334,6 @@ pub(crate) async fn post_messages_as(
             client_ip,
             None, // /v1 无全局 deadline（保持现有行为）
             is_compact_request,
-            thinking_adaptive_requested,
             effort,
             thinking_budget_tokens,
             thinking_as_text,
@@ -366,10 +363,8 @@ pub(crate) async fn post_messages_as(
             fp_tracker,
             fp_profile,
             is_compact_request,
-            thinking_adaptive_requested,
             effort,
             thinking_budget_tokens,
-            thinking_enabled,
             user_agent,
             cache_accounting,
             conversation_id,

@@ -279,7 +279,6 @@ mod tests {
             proxy_password: None,
             disabled: false,
             endpoint: None,
-            thinking_adaptive: false,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -404,7 +403,6 @@ mod tests {
             proxy_password: None,
             disabled: false,
             endpoint: None,
-            thinking_adaptive: false,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -441,7 +439,6 @@ mod tests {
             proxy_password: None,
             disabled: false,
             endpoint: None,
-            thinking_adaptive: false,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -560,7 +557,6 @@ mod tests {
             proxy_password: None,
             disabled: false,
             endpoint: None,
-            thinking_adaptive: false,
         };
 
         let json = original.to_pretty_json().unwrap();
@@ -612,41 +608,13 @@ mod tests {
         assert!(json.contains("us-west-2"));
     }
 
-    // ============ thinking_adaptive 字段测试 ============
-
     #[test]
-    fn test_thinking_adaptive_default_true_for_legacy_json() {
-        // 旧版本 credentials.json 不含 thinkingAdaptive 字段 → 反序列化为 true（默认开启）
-        let json = r#"{"refreshToken": "test"}"#;
-        let creds = KiroCredentials::from_json(json).unwrap();
-        assert!(creds.thinking_adaptive);
-    }
-
-    #[test]
-    fn test_thinking_adaptive_explicit_true() {
-        let json = r#"{"refreshToken": "test", "thinkingAdaptive": true}"#;
-        let creds = KiroCredentials::from_json(json).unwrap();
-        assert!(creds.thinking_adaptive);
-    }
-
-    #[test]
-    fn test_thinking_adaptive_explicit_false_is_respected() {
-        // 显式落盘 false 的账号不得被 default_true 覆盖（升级后仍保持关闭）
+    fn test_legacy_thinking_adaptive_field_is_ignored_and_dropped() {
+        // 已移除的账号级 thinking 开关：旧 credentials.json 里的字段可正常加载，落盘时消失
         let json = r#"{"refreshToken": "test", "thinkingAdaptive": false}"#;
         let creds = KiroCredentials::from_json(json).unwrap();
-        assert!(!creds.thinking_adaptive);
-    }
-
-    #[test]
-    fn test_thinking_adaptive_roundtrip() {
-        let mut creds = KiroCredentials::default();
-        creds.refresh_token = Some("test".to_string());
-        creds.thinking_adaptive = true;
-
-        let json = creds.to_pretty_json().unwrap();
-        assert!(json.contains("thinkingAdaptive"));
-        let parsed = KiroCredentials::from_json(&json).unwrap();
-        assert!(parsed.thinking_adaptive);
+        assert_eq!(creds.refresh_token.as_deref(), Some("test"));
+        assert!(!creds.to_pretty_json().unwrap().contains("thinkingAdaptive"));
     }
 
     #[test]

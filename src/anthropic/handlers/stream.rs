@@ -39,14 +39,11 @@ pub(crate) async fn handle_stream_request(
     stream_deadline: Option<Duration>,
     // 是否为 Claude Code /compact 压缩请求（决定上游超时：普通 180s / 压缩 1000s）
     is_compact_request: bool,
-    // 客户端是否请求了 thinking adaptive（与账号级开关在 provider 侧共同决定注入）
-    thinking_adaptive_requested: bool,
     // 实际发往上游的 effort（ConversionResult::effort），随 usage 记录入库
     effort: Option<String>,
     // converter 注入的 thinking 文本标签预算（ConversionResult::thinking_budget_tokens）
     thinking_budget_tokens: Option<i32>,
-    // 思考文本化的渲染样式（配置开启且客户端支持时为 Some）；是否实际生效还取决于
-    // 选中账号后的最终 thinking 状态
+    // 思考文本化的渲染样式（配置开启且客户端支持时为 Some）；仅在本次请求启用 thinking 时生效
     thinking_as_text_allowed: Option<crate::anthropic::stream::ThinkingTextStyle>,
     // 客户端 User-Agent（随 usage 记录入库）
     user_agent: Option<String>,
@@ -71,12 +68,7 @@ pub(crate) async fn handle_stream_request(
     let call_provider = std::sync::Arc::clone(&provider);
     let mut upstream_call = Box::pin(async move {
         call_provider
-            .call_api_stream(
-                &request_body,
-                is_compact_request,
-                thinking_adaptive_requested,
-                &bound_ids,
-            )
+            .call_api_stream(&request_body, is_compact_request, &bound_ids)
             .await
     });
 
@@ -96,26 +88,7 @@ pub(crate) async fn handle_stream_request(
             &signature_repair.rejected,
         );
 
-        // 账号级 thinking 开关是最终裁决（开 = 强制思考，关 = 禁止思考），必须在选中账号后
-        // 才能确定；故障转移后的账号即 credential_id 对应账号
-        let client_thinking_enabled = thinking_enabled;
-        let thinking_enabled = super::helpers::effective_thinking_enabled(
-            &provider,
-            credential_id,
-            model,
-            client_thinking_enabled,
-        );
-        tracing::info!(
-            model = %model,
-            credential_id,
-            client_request = client_thinking_enabled,
-            effective = thinking_enabled,
-            "[THINKING] 账号开关裁决后的深度思考状态"
-        );
         let thinking_as_text = thinking_as_text_allowed.filter(|_| thinking_enabled);
-
-        // 账号开关关闭时 provider 已剥离 thinking 文本标签，预算不再生效
-        let thinking_budget_tokens = thinking_budget_tokens.filter(|_| thinking_enabled);
 
         // 创建流处理上下文
         let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled)

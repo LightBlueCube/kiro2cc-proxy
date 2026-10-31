@@ -100,7 +100,6 @@ pub(crate) mod tests {
         };
         let update = crate::admin::types::UpdateCredentialRequest {
             nickname: Some("new-name".to_string()),
-            thinking_adaptive: Some(true),
             // 登录来源是纯展示字段，不参与认证流程与订阅等级判定，变更后订阅信息仍然有效
             provider: Some("Google".to_string()),
             ..Default::default()
@@ -279,7 +278,6 @@ pub(crate) mod tests {
             credentials.email = Some("fictional@example.invalid".to_string());
             credentials.proxy_url = Some("direct".to_string());
             credentials.priority = 7;
-            credentials.thinking_adaptive = true;
             credentials.subscription_title = Some("KIRO FREE".to_string());
         }
         let mut refreshed_credentials = refreshing_credentials.clone();
@@ -324,7 +322,6 @@ pub(crate) mod tests {
         );
         assert_eq!(committed.proxy_url.as_deref(), Some("direct"));
         assert_eq!(committed.priority, 7);
-        assert!(committed.thinking_adaptive);
         assert_eq!(committed.subscription_title.as_deref(), Some("KIRO FREE"));
     }
 
@@ -432,33 +429,6 @@ pub(crate) mod tests {
                 )
                 .is_err()
         );
-    }
-
-    #[test]
-    fn test_apply_update_fields_thinking_adaptive() {
-        let mut cred = KiroCredentials::default();
-        assert!(!cred.thinking_adaptive);
-
-        // Some(v) 覆盖现有值
-        let mut update = crate::admin::types::UpdateCredentialRequest {
-            thinking_adaptive: Some(true),
-            ..Default::default()
-        };
-        MultiTokenManager::apply_update_fields(&mut cred, &update);
-        assert!(cred.thinking_adaptive);
-
-        update.thinking_adaptive = Some(false);
-        MultiTokenManager::apply_update_fields(&mut cred, &update);
-        assert!(!cred.thinking_adaptive);
-
-        // None 表示不更新该字段
-        let update = crate::admin::types::UpdateCredentialRequest {
-            thinking_adaptive: None,
-            ..Default::default()
-        };
-        cred.thinking_adaptive = true;
-        MultiTokenManager::apply_update_fields(&mut cred, &update);
-        assert!(cred.thinking_adaptive);
     }
 
     #[test]

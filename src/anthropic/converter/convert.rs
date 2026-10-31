@@ -286,11 +286,6 @@ pub(super) fn convert_request_with_chunking(
         conversation_state,
         additional_model_request_fields,
         is_compact_request: is_compact,
-        thinking_adaptive_requested: req
-            .thinking
-            .as_ref()
-            .map(|t| t.thinking_type == "adaptive")
-            .unwrap_or(false),
         prefix_cached,
         effort,
         thinking_budget_tokens: injected_thinking_budget,

@@ -116,7 +116,6 @@ impl MultiTokenManager {
                     health_detail: Self::health_detail_at(e, now),
                     throttle_count: e.throttle_count,
                     disabled_reason: e.disabled_reason,
-                    thinking_adaptive: e.credentials.thinking_adaptive,
                 })
                 .collect(),
             current_id,
@@ -947,9 +946,6 @@ impl MultiTokenManager {
             } else {
                 Some(pp.clone())
             };
-        }
-        if let Some(ta) = update.thinking_adaptive {
-            cred.thinking_adaptive = ta;
         }
         if identity_updated {
             cred.subscription_title = None;

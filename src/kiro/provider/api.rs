@@ -84,17 +84,10 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_compact: bool,
-        thinking_adaptive_requested: bool,
         bound_ids: &[u64],
     ) -> anyhow::Result<ApiResponse> {
-        self.call_api_with_retry(
-            request_body,
-            false,
-            is_compact,
-            thinking_adaptive_requested,
-            bound_ids,
-        )
-        .await
+        self.call_api_with_retry(request_body, false, is_compact, bound_ids)
+            .await
     }
 
     /// 发送流式 API 请求
@@ -116,17 +109,10 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_compact: bool,
-        thinking_adaptive_requested: bool,
         bound_ids: &[u64],
     ) -> anyhow::Result<ApiResponse> {
-        self.call_api_with_retry(
-            request_body,
-            true,
-            is_compact,
-            thinking_adaptive_requested,
-            bound_ids,
-        )
-        .await
+        self.call_api_with_retry(request_body, true, is_compact, bound_ids)
+            .await
     }
 
     /// 发送 MCP API 请求

@@ -15,11 +15,6 @@ pub struct ConversionResult {
     /// 用于 provider 层选择更长的上游超时（压缩请求通常处理超长历史，
     /// 耗时明显高于普通请求）。检测逻辑见 `is_compact_request`。
     pub is_compact_request: bool,
-    /// 客户端是否请求了 `thinking: {"type": "adaptive"}`
-    ///
-    /// 账号在 provider 阶段才确定，converter 阶段先记录该意图，
-    /// 由 provider 按目标账号的 `thinking_adaptive` 开关决定是否注入。
-    pub thinking_adaptive_requested: bool,
     /// 本次请求的缓存前缀（`history[0]` + 历史对话轮次）是否已命中会话级冻结缓存。
     ///
     /// 仅当存在历史对话轮次（去除内联 system 与末尾 prefill 后 `messages.len() > 1`）
@@ -30,8 +25,6 @@ pub struct ConversionResult {
     /// 实际发往上游的 effort（`output_config.effort` / GPT 系 `reasoning.effort`；未发送为 None）
     pub effort: Option<String>,
     /// 实际注入 history[0] 的 thinking 文本标签预算（`max_thinking_length`；未注入为 None）
-    ///
-    /// provider 按选中账号的 thinking 开关可能剥离该标签，调用方需结合裁决结果使用。
     pub thinking_budget_tokens: Option<i32>,
     /// 历史中带推理却没能回传上游的 assistant 轮次
     pub history_thinking_loss: HistoryThinkingLoss,

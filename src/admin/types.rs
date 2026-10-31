@@ -71,8 +71,6 @@ pub struct CredentialStatusItem {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
-    /// 账号级 thinking adaptive 注入开关（前端按钮显示当前状态）
-    pub thinking_adaptive: bool,
     /// 健康状态
     pub health_status: crate::kiro::token_manager::HealthStatus,
     /// 健康状态的判定依据（近 10 分钟限流 / 空响应、连续失败、冷却剩余）
@@ -202,7 +200,6 @@ mod tests {
             last_used_at: None,
             has_proxy: false,
             proxy_url: None,
-            thinking_adaptive: true,
             health_status: crate::kiro::token_manager::HealthStatus::Healthy,
             health_detail: Default::default(),
             throttle_count: 0,
@@ -334,9 +331,6 @@ pub struct UpdateCredentialRequest {
     /// 登录来源 / IdP 标识（可选；social 账号存 Google / GitHub）
     /// 传空字符串表示清除该字段
     pub provider: Option<String>,
-
-    /// 账号级 thinking adaptive 注入开关（可选，None 表示不更新该字段）
-    pub thinking_adaptive: Option<bool>,
 }
 
 // ============ 余额查询 ============

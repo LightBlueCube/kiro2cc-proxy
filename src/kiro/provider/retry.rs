@@ -33,16 +33,12 @@ struct SignatureRepairState {
 
 impl SignatureRepairState {
     /// 又一次被拒：确认上一次删除，再删下一个；返回 false 表示已无可删
-    ///
-    /// `history_offset`：本次发出前 rewrite 从 history 头部删掉的条数，用于把上游
-    /// 点名的下标换算回 `self.body` 的下标。
-    fn advance(&mut self, original_body: &str, error_body: &str, history_offset: usize) -> bool {
+    fn advance(&mut self, original_body: &str, error_body: &str) -> bool {
         if self.outcome.stripped_all {
             return false;
         }
 
-        let rejected_index =
-            KiroProvider::rejected_history_index(error_body).map(|index| index + history_offset);
+        let rejected_index = KiroProvider::rejected_history_index(error_body);
         let mapping_holds = match self.unconfirmed.take() {
             Some((index, _)) if rejected_index == Some(index) => false,
             Some((_, signature)) => {
@@ -126,10 +122,10 @@ mod tests {
         let original = body_with_signatures(3);
         let mut state = SignatureRepairState::default();
 
-        assert!(state.advance(&original, &rejection_at(1), 0));
+        assert!(state.advance(&original, &rejection_at(1)));
         assert_eq!(remaining_signatures(&state), ["s2", "s3"]);
         // 上游转而点名下一处：s1 确认是坏签名
-        assert!(state.advance(&original, &rejection_at(5), 0));
+        assert!(state.advance(&original, &rejection_at(5)));
         assert_eq!(remaining_signatures(&state), ["s2"]);
 
         let outcome = state.finish();
@@ -142,8 +138,8 @@ mod tests {
         // 删掉 history[1] 后上游仍点名 1：映射不符，删错的 s1 不算坏签名
         let original = body_with_signatures(2);
         let mut state = SignatureRepairState::default();
-        assert!(state.advance(&original, &rejection_at(1), 0));
-        assert!(state.advance(&original, &rejection_at(1), 0));
+        assert!(state.advance(&original, &rejection_at(1)));
+        assert!(state.advance(&original, &rejection_at(1)));
         assert!(remaining_signatures(&state).is_empty());
 
         let outcome = state.finish();
@@ -155,20 +151,10 @@ mod tests {
     fn unparsable_rejection_strips_all_and_then_gives_up() {
         let original = body_with_signatures(2);
         let mut state = SignatureRepairState::default();
-        assert!(state.advance(&original, r#"{"reason":"THINKING_SIGNATURE_INVALID"}"#, 0));
+        assert!(state.advance(&original, r#"{"reason":"THINKING_SIGNATURE_INVALID"}"#));
         assert!(state.outcome.stripped_all);
         // 全部删除后仍被拒：无可再删，交给普通 400 处理
-        assert!(!state.advance(&original, &rejection_at(1), 0));
-    }
-
-    #[test]
-    fn upstream_index_is_shifted_by_rewrite_offset() {
-        // 发出前删掉了 2 条前缀：上游点名 1，对应改写前的 history[3]
-        let original = body_with_signatures(2);
-        let mut state = SignatureRepairState::default();
-        assert!(state.advance(&original, &rejection_at(1), 2));
-        assert_eq!(remaining_signatures(&state), ["s1"]);
-        assert_eq!(state.finish().rejected, ["s2"]);
+        assert!(!state.advance(&original, &rejection_at(1)));
     }
 
     #[test]
@@ -176,7 +162,7 @@ mod tests {
         let original = body_with_signatures(MAX_TARGETED_SIGNATURE_STRIPS + 2);
         let mut state = SignatureRepairState::default();
         for round in 0..=MAX_TARGETED_SIGNATURE_STRIPS {
-            assert!(state.advance(&original, &rejection_at(2 * round + 1), 0));
+            assert!(state.advance(&original, &rejection_at(2 * round + 1)));
         }
         let outcome = state.finish();
         assert_eq!(outcome.rejected.len(), MAX_TARGETED_SIGNATURE_STRIPS);
@@ -223,7 +209,6 @@ impl KiroProvider {
         request_body: &str,
         is_stream: bool,
         is_compact: bool,
-        thinking_adaptive_requested: bool,
         bound_ids: &[u64],
     ) -> anyhow::Result<super::ApiResponse> {
         // 模型感知路由：确保各账号的实际可用模型探测结果是新的。
@@ -346,12 +331,7 @@ impl KiroProvider {
 
             let url = self.base_url_for(&ctx.credentials, &endpoint);
             let current_body = signature_repair.body.as_deref().unwrap_or(request_body);
-            let history_offset = Self::rewritten_history_offset(current_body, &ctx.credentials);
-            let effective_body = Self::rewrite_request_body(
-                current_body,
-                &ctx.credentials,
-                thinking_adaptive_requested,
-            );
+            let effective_body = Self::rewrite_profile_arn(current_body, &ctx.credentials);
             let headers = match self.build_headers(&ctx, &effective_body, attempt, &endpoint) {
                 Ok(h) => h,
                 Err(e) => {
@@ -535,7 +515,7 @@ impl KiroProvider {
                 // 历史推理签名无效（签名损坏或来自其他服务）：删掉被点名的签名立即重试。
                 // 属请求内容问题，不计入账号失败、不退避；模型只是看不到那一轮的思考。
                 if Self::is_thinking_signature_invalid(&body)
-                    && signature_repair.advance(request_body, &body, history_offset)
+                    && signature_repair.advance(request_body, &body)
                 {
                     tracing::warn!(
                         stripped_all = signature_repair.outcome.stripped_all,
