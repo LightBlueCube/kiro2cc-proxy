@@ -16,12 +16,12 @@
 //! | 绑定账号本次请求内被避让（`Spilled`）  | 保持，不续期                 |
 //! | 绑定账号不在候选集（`Fresh`）          | 改绑到本次账号               |
 //! | 绑定账号上游限流                       | 连续计数，满 3 次解绑        |
-//! | 绑定账号完整产出响应                   | 限流计数清零、续期           |
+//! | 某账号完整产出响应                     | 绑定到该账号、限流计数清零   |
 //!
-//! 本地限额（每账号 RPM / 并发）满不算限流：同一会话的并行请求（如 Claude Code 子代理）
-//! 挤满绑定账号时只临时溢出到其它账号（`Spilled`），不影响绑定。
+//! 完整产出响应的账号接管绑定：它刚处理过整段前缀，缓存比原绑定账号更长、更新，回原账号
+//! 只会多付一轮增量、且原账号缓存更早过期。避让后请求失败则绑定不变（失败的账号没有可用缓存）。
 //!
-//! 前缀族只记最近一次处理它的账号：溢出到别的账号后，那个账号同样写入了该前缀的缓存。
+//! 前缀族同样只在完整产出响应时更新为该账号，失败的请求不会把新会话引向没有缓存的账号。
 //!
 //! [`MultiTokenManager::acquire_for_request`]: crate::kiro::token_manager::MultiTokenManager::acquire_for_request
 
@@ -99,6 +99,12 @@ impl Affinity {
         self.preferred_at(keys, Instant::now())
     }
 
+    /// 会话是否有有效绑定（没有的是新会话，选号时受 RPM 软上限约束）
+    pub fn is_bound(&self, conversation: &str) -> bool {
+        self.bound_account_at(conversation, Instant::now())
+            .is_some()
+    }
+
     /// 记录本次请求的选号结果（`placement` 相对于 [`Self::preferred`] 的返回值）
     pub fn on_routed(&self, keys: &RouteKeys, account: u64, placement: Placement) {
         self.on_routed_at(keys, account, placement, Instant::now());
@@ -126,9 +132,9 @@ impl Affinity {
         );
     }
 
-    /// 账号完整产出了响应
-    pub fn on_completed(&self, conversation: &str, account: u64) {
-        self.on_completed_at(conversation, account, Instant::now());
+    /// 账号完整产出了响应：它已写入本次整段前缀的缓存，接管会话绑定与前缀族
+    pub fn on_completed(&self, keys: &RouteKeys, account: u64) {
+        self.on_completed_at(keys, account, Instant::now());
     }
 
     pub fn metrics(&self) -> AffinityMetrics {
@@ -163,19 +169,6 @@ impl Affinity {
 
     fn on_routed_at(&self, keys: &RouteKeys, account: u64, placement: Placement, now: Instant) {
         self.route_conversation(&keys.conversation, account, placement, now);
-
-        let Some(family) = &keys.prefix_family else {
-            return;
-        };
-        let mut families = self.families.lock();
-        families.insert(
-            family.clone(),
-            FamilyHint {
-                account,
-                last_used: now,
-            },
-        );
-        enforce_capacity(&mut families, MAX_PREFIX_FAMILIES, now, |h| h.last_used);
     }
 
     fn route_conversation(
@@ -228,16 +221,40 @@ impl Affinity {
         }
     }
 
-    fn on_completed_at(&self, conversation: &str, account: u64, now: Instant) {
-        if let Some(binding) = self
-            .bindings
-            .lock()
-            .get_mut(conversation)
-            .filter(|b| b.account == account)
-        {
-            binding.upstream_throttles = 0;
-            binding.last_used = now;
+    fn on_completed_at(&self, keys: &RouteKeys, account: u64, now: Instant) {
+        self.complete_conversation(&keys.conversation, account, now);
+
+        let Some(family) = &keys.prefix_family else {
+            return;
+        };
+        let mut families = self.families.lock();
+        families.insert(
+            family.clone(),
+            FamilyHint {
+                account,
+                last_used: now,
+            },
+        );
+        enforce_capacity(&mut families, MAX_PREFIX_FAMILIES, now, |h| h.last_used);
+    }
+
+    fn complete_conversation(&self, conversation: &str, account: u64, now: Instant) {
+        let mut bindings = self.bindings.lock();
+        let taken_over = bindings
+            .get(conversation)
+            .is_some_and(|b| is_live(b.last_used, now) && b.account != account);
+        if taken_over {
+            self.rebinds.fetch_add(1, Ordering::Relaxed);
         }
+        bindings.insert(
+            conversation.to_string(),
+            Binding {
+                account,
+                last_used: now,
+                upstream_throttles: 0,
+            },
+        );
+        enforce_capacity(&mut bindings, MAX_BINDINGS, now, |b| b.last_used);
     }
 }
 
@@ -367,7 +384,7 @@ mod tests {
         for _ in 1..THROTTLE_UNBIND_THRESHOLD {
             affinity.on_upstream_throttled(KEY, 7);
         }
-        affinity.on_completed(KEY, 7);
+        affinity.on_completed(&session(), 7);
         for _ in 1..THROTTLE_UNBIND_THRESHOLD {
             affinity.on_upstream_throttled(KEY, 7);
         }
@@ -375,27 +392,40 @@ mod tests {
     }
 
     #[test]
-    fn test_reports_on_other_account_are_ignored() {
+    fn test_completion_on_other_account_takes_over_binding() {
+        // 绑定账号被避让，溢出到 8 并完整产出：8 已缓存整段前缀，绑定改到 8
         let affinity = Affinity::new();
         affinity.on_routed(&session(), 7, Placement::Fresh);
-        for _ in 1..THROTTLE_UNBIND_THRESHOLD {
+        affinity.on_routed(&session(), 8, Placement::Spilled);
+        assert_eq!(affinity.preferred(&session()), Some(7), "完成前不动绑定");
+
+        affinity.on_completed(&session(), 8);
+        assert_eq!(affinity.preferred(&session()), Some(8));
+        assert_eq!(affinity.metrics().rebinds, 1);
+
+        // 原绑定账号的限流报告不再影响绑定
+        for _ in 0..THROTTLE_UNBIND_THRESHOLD {
             affinity.on_upstream_throttled(KEY, 7);
         }
-        // 溢出到账号 8 的请求成功，不代表绑定账号恢复
-        affinity.on_completed(KEY, 8);
-        for _ in 0..THROTTLE_UNBIND_THRESHOLD {
-            affinity.on_upstream_throttled(KEY, 8);
-        }
-        assert_eq!(affinity.preferred(&session()), Some(7));
+        assert_eq!(affinity.preferred(&session()), Some(8));
+    }
 
-        affinity.on_upstream_throttled(KEY, 7);
-        assert_eq!(affinity.preferred(&session()), None);
+    #[test]
+    fn test_completion_after_binding_expired_binds_without_rebind() {
+        let affinity = Affinity::new();
+        let t0 = Instant::now();
+        affinity.on_routed_at(&session(), 7, Placement::Fresh, t0);
+
+        let later = t0 + BINDING_IDLE_TTL;
+        affinity.on_completed_at(&session(), 8, later);
+        assert_eq!(affinity.preferred_at(&session(), later), Some(8));
+        assert_eq!(affinity.metrics().rebinds, 0, "过期绑定被替换不算改绑");
     }
 
     #[test]
     fn test_unbound_session_prefers_family_account() {
         let affinity = Affinity::new();
-        affinity.on_routed(&keys("a", Some(FAMILY)), 7, Placement::Fresh);
+        affinity.on_completed(&keys("a", Some(FAMILY)), 7);
 
         let new_session = keys("b", Some(FAMILY));
         assert_eq!(affinity.preferred(&new_session), Some(7));
@@ -408,10 +438,20 @@ mod tests {
     }
 
     #[test]
+    fn test_family_hint_only_follows_completed_requests() {
+        // 路由到账号但请求失败：该账号没有可用缓存，前缀族不应指向它
+        let affinity = Affinity::new();
+        affinity.on_completed(&keys("a", Some(FAMILY)), 7);
+        affinity.on_routed(&keys("b", Some(FAMILY)), 8, Placement::Fresh);
+
+        assert_eq!(affinity.preferred(&keys("c", Some(FAMILY))), Some(7));
+    }
+
+    #[test]
     fn test_binding_outranks_family() {
         let affinity = Affinity::new();
-        affinity.on_routed(&keys("a", Some(FAMILY)), 7, Placement::Fresh);
-        affinity.on_routed(&keys("b", Some(FAMILY)), 8, Placement::Fresh);
+        affinity.on_completed(&keys("a", Some(FAMILY)), 7);
+        affinity.on_completed(&keys("b", Some(FAMILY)), 8);
 
         // 前缀族最近落在 8，但 a 自身绑定 7
         assert_eq!(affinity.preferred(&keys("a", Some(FAMILY))), Some(7));
@@ -422,7 +462,7 @@ mod tests {
     fn test_family_hint_expires_with_cache_ttl() {
         let affinity = Affinity::new();
         let t0 = Instant::now();
-        affinity.on_routed_at(&keys("a", Some(FAMILY)), 7, Placement::Fresh, t0);
+        affinity.on_completed_at(&keys("a", Some(FAMILY)), 7, t0);
 
         let new_session = keys("b", Some(FAMILY));
         assert_eq!(
@@ -437,12 +477,13 @@ mod tests {
 
     #[test]
     fn test_unbound_session_landing_elsewhere_binds_without_hit() {
-        // 前缀族账号不可用（不在候选集 / 被避让）：会话绑到实际账号，前缀族改指向它
+        // 前缀族账号不可用（不在候选集 / 被避让）：会话绑到实际账号，完成后前缀族改指向它
         let affinity = Affinity::new();
-        affinity.on_routed(&keys("a", Some(FAMILY)), 7, Placement::Fresh);
+        affinity.on_completed(&keys("a", Some(FAMILY)), 7);
 
         let new_session = keys("b", Some(FAMILY));
         affinity.on_routed(&new_session, 8, Placement::Spilled);
+        affinity.on_completed(&new_session, 8);
 
         assert_eq!(affinity.preferred(&new_session), Some(8));
         assert_eq!(affinity.preferred(&keys("c", Some(FAMILY))), Some(8));

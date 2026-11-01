@@ -111,12 +111,12 @@ mod tests {
         set_models(&m, 2, &[MODEL]);
         // 白名单只含 #1 且其明确不支持：候选全部不支持，保持原行为（不回退到白名单之外）
         let (ctx, _) = m
-            .acquire_for_request(Some(MODEL), &[1], None, &[])
+            .acquire_for_request(Some(MODEL), &[1], None, &[], &[])
             .await
             .unwrap();
         assert_eq!(ctx.id, 1);
         let (ctx, _) = m
-            .acquire_for_request(Some(MODEL), &[1, 2], None, &[])
+            .acquire_for_request(Some(MODEL), &[1, 2], None, &[], &[])
             .await
             .unwrap();
         assert_eq!(ctx.id, 2);
@@ -129,7 +129,7 @@ mod tests {
         set_models(&m, 1, &["gpt-5.6-sol"]);
         set_models(&m, 2, &[MODEL]);
         let (ctx, placement) = m
-            .acquire_for_request(Some(MODEL), &[], Some(1), &[])
+            .acquire_for_request(Some(MODEL), &[], Some(1), &[], &[])
             .await
             .unwrap();
         assert_eq!(ctx.id, 2);

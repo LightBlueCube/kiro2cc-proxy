@@ -51,10 +51,11 @@ const SW_DOT = 'absolute top-0.5 size-3 rounded-full bg-white shadow-[0_1px_2px_
 const PSW_MASK = '∗'.repeat(12)
 
 /** 运行时配置中可单独编辑的字段 */
-type RuntimeField = 'maxRpm' | 'maxConcurrency' | 'chunkLines' | 'port' | 'proxyUrl'
+type RuntimeField = 'maxRpm' | 'softRpm' | 'maxConcurrency' | 'chunkLines' | 'port' | 'proxyUrl'
 
 const RUNTIME_LABEL_KEY: Record<RuntimeField, string> = {
   maxRpm: 'settings.maxRpmPerCredential',
+  softRpm: 'settings.softRpmPerCredential',
   maxConcurrency: 'settings.maxConcurrencyPerCredential',
   chunkLines: 'settings.writeChunkingMaxLines',
   port: 'settings.port',
@@ -210,6 +211,7 @@ export function SettingsPanel({
   const { mutate: setRuntimeConfigMut, isPending: isSettingRuntimeConfig } = useSetRuntimeConfig()
   const [runtimeDraft, setRuntimeDraft] = useState<Record<RuntimeField, string>>({
     maxRpm: '',
+    softRpm: '',
     maxConcurrency: '',
     chunkLines: '',
     port: '',
@@ -253,12 +255,14 @@ export function SettingsPanel({
   const saveRuntimeField = (field: RuntimeField) => {
     const payload: {
       maxRpmPerCredential?: number
+      softRpmPerCredential?: number
       maxConcurrencyPerCredential?: number
       writeChunkingMaxLines?: number
       port?: number
       proxyUrl?: string
     } = {}
     if (field === 'maxRpm') payload.maxRpmPerCredential = Number(runtimeDraft.maxRpm)
+    else if (field === 'softRpm') payload.softRpmPerCredential = Number(runtimeDraft.softRpm)
     else if (field === 'maxConcurrency') payload.maxConcurrencyPerCredential = Number(runtimeDraft.maxConcurrency)
     else if (field === 'chunkLines') payload.writeChunkingMaxLines = Number(runtimeDraft.chunkLines)
     else if (field === 'port') payload.port = Number(runtimeDraft.port)
@@ -275,6 +279,8 @@ export function SettingsPanel({
 
   const startEditRuntime = (field: RuntimeField) => {
     if (field === 'maxRpm') setRuntimeDraft((d) => ({ ...d, maxRpm: String(runtimeConfigData?.maxRpmPerCredential ?? '') }))
+    else if (field === 'softRpm')
+      setRuntimeDraft((d) => ({ ...d, softRpm: String(runtimeConfigData?.softRpmPerCredential ?? '') }))
     else if (field === 'maxConcurrency')
       setRuntimeDraft((d) => ({ ...d, maxConcurrency: String(runtimeConfigData?.maxConcurrencyPerCredential ?? '') }))
     else if (field === 'chunkLines') setRuntimeDraft((d) => ({ ...d, chunkLines: String(runtimeConfigData?.writeChunkingMaxLines ?? '') }))
@@ -285,11 +291,11 @@ export function SettingsPanel({
 
   const cancelEditRuntime = () => {
     setEditingRuntime(null)
-    setRuntimeDraft({ maxRpm: '', maxConcurrency: '', chunkLines: '', port: '', proxyUrl: '' })
+    setRuntimeDraft({ maxRpm: '', softRpm: '', maxConcurrency: '', chunkLines: '', port: '', proxyUrl: '' })
   }
 
   const runtimeCanSave = (field: RuntimeField) => {
-    if (field === 'maxRpm' || field === 'maxConcurrency' || field === 'chunkLines') {
+    if (field === 'maxRpm' || field === 'softRpm' || field === 'maxConcurrency' || field === 'chunkLines') {
       return isU32(runtimeDraft[field])
     }
     if (field === 'port') {
@@ -405,6 +411,41 @@ export function SettingsPanel({
                 </Button>
               </>
             )}
+          </Row>
+          <Row label={t('settings.softRpmPerCredential')} desc={t('settings.softRpmPerCredentialDesc')}>
+            {editingRuntime === 'softRpm' ? (
+              runtimeEditor(
+                'softRpm',
+                runtimeDraft.softRpm,
+                (v) => setRuntimeDraft((d) => ({ ...d, softRpm: v })),
+                'number',
+                runtimeCanSave('softRpm')
+              )
+            ) : (
+              <>
+                <div className={FIELD_S}>{isLoadingRuntimeConfig ? t('common.loading') : (runtimeConfigData?.softRpmPerCredential ?? '—')}</div>
+                <Button variant="ghost" size="sm" disabled={isLoadingRuntimeConfig || isRuntimeConfigError || isSettingRuntimeConfig} onClick={() => startEditRuntime('softRpm')}>
+                  <Pencil />
+                  {t('common.edit')}
+                </Button>
+              </>
+            )}
+          </Row>
+          <Row label={t('settings.softRpmSpillToLowerPriority')} desc={t('settings.softRpmSpillToLowerPriorityDesc')}>
+            <Sw
+              label={t('settings.softRpmSpillToLowerPriority')}
+              on={!!runtimeConfigData?.softRpmSpillToLowerPriority}
+              disabled={isLoadingRuntimeConfig || isRuntimeConfigError || isSettingRuntimeConfig}
+              onToggle={() =>
+                setRuntimeConfigMut(
+                  { softRpmSpillToLowerPriority: !runtimeConfigData?.softRpmSpillToLowerPriority },
+                  {
+                    onSuccess: (d) => toast.success(d.message),
+                    onError: (e) => toast.error(extractErrorMessage(e)),
+                  }
+                )
+              }
+            />
           </Row>
           <Row label={t('settings.maxConcurrencyPerCredential')} desc={t('settings.maxConcurrencyPerCredentialDesc')}>
             {editingRuntime === 'maxConcurrency' ? (

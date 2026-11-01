@@ -167,6 +167,10 @@ pub struct MultiTokenManager {
     /// 每账号 RPM 上限（运行时可经 Admin API 热切换；0 = 不限）。
     /// 独立于 config 持久化值，避免为热切换引入 Config 内部可变性
     pub(crate) max_rpm_per_credential: AtomicU32,
+    /// 每账号 RPM 软上限（新会话不绑定到达到它的账号；运行时可热切换；0 = 关闭）
+    pub(crate) soft_rpm_per_credential: AtomicU32,
+    /// 优先级模式下最高一档全部达到软上限时，新会话是否落到下一档（运行时可热切换）
+    pub(crate) soft_rpm_spill_to_lower_priority: AtomicBool,
     /// 每账号并发上限（运行时可经 Admin API 热切换；0 = 不限）
     pub(crate) max_concurrency_per_credential: AtomicU32,
     /// 每账号实际可用模型缓存（账号 ID → 上游 ListAvailableModels 结果），

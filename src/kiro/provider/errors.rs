@@ -39,6 +39,19 @@ impl KiroProvider {
         Duration::from_millis(capped.saturating_add(jitter))
     }
 
+    /// 本地 RPM 已达软上限的账号（软上限为 0 时关闭，返回空）
+    pub(crate) fn soft_rpm_full_credentials(&self) -> Vec<u64> {
+        let soft = u64::from(self.token_manager.soft_rpm_per_credential());
+        let Some(rpm) = self.rpm_tracker.as_ref().filter(|_| soft > 0) else {
+            return Vec::new();
+        };
+        self.token_manager
+            .credential_ids()
+            .into_iter()
+            .filter(|&id| rpm.credential_rpm(id) >= soft)
+            .collect()
+    }
+
     /// 向账号发出一次请求前占用其本地限额名额（RPM 计 1 次、在途 +1，守卫 drop 时在途 -1）
     ///
     /// `queue_until` 为 None 时满了立即返回（还有别的账号可换）；为 Some 时排队到该时刻。

@@ -61,10 +61,10 @@ impl UpstreamFeedback {
         self.provider
             .token_manager
             .report_response_completed(self.route.credential_id, self.route.model.as_deref());
-        if let Some(key) = self.route.conversation_id.as_deref() {
+        if let Some(keys) = &self.route.route_keys {
             self.provider
                 .affinity
-                .on_completed(key, self.route.credential_id);
+                .on_completed(keys, self.route.credential_id);
         }
     }
 
@@ -83,8 +83,8 @@ impl UpstreamFeedback {
 pub struct UpstreamRoute {
     pub(super) credential_id: u64,
     pub(super) endpoint: crate::kiro::endpoint::EndpointName,
-    /// 会话亲和的键（conversationId）
-    pub(super) conversation_id: Option<String>,
+    /// 会话亲和的键（conversationId 与前缀族）
+    pub(super) route_keys: Option<crate::kiro::affinity::RouteKeys>,
     pub(super) model: Option<String>,
     /// 本次请求内第几次尝试（从 1 起）
     pub(super) attempt: u32,
@@ -184,7 +184,7 @@ impl KiroProvider {
             // 获取调用上下文（MCP 不涉及模型选择）
             let ctx = match self
                 .token_manager
-                .acquire_for_request(None, bound_ids, None, &throttled_in_request)
+                .acquire_for_request(None, bound_ids, None, &throttled_in_request, &[])
                 .await
             {
                 Ok((ctx, _)) => ctx,

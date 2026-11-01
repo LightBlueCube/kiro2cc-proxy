@@ -42,6 +42,7 @@ impl MultiTokenManager {
     ///
     /// 锁序：调用方可以持有 `entries` 锁再进来；`model_support` 是叶子锁，
     /// 持有期间不会再获取任何其它锁，因此不存在反向路径。
+    #[cfg(test)]
     pub(crate) fn is_known_unsupported(&self, id: u64, model: Option<&str>) -> bool {
         let Some(model) = model.filter(|m| !is_unfilterable_model(m)) else {
             return false;

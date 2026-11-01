@@ -504,8 +504,10 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `proxyUsername` | 否 | — | 代理用户名 |
 | `proxyPassword` | 否 | — | 代理密码 |
 | `tlsBackend` | 否 | `rustls` | TLS 后端：`rustls` 或 `native-tls` |
-| `loadBalancingMode` | 否 | `priority` | `priority`（按优先级）或 `balanced`（轮询） |
-| `maxRpmPerCredential` | 否 | `0` | 单个账号每分钟最大请求数；`0` 表示不限。设置页保存后立即热生效并写入 `config.json` |
+| `loadBalancingMode` | 否 | `priority` | `priority`：只用优先级最高的一档账号，档内轮询；`balanced`：在全部可用账号间轮询。已有会话都优先回到缓存了它上下文的账号 |
+| `maxRpmPerCredential` | 否 | `30` | 单账号 RPM 硬上限，对所有请求生效：满了换号，无号可换时排队最多 10 秒，仍满返回 429；`0` 表示不限。设置页保存后立即热生效并写入 `config.json` |
+| `softRpmPerCredential` | 否 | `10` | 单账号 RPM 软上限：达到后新会话不再分配到该账号，已有会话照常使用；所有账号都达到时照常分配，由硬上限把关；`0` 表示关闭。设置页保存后立即热生效 |
+| `softRpmSpillToLowerPriority` | 否 | `true` | 仅 `priority` 模式：最高一档全部达到软上限时，新会话是否分配到下一档；`false` 时留在最高一档，由硬上限把关。设置页保存后立即热生效 |
 | `forwardSuggestionMode` | 否 | `false` | Suggestion Mode 输入建议请求放行开关。`false`（默认）时服务端拦截 Claude Code 每轮对话后自动发起的全量上下文预测请求并返回空响应，不产生 Token 消耗；`true` 时正常转发上游，以展示输入建议，但每轮会额外产生一次全量上下文计费请求。可用环境变量 `FORWARD_SUGGESTION_MODE` 覆盖 |
 | `clientTokenPassthrough` | 否 | `false` | 客户端 token 直通：`true` 时返回给客户端的 `usage` 字段 1:1 上报真实值；`false`（默认）时按 `0.6657` 系数缩放展示。适用于按返回用量统计上下文占用的第三方客户端；无论开关状态如何，Claude Code 的 auto-compact 触发时机保持不变。可用环境变量 `CLIENT_TOKEN_PASSTHROUGH` 覆盖 |
 | `modelsOfficialAliases` | 否 | `false` | `true` 时 `/v1/models` 为上游点号模型 ID 追加官方连字符别名（如 `claude-opus-4.6` → `claude-opus-4-6`，4.5 代际再追加带日期的 ID），供按模型列表生成映射的下游网关使用；默认关闭，避免 Claude Code 模型选择器出现重复项。可用环境变量 `MODELS_OFFICIAL_ALIASES` 覆盖 |
@@ -527,7 +529,8 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
   "proxyUrl": "http://127.0.0.1:7890",
   "tlsBackend": "rustls",
   "loadBalancingMode": "priority",
-  "maxRpmPerCredential": 0,
+  "maxRpmPerCredential": 30,
+  "softRpmPerCredential": 10,
   "forwardSuggestionMode": false,
   "clientTokenPassthrough": false,
   "thinkingAsText": false,
@@ -546,6 +549,8 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | 思考内容文本化展示 | `thinkingAsText` | 立即热生效，仅影响之后的新请求 |
 | DEBUG 日志 | `debugLogs` | 立即热生效，控制台 / 日志文件 / 日志页三处一致 |
 | 每账号 RPM 上限 | `maxRpmPerCredential` | 立即热生效，`0` 表示不限 |
+| 每账号 RPM 软上限 | `softRpmPerCredential` | 立即热生效，`0` 表示关闭 |
+| 软上限满时启用下一优先级 | `softRpmSpillToLowerPriority` | 立即热生效 |
 | 分块写入行数上限 | `writeChunkingMaxLines` | 立即热生效，仅影响之后的新请求，`0` 表示不追加约束 |
 | 监听端口 | `port` | 重启服务后生效，范围为 `1–65535` |
 | 上游代理地址 | `proxyUrl` | 重启服务后生效；支持 `http`、`https`、`socks5`，留空表示不使用代理 |

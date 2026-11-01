@@ -467,6 +467,10 @@ pub struct SetDebugLogsRequest {
 pub struct RuntimeConfigResponse {
     /// 每账号 RPM 上限（运行时当前值，0 = 不限，热生效）
     pub max_rpm_per_credential: u32,
+    /// 每账号 RPM 软上限（运行时当前值，0 = 关闭，热生效）
+    pub soft_rpm_per_credential: u32,
+    /// 软上限是否允许新会话溢出到下一优先级（运行时当前值，热生效）
+    pub soft_rpm_spill_to_lower_priority: bool,
     /// 每账号并发上限（运行时当前值，0 = 不限，热生效）
     pub max_concurrency_per_credential: u32,
     /// 监听端口（config.json 持久化值，重启后生效）
@@ -483,6 +487,10 @@ pub struct RuntimeConfigResponse {
 pub struct SetRuntimeConfigRequest {
     /// 每账号 RPM 上限（0 = 不限，热生效）
     pub max_rpm_per_credential: Option<u32>,
+    /// 每账号 RPM 软上限（0 = 关闭，热生效）
+    pub soft_rpm_per_credential: Option<u32>,
+    /// 软上限是否允许新会话溢出到下一优先级（热生效）
+    pub soft_rpm_spill_to_lower_priority: Option<bool>,
     /// 每账号并发上限（0 = 不限，热生效）
     pub max_concurrency_per_credential: Option<u32>,
     /// 监听端口（1–65535，重启后生效）

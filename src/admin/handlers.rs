@@ -454,6 +454,8 @@ pub async fn get_runtime_config(State(state): State<AdminState>) -> impl IntoRes
 
     Json(super::types::RuntimeConfigResponse {
         max_rpm_per_credential: max_rpm,
+        soft_rpm_per_credential: state.service.soft_rpm_per_credential(),
+        soft_rpm_spill_to_lower_priority: state.service.soft_rpm_spill_to_lower_priority(),
         max_concurrency_per_credential: max_concurrency,
         port,
         proxy_url,
@@ -502,6 +504,12 @@ pub async fn set_runtime_config(
     if let Some(max_rpm) = payload.max_rpm_per_credential {
         state.service.set_max_rpm_per_credential(max_rpm);
     }
+    if let Some(soft_rpm) = payload.soft_rpm_per_credential {
+        state.service.set_soft_rpm_per_credential(soft_rpm);
+    }
+    if let Some(spill) = payload.soft_rpm_spill_to_lower_priority {
+        state.service.set_soft_rpm_spill_to_lower_priority(spill);
+    }
     if let Some(max_concurrency) = payload.max_concurrency_per_credential {
         state
             .service
@@ -514,6 +522,12 @@ pub async fn set_runtime_config(
         let result = persist_config_field(config_path, |json| {
             if let Some(max_rpm) = payload.max_rpm_per_credential {
                 json["maxRpmPerCredential"] = serde_json::json!(max_rpm);
+            }
+            if let Some(soft_rpm) = payload.soft_rpm_per_credential {
+                json["softRpmPerCredential"] = serde_json::json!(soft_rpm);
+            }
+            if let Some(spill) = payload.soft_rpm_spill_to_lower_priority {
+                json["softRpmSpillToLowerPriority"] = serde_json::json!(spill);
             }
             if let Some(max_concurrency) = payload.max_concurrency_per_credential {
                 json["maxConcurrencyPerCredential"] = serde_json::json!(max_concurrency);
@@ -546,6 +560,12 @@ pub async fn set_runtime_config(
     let mut parts = Vec::new();
     if payload.max_rpm_per_credential.is_some() {
         parts.push("maxRpmPerCredential 已热生效");
+    }
+    if payload.soft_rpm_per_credential.is_some() {
+        parts.push("softRpmPerCredential 已热生效");
+    }
+    if payload.soft_rpm_spill_to_lower_priority.is_some() {
+        parts.push("softRpmSpillToLowerPriority 已热生效");
     }
     if payload.max_concurrency_per_credential.is_some() {
         parts.push("maxConcurrencyPerCredential 已热生效");

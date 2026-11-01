@@ -264,6 +264,15 @@ impl KiroProvider {
             let preferred = route_keys
                 .as_ref()
                 .and_then(|keys| self.affinity.preferred(keys));
+            // 新会话（无有效绑定）不绑到 RPM 软上限已满的账号；已绑定会话只受硬上限约束
+            let is_new_session = route_keys
+                .as_ref()
+                .is_none_or(|keys| !self.affinity.is_bound(&keys.conversation));
+            let soft_full = if is_new_session {
+                self.soft_rpm_full_credentials()
+            } else {
+                Vec::new()
+            };
             let ctx = match self
                 .token_manager
                 .acquire_for_request(
@@ -271,6 +280,7 @@ impl KiroProvider {
                     bound_ids,
                     preferred,
                     &throttled_in_request,
+                    &soft_full,
                 )
                 .await
             {
@@ -437,7 +447,7 @@ impl KiroProvider {
             let route = super::UpstreamRoute {
                 credential_id: ctx.id,
                 endpoint: endpoint.name,
-                conversation_id: route_keys.as_ref().map(|keys| keys.conversation.clone()),
+                route_keys: route_keys.clone(),
                 model: model.clone(),
                 attempt: attempt as u32 + 1,
             };
@@ -682,8 +692,8 @@ impl KiroProvider {
         // 端点级：封禁命中桶（不动其它桶）
         self.endpoint_registry
             .throttle(id, route.endpoint, BUCKET_THROTTLE_DURATION);
-        if let Some(key) = route.conversation_id.as_deref() {
-            self.affinity.on_upstream_throttled(key, id);
+        if let Some(keys) = &route.route_keys {
+            self.affinity.on_upstream_throttled(&keys.conversation, id);
         }
         if let Some(store) = &self.throttle_log_store {
             let context = ThrottleContext {

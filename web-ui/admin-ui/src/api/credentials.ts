@@ -131,9 +131,11 @@ export async function setSuggestionMode(enabled: boolean): Promise<{ success: bo
   return data
 }
 
-// 获取运行时配置（maxRpm / port / proxyUrl / writeChunkingMaxLines）
+// 获取运行时配置（maxRpm / softRpm / port / proxyUrl / writeChunkingMaxLines）
 export async function getRuntimeConfig(): Promise<{
   maxRpmPerCredential: number
+  softRpmPerCredential: number
+  softRpmSpillToLowerPriority: boolean
   maxConcurrencyPerCredential: number
   port: number
   proxyUrl: string | null
@@ -141,6 +143,8 @@ export async function getRuntimeConfig(): Promise<{
 }> {
   const { data } = await api.get<{
     maxRpmPerCredential: number
+    softRpmPerCredential: number
+    softRpmSpillToLowerPriority: boolean
     maxConcurrencyPerCredential: number
     port: number
     proxyUrl: string | null
@@ -152,6 +156,8 @@ export async function getRuntimeConfig(): Promise<{
 // 设置运行时配置（仅更新传入字段；maxRpm / writeChunkingMaxLines 热生效，port/proxyUrl 重启后生效）
 export async function setRuntimeConfig(payload: {
   maxRpmPerCredential?: number
+  softRpmPerCredential?: number
+  softRpmSpillToLowerPriority?: boolean
   maxConcurrencyPerCredential?: number
   writeChunkingMaxLines?: number
   port?: number

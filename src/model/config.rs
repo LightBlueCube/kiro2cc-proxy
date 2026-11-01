@@ -86,9 +86,17 @@ pub struct Config {
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
 
-    /// 单账号每分钟最大请求数（超出时排队等待），0 表示不限制
+    /// 单账号每分钟最大请求数（硬上限：满了换号，无号可换时排队，仍满返回 429），0 表示不限制
     #[serde(default = "default_max_rpm_per_credential")]
     pub max_rpm_per_credential: u32,
+
+    /// 单账号 RPM 软上限：达到后新会话不再绑定到该账号（已绑定的会话不受影响），0 表示关闭
+    #[serde(default = "default_soft_rpm_per_credential")]
+    pub soft_rpm_per_credential: u32,
+
+    /// 优先级模式下，最高一档账号全部达到软上限时，新会话是否落到下一档账号
+    #[serde(default = "default_true")]
+    pub soft_rpm_spill_to_lower_priority: bool,
 
     /// 单账号同时在途请求数上限（从发出到响应体发完，含流式生成；超出时排队等待），0 表示不限制
     #[serde(default)]
@@ -201,9 +209,16 @@ fn default_kiro_version() -> String {
     "2.2.2".to_string()
 }
 
-// 0 = 关闭单账号 RPM 硬限（仅依赖上游 429 + throttle_delay 兜底）
 fn default_max_rpm_per_credential() -> u32 {
-    0
+    30
+}
+
+fn default_soft_rpm_per_credential() -> u32 {
+    10
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_system_version() -> String {
@@ -252,6 +267,8 @@ impl Default for Config {
             admin_psw: None,
             load_balancing_mode: default_load_balancing_mode(),
             max_rpm_per_credential: default_max_rpm_per_credential(),
+            soft_rpm_per_credential: default_soft_rpm_per_credential(),
+            soft_rpm_spill_to_lower_priority: true,
             max_concurrency_per_credential: 0,
             model_cache_ttl_secs: default_model_cache_ttl_secs(),
             client_token_passthrough: false,
@@ -458,6 +475,15 @@ fn removed_keys_in(content: &str) -> serde_json::Result<Vec<&'static str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpm_limits_default_to_soft_10_hard_30_with_spill() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.max_rpm_per_credential, 30);
+        assert_eq!(config.soft_rpm_per_credential, 10);
+        assert!(config.soft_rpm_spill_to_lower_priority);
+        assert_eq!(Config::default().max_rpm_per_credential, 30);
+    }
 
     #[test]
     fn removed_cache_keys_are_detected_and_ignored() {

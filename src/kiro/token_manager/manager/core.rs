@@ -134,6 +134,8 @@ impl MultiTokenManager {
 
         let load_balancing_mode = config.load_balancing_mode.clone();
         let max_rpm = config.max_rpm_per_credential;
+        let soft_rpm = config.soft_rpm_per_credential;
+        let soft_rpm_spill = config.soft_rpm_spill_to_lower_priority;
         let max_concurrency = config.max_concurrency_per_credential;
         let manager = Self {
             config,
@@ -152,6 +154,8 @@ impl MultiTokenManager {
             persist_lock: Mutex::new(()),
             next_id_counter: AtomicU64::new(final_max_id),
             max_rpm_per_credential: AtomicU32::new(max_rpm),
+            soft_rpm_per_credential: AtomicU32::new(soft_rpm),
+            soft_rpm_spill_to_lower_priority: AtomicBool::new(soft_rpm_spill),
             max_concurrency_per_credential: AtomicU32::new(max_concurrency),
             model_support: Mutex::new(HashMap::new()),
             model_support_refresh_lock: TokioMutex::new(()),
@@ -194,6 +198,28 @@ impl MultiTokenManager {
         self.max_rpm_per_credential.store(value, Ordering::Relaxed);
     }
 
+    /// 获取每账号 RPM 软上限（运行时热切换后的当前值；0 = 关闭）
+    pub fn soft_rpm_per_credential(&self) -> u32 {
+        self.soft_rpm_per_credential.load(Ordering::Relaxed)
+    }
+
+    /// 热切换每账号 RPM 软上限（0 = 关闭），仅影响运行时，持久化由调用方负责
+    pub fn set_soft_rpm_per_credential(&self, value: u32) {
+        self.soft_rpm_per_credential.store(value, Ordering::Relaxed);
+    }
+
+    /// 优先级模式下最高一档全部达到软上限时，新会话是否落到下一档
+    pub fn soft_rpm_spill_to_lower_priority(&self) -> bool {
+        self.soft_rpm_spill_to_lower_priority
+            .load(Ordering::Relaxed)
+    }
+
+    /// 热切换软上限是否允许溢出到下一档，仅影响运行时，持久化由调用方负责
+    pub fn set_soft_rpm_spill_to_lower_priority(&self, enabled: bool) {
+        self.soft_rpm_spill_to_lower_priority
+            .store(enabled, Ordering::Relaxed);
+    }
+
     /// 获取每账号并发上限（运行时热切换后的当前值；0 = 不限）
     pub fn max_concurrency_per_credential(&self) -> u32 {
         self.max_concurrency_per_credential.load(Ordering::Relaxed)
@@ -228,7 +254,6 @@ impl MultiTokenManager {
     }
 
     /// 返回当前未禁用账号的 id 列表
-    #[cfg(test)]
     pub fn credential_ids(&self) -> Vec<u64> {
         self.entries
             .lock()
@@ -292,8 +317,8 @@ impl MultiTokenManager {
 
     /// 根据负载均衡模式选择下一个账号
     ///
-    /// - priority 模式：选择优先级最高（priority 最小）的可用账号
-    /// - balanced 模式：轮询选择可用账号
+    /// - priority 模式：在优先级最高（priority 最小）的一档可用账号内轮询
+    /// - balanced 模式：在全部可用账号内轮询
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的账号（如 opus 模型需要付费订阅）
@@ -381,13 +406,11 @@ impl MultiTokenManager {
         self.recover_expired_quota_disables();
 
         let total = self.total_count();
-        let mut tried_count = 0;
-        let is_opus = model
-            .map(|m| m.to_ascii_lowercase().contains("opus"))
-            .unwrap_or(false);
+        // Token 刷新失败的账号本次不再选
+        let mut failed_ids: Vec<u64> = Vec::new();
 
         loop {
-            if tried_count >= total {
+            if failed_ids.len() >= total {
                 anyhow::bail!(
                     "所有账号均无法获取有效 Token（可用: {}/{}）",
                     self.available_count(),
@@ -395,66 +418,29 @@ impl MultiTokenManager {
                 );
             }
 
-            let (id, credentials) = {
-                let is_balanced = self.load_balancing_mode.lock().as_str() == "balanced";
-
-                // balanced 模式：每次请求都轮询选择，不固定 current_id
-                // priority 模式：优先使用 current_id 指向的账号
-                let current_hit = if is_balanced {
-                    None
-                } else {
-                    let entries = self.entries.lock();
-                    let current_id = *self.current_id.lock();
-                    entries
-                        .iter()
-                        .find(|e| {
-                            // 当前账号降级时也重新选号：同优先级里有正常账号就换过去
-                            e.id == current_id
-                                && !e.disabled
-                                && !matches!(
-                                    Self::compute_health(e),
-                                    HealthStatus::Unhealthy | HealthStatus::Degraded
-                                )
-                                && (!is_opus || e.credentials.supports_opus())
-                                && !self.is_known_unsupported(e.id, model)
-                                && !Self::model_restricted_at(e, model, Instant::now())
-                        })
-                        .map(|e| (e.id, e.credentials.clone()))
-                };
-
-                if let Some(hit) = current_hit {
-                    hit
-                } else {
-                    // 当前账号不可用或 balanced 模式，根据负载均衡策略选择
-                    // 没有可用账号时不自动启用任何被禁用的账号，只能手动恢复
-                    let best = self.select_next_credential(model, &[]);
-
-                    if let Some((new_id, new_creds)) = best {
-                        // 更新 current_id
-                        let mut current_id = self.current_id.lock();
-                        *current_id = new_id;
-                        (new_id, new_creds)
-                    } else {
-                        // describe_unavailable 内部会获取 entries 锁，
-                        // 因此必须在任何 entries 锁作用域之外调用，否则死锁
-                        anyhow::bail!("{}", self.describe_unavailable(model, &[]));
-                    }
-                }
+            // 两种模式都每次重新选号（priority 在最高一档内轮询，balanced 在全部可用账号内轮询）。
+            // 没有可用账号时不自动启用任何被禁用的账号，只能手动恢复
+            let remaining: Vec<u64> = if failed_ids.is_empty() {
+                Vec::new()
+            } else {
+                self.credential_ids()
+                    .into_iter()
+                    .filter(|id| !failed_ids.contains(id))
+                    .collect()
             };
+            let Some((id, credentials)) = self.select_next_credential(model, &remaining) else {
+                // describe_unavailable 内部会获取 entries 锁，
+                // 因此必须在任何 entries 锁作用域之外调用，否则死锁
+                anyhow::bail!("{}", self.describe_unavailable(model, &[]));
+            };
+            *self.current_id.lock() = id;
 
-            // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
-                Ok(ctx) => {
-                    return Ok(ctx);
-                }
+                Ok(ctx) => return Ok(ctx),
                 Err(e) => {
                     tracing::warn!("账号 #{} Token 刷新失败，尝试下一个账号: {}", id, e);
-
                     self.report_refresh_error(id, &e);
-
-                    // 切换到下一个优先级的账号
-                    self.switch_to_next_by_priority();
-                    tried_count += 1;
+                    failed_ids.push(id);
                 }
             }
         }
@@ -548,15 +534,19 @@ impl MultiTokenManager {
     ///
     /// 偏好账号与负载均衡用同一个候选集（[`Self::candidate_pool`]）：在候选集里就用它，
     /// 否则按负载均衡选号，规则完全一致。`avoid_ids` 是本次请求内已经限流、本地限额满或
-    /// 账号失败过的账号，重试时避开。
+    /// 账号失败过的账号，重试时避开。`soft_full_ids` 是本地 RPM 已达软上限的账号，
+    /// 只对新会话传入：新会话尽量不绑到这些账号（见 [`Self::soft_avoid_ids`]）。
     pub async fn acquire_for_request(
         &self,
         model: Option<&str>,
         allowed_ids: &[u64],
         preferred: Option<u64>,
         avoid_ids: &[u64],
+        soft_full_ids: &[u64],
     ) -> anyhow::Result<(CallContext, Placement)> {
-        if let Some(id) = preferred.filter(|id| !avoid_ids.contains(id)) {
+        let soft_avoid = self.soft_avoid_ids(model, allowed_ids, avoid_ids, soft_full_ids);
+        let usable = |id: &u64| !avoid_ids.contains(id) && !soft_avoid.contains(id);
+        if let Some(id) = preferred.filter(usable) {
             let credentials = {
                 let entries = self.entries.lock();
                 self.candidate_pool(&entries, model, allowed_ids, Instant::now())
@@ -575,10 +565,11 @@ impl MultiTokenManager {
             }
         }
 
-        let ctx = if avoid_ids.is_empty() {
+        let all_avoid: Vec<u64> = avoid_ids.iter().chain(&soft_avoid).copied().collect();
+        let ctx = if all_avoid.is_empty() {
             self.acquire_context_filtered(model, allowed_ids).await?
         } else {
-            self.acquire_context_avoiding(model, allowed_ids, avoid_ids)
+            self.acquire_context_avoiding(model, allowed_ids, &all_avoid)
                 .await?
         };
         let placement = match preferred {
@@ -589,30 +580,52 @@ impl MultiTokenManager {
         Ok((ctx, placement))
     }
 
-    /// 切换到下一个优先级最高的可用账号（内部方法）
-    fn switch_to_next_by_priority(&self) {
-        let entries = self.entries.lock();
-        let mut current_id = self.current_id.lock();
-
-        // 选择优先级最高的未禁用账号（排除当前账号）
-        if let Some(entry) = entries
-            .iter()
-            .filter(|e| !e.disabled && e.id != *current_id)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = entry.id;
-            tracing::info!(
-                "已切换到账号 #{}（优先级 {}）",
-                entry.id,
-                entry.credentials.priority
-            );
+    /// 新会话本次要避开的软上限已满账号
+    ///
+    /// balanced 模式或允许溢出到下一档时，避开全部已满账号。不允许溢出时只避开最高优先级
+    /// 一档里已满的账号，整档都满就一个都不避开（留在这一档，由硬上限把关）。
+    /// 避开后无号可选时 [`Self::acquire_context_avoiding`] 退回全集，所以全满时照常选号。
+    fn soft_avoid_ids(
+        &self,
+        model: Option<&str>,
+        allowed_ids: &[u64],
+        avoid_ids: &[u64],
+        soft_full_ids: &[u64],
+    ) -> Vec<u64> {
+        if soft_full_ids.is_empty() {
+            return Vec::new();
         }
+        let balanced = self.load_balancing_mode.lock().as_str() == "balanced";
+        if balanced || self.soft_rpm_spill_to_lower_priority() {
+            return soft_full_ids.to_vec();
+        }
+
+        let entries = self.entries.lock();
+        let pool: Vec<&CredentialEntry> = self
+            .candidate_pool(&entries, model, allowed_ids, Instant::now())
+            .into_iter()
+            .filter(|e| !avoid_ids.contains(&e.id))
+            .collect();
+        let Some(top_priority) = pool.iter().map(|e| e.credentials.priority).min() else {
+            return Vec::new();
+        };
+        let top_tier: Vec<u64> = pool
+            .iter()
+            .filter(|e| e.credentials.priority == top_priority)
+            .map(|e| e.id)
+            .collect();
+        if top_tier.iter().all(|id| soft_full_ids.contains(id)) {
+            return Vec::new();
+        }
+        top_tier
+            .into_iter()
+            .filter(|id| soft_full_ids.contains(id))
+            .collect()
     }
 
     /// 选择优先级最高的未禁用账号作为当前账号（内部方法）
     ///
-    /// 与 `switch_to_next_by_priority` 不同，此方法不排除当前账号，
-    /// 纯粹按优先级选择，用于优先级变更后立即生效
+    /// 纯粹按优先级选择，用于优先级变更后立即更新管理面板的「当前账号」
     pub(crate) fn select_highest_priority(&self) {
         let entries = self.entries.lock();
         let mut current_id = self.current_id.lock();

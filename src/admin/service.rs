@@ -504,6 +504,27 @@ impl AdminService {
         self.token_manager.max_rpm_per_credential()
     }
 
+    /// 热切换每账号 RPM 软上限（0 = 关闭），仅影响运行时，持久化由 handler 负责
+    pub fn set_soft_rpm_per_credential(&self, value: u32) {
+        self.token_manager.set_soft_rpm_per_credential(value);
+    }
+
+    /// 获取每账号 RPM 软上限运行时当前值（0 = 关闭）
+    pub fn soft_rpm_per_credential(&self) -> u32 {
+        self.token_manager.soft_rpm_per_credential()
+    }
+
+    /// 热切换软上限是否允许溢出到下一优先级，仅影响运行时，持久化由 handler 负责
+    pub fn set_soft_rpm_spill_to_lower_priority(&self, enabled: bool) {
+        self.token_manager
+            .set_soft_rpm_spill_to_lower_priority(enabled);
+    }
+
+    /// 软上限是否允许溢出到下一优先级（运行时当前值）
+    pub fn soft_rpm_spill_to_lower_priority(&self) -> bool {
+        self.token_manager.soft_rpm_spill_to_lower_priority()
+    }
+
     /// 热切换每账号并发上限（0 = 不限），仅影响运行时，持久化由 handler 负责
     pub fn set_max_concurrency_per_credential(&self, value: u32) {
         self.token_manager.set_max_concurrency_per_credential(value);

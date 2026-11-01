@@ -67,7 +67,7 @@ pub(crate) mod tests {
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
         let (ctx1, _) = manager
-            .acquire_for_request(None, &[], None, &[])
+            .acquire_for_request(None, &[], None, &[], &[])
             .await
             .unwrap();
         let bound_id = ctx1.id;
@@ -88,7 +88,7 @@ pub(crate) mod tests {
 
         // 以该账号为亲和账号：刷新失败应禁用它并改选另一账号
         let (ctx2, placement) = manager
-            .acquire_for_request(None, &[], Some(bound_id), &[])
+            .acquire_for_request(None, &[], Some(bound_id), &[], &[])
             .await
             .unwrap();
         assert_ne!(ctx2.id, bound_id);

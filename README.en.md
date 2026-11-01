@@ -483,8 +483,10 @@ Lower `priority` value = higher priority. Up to 3 retries per account, 9 per req
 | `proxyUsername` | No | — | Proxy username |
 | `proxyPassword` | No | — | Proxy password |
 | `tlsBackend` | No | `rustls` | TLS backend: `rustls` or `native-tls` |
-| `loadBalancingMode` | No | `priority` | `priority` (by priority) or `balanced` (round-robin) |
-| `maxRpmPerCredential` | No | `0` | Maximum requests per minute for each account; `0` means unlimited. Saving from the settings page applies it immediately and persists it to `config.json` |
+| `loadBalancingMode` | No | `priority` | `priority`: only the highest-priority tier is used, round-robin within it; `balanced`: round-robin across all available accounts. In both, an existing session goes back to the account holding its cached context first |
+| `maxRpmPerCredential` | No | `30` | Per-account hard RPM limit, applies to every request: when full another account is used, otherwise the request queues for up to 10 seconds and then gets a 429; `0` means unlimited. Saving from the settings page applies it immediately and persists it to `config.json` |
+| `softRpmPerCredential` | No | `10` | Per-account soft RPM limit: once reached, new sessions are no longer assigned to the account while existing sessions keep using it; if every account is at the limit, assignment proceeds as usual under the hard limit; `0` disables it. Applies immediately when saved from the settings page |
+| `softRpmSpillToLowerPriority` | No | `true` | `priority` mode only: whether new sessions go to the next tier once the whole top tier is at the soft limit; with `false` they stay in the top tier under the hard limit. Applies immediately when saved from the settings page |
 | `forwardSuggestionMode` | No | `false` | Suggestion Mode input-prediction switch. With the default `false`, the proxy intercepts Claude Code's automatic full-context prediction request after each turn and returns an empty response without Token usage. `true` forwards it upstream to show input suggestions, but each turn incurs one additional full-context billed request. Override with `FORWARD_SUGGESTION_MODE` |
 | `clientTokenPassthrough` | No | `false` | Client token passthrough: `true` reports returned `usage` fields 1:1 with real values; the default `false` displays values scaled by `0.6657`. It supports third-party clients that calculate context usage from returned usage values. Claude Code's auto-compact trigger timing remains unchanged in either mode. Override with `CLIENT_TOKEN_PASSTHROUGH` |
 | `modelsOfficialAliases` | No | `false` | With `true`, `/v1/models` appends official hyphenated aliases after upstream dotted model IDs (e.g. `claude-opus-4.6` → `claude-opus-4-6`, plus dated IDs for the 4.5 generation), for downstream gateways that build model mappings from the list. Off by default to avoid duplicate entries in Claude Code's model picker. Override with `MODELS_OFFICIAL_ALIASES` |
@@ -506,7 +508,8 @@ Full example:
   "proxyUrl": "http://127.0.0.1:7890",
   "tlsBackend": "rustls",
   "loadBalancingMode": "priority",
-  "maxRpmPerCredential": 0,
+  "maxRpmPerCredential": 30,
+  "softRpmPerCredential": 10,
   "forwardSuggestionMode": false,
   "clientTokenPassthrough": false,
   "thinkingAsText": false,
@@ -525,6 +528,8 @@ After configuring `adminPsw`, the Admin settings page manages the following opti
 | Thinking-as-text display | `thinkingAsText` | Applies immediately to subsequent requests only |
 | DEBUG logs | `debugLogs` | Applies immediately; console / log file / Log Viewer stay in sync |
 | Per-account RPM limit | `maxRpmPerCredential` | Applies immediately; `0` means unlimited |
+| Per-account soft RPM limit | `softRpmPerCredential` | Applies immediately; `0` disables it |
+| Use next priority at soft limit | `softRpmSpillToLowerPriority` | Applies immediately |
 | Chunked-write line limit | `writeChunkingMaxLines` | Applies immediately to subsequent requests only; `0` disables the instruction |
 | Listen port | `port` | Takes effect after restart; valid range: `1–65535` |
 | Upstream proxy URL | `proxyUrl` | Takes effect after restart; accepts `http`, `https`, and `socks5`; empty disables the proxy |

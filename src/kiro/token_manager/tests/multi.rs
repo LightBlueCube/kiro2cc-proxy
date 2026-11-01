@@ -242,7 +242,7 @@ pub(crate) mod tests {
 
         for _ in 0..4 {
             let (ctx, _) = manager
-                .acquire_for_request(Some(MODEL), &[], None, &[])
+                .acquire_for_request(Some(MODEL), &[], None, &[], &[])
                 .await
                 .unwrap();
             assert_eq!(ctx.id, 2);

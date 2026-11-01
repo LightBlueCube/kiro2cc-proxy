@@ -41,7 +41,7 @@ pub(crate) mod tests {
     ) -> (u64, Placement) {
         let preferred = affinity.preferred(keys);
         let (ctx, placement) = manager
-            .acquire_for_request(model, &[], preferred, avoid)
+            .acquire_for_request(model, &[], preferred, avoid, &[])
             .await
             .unwrap();
         affinity.on_routed(keys, ctx.id, placement);
@@ -63,6 +63,18 @@ pub(crate) mod tests {
         avoid: &[u64],
     ) -> (u64, Placement) {
         route_keys(manager, affinity, &session(), model, avoid).await
+    }
+
+    /// 选号后请求完整产出响应
+    async fn serve_keys(
+        manager: &MultiTokenManager,
+        affinity: &Affinity,
+        keys: &RouteKeys,
+        avoid: &[u64],
+    ) -> (u64, Placement) {
+        let routed = route_keys(manager, affinity, keys, None, avoid).await;
+        affinity.on_completed(keys, routed.0);
+        routed
     }
 
     #[tokio::test]
@@ -108,18 +120,18 @@ pub(crate) mod tests {
             prefix_family: Some("family".to_string()),
         };
 
-        let (first, _) = route_keys(&manager, &affinity, &same_prefix("s0"), None, &[]).await;
+        let (first, _) = serve_keys(&manager, &affinity, &same_prefix("s0"), &[]).await;
         for i in 1..5 {
             let keys = same_prefix(&format!("s{i}"));
-            let routed = route_keys(&manager, &affinity, &keys, None, &[]).await;
-            assert_eq!(routed, (first, Placement::Preferred));
+            let served = serve_keys(&manager, &affinity, &keys, &[]).await;
+            assert_eq!(served, (first, Placement::Preferred));
         }
         assert_eq!(affinity.metrics().prefix_hits, 4);
     }
 
     #[tokio::test]
-    async fn test_avoided_preferred_spills_without_touching_binding() {
-        // 本地限额满或本次请求内被限流：本次换号完成，绑定不变，下次请求回到原账号
+    async fn test_failed_spill_keeps_binding() {
+        // 本地限额满或本次请求内被限流：换号后请求失败，绑定不变，下次请求回到原账号
         let manager = two_accounts();
         let affinity = Affinity::new();
         let (bound, _) = route(&manager, &affinity, None, &[]).await;
@@ -127,13 +139,30 @@ pub(crate) mod tests {
         let (spilled, placement) = route(&manager, &affinity, None, &[bound]).await;
         assert_ne!(spilled, bound);
         assert_eq!(placement, Placement::Spilled);
-        assert_eq!(affinity.preferred(&session()), Some(bound));
 
         assert_eq!(
             route(&manager, &affinity, None, &[]).await,
             (bound, Placement::Preferred)
         );
         assert_eq!(affinity.metrics().rebinds, 0);
+    }
+
+    #[tokio::test]
+    async fn test_completed_spill_takes_over_binding() {
+        // 换号后请求完整产出：新账号缓存了整段前缀，之后留在新账号
+        let manager = two_accounts();
+        let affinity = Affinity::new();
+        let (bound, _) = serve_keys(&manager, &affinity, &session(), &[]).await;
+
+        let (spilled, placement) = serve_keys(&manager, &affinity, &session(), &[bound]).await;
+        assert_ne!(spilled, bound);
+        assert_eq!(placement, Placement::Spilled);
+
+        assert_eq!(
+            route(&manager, &affinity, None, &[]).await,
+            (spilled, Placement::Preferred)
+        );
+        assert_eq!(affinity.metrics().rebinds, 1);
     }
 
     #[tokio::test]
@@ -150,26 +179,41 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_upstream_throttle_once_per_request_unbinds_after_threshold() {
-        // 每个请求先打到绑定账号被 429 一次，同请求内重试溢出到别的账号成功。
-        // 连续 THROTTLE_UNBIND_THRESHOLD 个请求如此应解绑，下一个请求重新绑定
+    async fn test_upstream_throttle_without_completion_unbinds_after_threshold() {
+        // 每个请求先打到绑定账号被 429，同请求内的重试也没产出响应：绑定保持。
+        // 连续 THROTTLE_UNBIND_THRESHOLD 次后解绑
         let manager = two_accounts();
         let affinity = Affinity::new();
-        let (bound, _) = route(&manager, &affinity, None, &[]).await;
+        let (bound, _) = serve_keys(&manager, &affinity, &session(), &[]).await;
 
         for _ in 0..THROTTLE_UNBIND_THRESHOLD {
             let (first, _) = route(&manager, &affinity, None, &[]).await;
             assert_eq!(first, bound);
             affinity.on_upstream_throttled(KEY, first);
-
-            let (retry, _) = route(&manager, &affinity, None, &[first]).await;
-            affinity.on_completed(KEY, retry);
+            route(&manager, &affinity, None, &[first]).await;
         }
 
-        // 最后一次溢出发生在解绑之后，已作为新绑定落在溢出账号上
+        // 最后一次重试发生在解绑之后，已作为新绑定落在重试账号上
         let (next, placement) = route(&manager, &affinity, None, &[]).await;
         assert_ne!(next, bound);
         assert_eq!(placement, Placement::Preferred);
+    }
+
+    #[tokio::test]
+    async fn test_throttled_binding_moves_to_account_that_completed_retry() {
+        let manager = two_accounts();
+        let affinity = Affinity::new();
+        let (bound, _) = serve_keys(&manager, &affinity, &session(), &[]).await;
+
+        let (first, _) = route(&manager, &affinity, None, &[]).await;
+        affinity.on_upstream_throttled(KEY, first);
+        let (retry, _) = serve_keys(&manager, &affinity, &session(), &[first]).await;
+        assert_ne!(retry, bound);
+
+        assert_eq!(
+            route(&manager, &affinity, None, &[]).await,
+            (retry, Placement::Preferred)
+        );
     }
 
     #[tokio::test]
@@ -208,6 +252,88 @@ pub(crate) mod tests {
         assert_eq!(placement, Placement::Fresh);
         assert_eq!(affinity.preferred(&session()), Some(2));
         assert_eq!(affinity.metrics().rebinds, 1);
+    }
+
+    // ============ 优先级模式同档轮询与 RPM 软上限 ============
+
+    fn cred_with_priority(token: &str, priority: u32) -> KiroCredentials {
+        let mut cred = make_valid_cred(token);
+        cred.priority = priority;
+        cred
+    }
+
+    /// priority 模式：账号 1、2 同为最高优先级，账号 3 低一档
+    fn tiered(spill_to_lower_priority: bool) -> MultiTokenManager {
+        let mut config = Config::default();
+        config.soft_rpm_spill_to_lower_priority = spill_to_lower_priority;
+        manager(
+            vec![
+                cred_with_priority("t1", 0),
+                cred_with_priority("t2", 0),
+                cred_with_priority("t3", 1),
+            ],
+            config,
+        )
+    }
+
+    /// 新会话选号若干次，返回选中的账号集合
+    async fn picks(
+        manager: &MultiTokenManager,
+        preferred: Option<u64>,
+        soft_full: &[u64],
+    ) -> std::collections::BTreeSet<u64> {
+        let mut ids = std::collections::BTreeSet::new();
+        for _ in 0..6 {
+            let (ctx, _) = manager
+                .acquire_for_request(None, &[], preferred, &[], soft_full)
+                .await
+                .unwrap();
+            ids.insert(ctx.id);
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn test_priority_mode_rotates_within_top_tier() {
+        let manager = tiered(true);
+        let mut ids = std::collections::BTreeSet::new();
+        for _ in 0..6 {
+            ids.insert(manager.acquire_context(None).await.unwrap().id);
+        }
+        assert_eq!(ids, [1, 2].into(), "同优先级轮询，不碰低一档");
+    }
+
+    #[tokio::test]
+    async fn test_soft_full_account_is_skipped_within_tier() {
+        for spill in [true, false] {
+            assert_eq!(picks(&tiered(spill), None, &[1]).await, [2].into());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_soft_full_top_tier_spills_to_lower_priority() {
+        assert_eq!(picks(&tiered(true), None, &[1, 2]).await, [3].into());
+    }
+
+    #[tokio::test]
+    async fn test_soft_full_top_tier_stays_when_spill_disabled() {
+        assert_eq!(picks(&tiered(false), None, &[1, 2]).await, [1, 2].into());
+    }
+
+    #[tokio::test]
+    async fn test_all_soft_full_still_selects_by_priority() {
+        assert_eq!(picks(&tiered(true), None, &[1, 2, 3]).await, [1, 2].into());
+    }
+
+    #[tokio::test]
+    async fn test_soft_full_family_account_is_not_followed() {
+        let manager = tiered(true);
+        let (ctx, placement) = manager
+            .acquire_for_request(None, &[], Some(1), &[], &[1])
+            .await
+            .unwrap();
+        assert_eq!(ctx.id, 2);
+        assert_eq!(placement, Placement::Fresh);
     }
 
     fn make_unhealthy(manager: &MultiTokenManager, id: u64) {
