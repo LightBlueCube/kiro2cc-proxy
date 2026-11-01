@@ -1,8 +1,8 @@
 //! converter 测试（自 tests.rs 拆分，纯代码搬移）
 #![cfg(test)]
 
-use super::super::convert::convert_request;
 use super::super::prompt::append_recent_knowledge_hints;
+use super::convert_request;
 #[allow(unused_imports)]
 use crate::anthropic::types::ContentBlock as _;
 use crate::anthropic::types::{MessagesRequest, OutputConfig};

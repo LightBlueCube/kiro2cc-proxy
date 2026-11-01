@@ -2,7 +2,8 @@
 //! /v1/messages 端点主函数：接收 Anthropic 请求、直通流式转发至 Kiro，并提供请求体调试转储（dump_kiro_request_body）。
 
 use crate::anthropic::converter::{
-    ConversionError, additional_fields_skipped, convert_request, is_gpt_model, is_luna_model,
+    ConversionError, Tenant, additional_fields_skipped, convert_request, is_gpt_model,
+    is_luna_model,
 };
 use crate::anthropic::middleware::{ApiKeyContext, AppState};
 use crate::anthropic::types::ErrorResponse;
@@ -143,7 +144,10 @@ pub(crate) async fn post_messages_as(
     }
 
     // 转换请求
-    let conversion_result = match convert_request(&payload) {
+    let tenant = identity
+        .as_ref()
+        .map_or_else(Tenant::anonymous, |ext| Tenant::api_key(ext.0.id));
+    let conversion_result = match convert_request(&payload, &tenant, &state.sessions) {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {
@@ -170,15 +174,11 @@ pub(crate) async fn post_messages_as(
 
     // 是否为 Claude Code /compact 压缩请求（决定上游超时：普通 180s / 压缩 1000s）
     let is_compact_request = conversion_result.is_compact_request;
-    let prefix_cached = conversion_result.prefix_cached;
     // 实际发往上游的 effort 与 thinking 预算（随 usage 记录入库）
     let effort = conversion_result.effort.clone();
     let thinking_budget_tokens = conversion_result.thinking_budget_tokens;
     let history_thinking_loss = conversion_result.history_thinking_loss;
     let history_reasoning_replay = conversion_result.history_reasoning_replay;
-
-    // 会话 conversationId（cache-miss 诊断用）；须在 conversation_state move 前取出
-    let conversation_id = Some(conversion_result.conversation_state.conversation_id.clone());
 
     // 构建 Kiro 请求
     let kiro_request = KiroRequest {
@@ -212,43 +212,10 @@ pub(crate) async fn post_messages_as(
         tokio::task::spawn_blocking(move || dump_kiro_request_body(&request_body_owned));
     }
 
-    // 构造 fingerprint profile（在消耗 payload 前 clone system/messages）
-    // 断点缓存记账：按原始 body 的 cache_control 断点 plan（类型化 payload 已丢弃 cache_control）
-    // 缓存按 API Key 隔离（无 Key 上下文时归入同一匿名域）；模型取映射后的 Kiro ID，
-    // 同一模型的不同写法（claude-opus-4-6 / claude-opus-4.6）共享缓存
-    let cache_accounting = match state.breakpoint_cache.as_ref() {
-        Some(cache) => {
-            let tenant = identity
-                .as_ref()
-                .map_or_else(|| "anon".to_string(), |ext| format!("key:{}", ext.0.id));
-            let kiro_model = crate::anthropic::converter::map_model(&payload.model)
-                .unwrap_or_else(|| payload.model.clone());
-            crate::cache::breakpoint::CacheAccounting::from_request(
-                cache,
-                body.clone(),
-                tenant,
-                kiro_model,
-            )
-            .await
-        }
-        None => None,
-    };
+    let prefix_probe =
+        super::helpers::prefix_probe(&state.prefix_cache, &kiro_request.conversation_state);
 
-    let fp_tracker = state.fingerprint_tracker.clone();
-    let fp_profile = fp_tracker.as_ref().map(|_| {
-        crate::cache::fingerprint::FingerprintTracker::build_profile_with_tools(
-            payload.system.as_deref(),
-            &payload.messages,
-            payload.tools.as_deref(),
-        )
-    });
-
-    // 估算"缓存前缀" token 数（system + tools + history 除最后一条 user 外的全部）
-    // 必须在 count_all_tokens 消费 payload 之前先借用计算（口径与门控见 helpers::estimate_prefix_tokens）
-    let (raw_prefix_tokens, prefix_estimated_tokens) =
-        super::helpers::estimate_prefix_tokens(&payload, prefix_cached);
-
-    // 估算输入 tokens（复用上方已计算的 prefix_estimated_tokens，避免重复编码历史消息）
+    // 估算输入 tokens
     // 先取出 thinking_enabled 判断所需字段，避免 payload.tools 等被移动后无法整体借用
     let thinking_enabled = resolve_thinking_enabled(&payload.model, &payload.thinking);
     // 每请求仅此一条 thinking 状态日志（流式 token 转发阶段不再输出）。
@@ -285,12 +252,11 @@ pub(crate) async fn post_messages_as(
         effective,
         "[THINKING] 深度思考状态"
     );
-    let input_tokens = token::count_all_tokens_with_prefix(
+    let input_tokens = token::count_all_tokens(
         payload.model.clone(),
         payload.system,
         payload.messages,
         payload.tools,
-        raw_prefix_tokens,
     ) as i32;
 
     // 提取用量追踪信息
@@ -298,13 +264,6 @@ pub(crate) async fn post_messages_as(
     let usage_tracker = state.usage_tracker.clone();
     let client_ip = extract_client_ip(&headers, Some(&addr));
     let user_agent = extract_user_agent(&headers);
-
-    // 计算 prompt cache 模拟 usage（message_start 早期值；终值会被降级链覆盖）
-    let prompt_cache_usage = crate::cache::PromptCacheUsage::from_ratio_config(
-        input_tokens,
-        crate::cache::CacheSimulationRatioConfig::fixed(0.85),
-        0.1,
-    );
 
     let json_schema_requested = payload
         .output_config
@@ -325,11 +284,10 @@ pub(crate) async fn post_messages_as(
             request_body,
             &payload.model,
             input_tokens,
-            prefix_estimated_tokens,
+            prefix_probe,
             thinking_enabled,
             usage_tracker,
             api_key_id,
-            prompt_cache_usage,
             bound_ids,
             client_ip,
             None, // /v1 无全局 deadline（保持现有行为）
@@ -338,8 +296,6 @@ pub(crate) async fn post_messages_as(
             thinking_budget_tokens,
             thinking_as_text,
             user_agent,
-            cache_accounting,
-            conversation_id,
             history_thinking_loss,
             history_reasoning_replay,
             api_format,
@@ -353,21 +309,16 @@ pub(crate) async fn post_messages_as(
             &request_body,
             &payload.model,
             input_tokens,
-            prefix_estimated_tokens,
+            prefix_probe,
             usage_tracker,
             api_key_id,
-            prompt_cache_usage,
             bound_ids,
             client_ip,
             json_schema_requested,
-            fp_tracker,
-            fp_profile,
             is_compact_request,
             effort,
             thinking_budget_tokens,
             user_agent,
-            cache_accounting,
-            conversation_id,
             history_thinking_loss,
             history_reasoning_replay,
             api_format,

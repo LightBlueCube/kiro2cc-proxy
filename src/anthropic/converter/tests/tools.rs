@@ -1,13 +1,13 @@
 //! converter 测试（自 tests.rs 拆分，纯代码搬移）
 #![cfg(test)]
 
-use super::super::convert::{convert_request, convert_request_with_chunking};
 use super::super::history::{convert_assistant_message, merge_assistant_messages};
 use super::super::tools::{
     DEFAULT_WRITE_CHUNKING_MAX_LINES, remove_orphaned_tool_uses, validate_tool_pairing,
     write_chunking_system_note,
 };
 use super::super::websearch::{collect_history_tool_names, create_placeholder_tool};
+use super::{convert_request, convert_request_with_chunking};
 #[allow(unused_imports)]
 use crate::anthropic::types::ContentBlock as _;
 use crate::anthropic::types::MessagesRequest;

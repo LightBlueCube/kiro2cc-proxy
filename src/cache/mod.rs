@@ -1,205 +1,151 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
-//! Prompt Cache 模块
+//! 上游 prompt cache 命中估算
 //!
-//! - `simulation` - 三角分布与比例模式模拟（旧 cache.rs 内容）
-//! - `fingerprint` - 账号级前缀指纹追踪（替代末层兜底）
+//! 实测（2026-11-01，`e2e/p0-identity.mjs`、`e2e/p0-ttl.mjs`）：Kiro 的 prompt cache 按
+//! 「账号 + 内容前缀」寻址，与 conversationId 无关；TTL 5 分钟，命中即续期。上游不下发
+//! 缓存 token 数，只下发本次 credits。
 //!
-//! 公共 API 保持 `crate::cache::PromptCacheUsage` 路径不变。
+//! 客户端 usage 与用量日志共用 [`estimate_cache_read`] 一个口径，来源按优先级：
+//! 1. meteringEvent 带的 cache_read（目前 Kiro 不下发，保留为真值入口）
+//! 2. 已标定计费曲线的模型（opus / sonnet / haiku 5.5）按 credits 反推
+//! 3. 同账号 5 分钟内处理过的最长公共内容前缀（[`PrefixCache`]）
 //!
-//! cache_read 派生主路径已切换为 `token::count_prefix_tokens` 前缀字符估算，
-//! `simulation` 模拟与 `fingerprint` 追踪降级为兜底分支。
+//! cache_creation 恒为 0：Kiro 不单独计费缓存写入。
 
-pub mod breakpoint;
-pub mod cache_miss_diag;
-pub mod fingerprint;
-pub mod simulation;
+mod prefix;
 
-pub use simulation::{
-    CacheSimulationRatioConfig, PromptCacheUsage, split_creation_by_ephemeral_ratio,
-};
+pub use prefix::{PrefixCache, PrefixProbe, PrefixProfile};
 
-/// 四层降级链选择终值 usage：
+use crate::model::usage::{BilledOutput, ReplayedReasoning, infer_cache_read_from_credits};
+
+/// cache_read 的来源
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheReadSource {
+    /// meteringEvent 下发的真值
+    Metering,
+    /// 按 credits 与计费曲线反推
+    Credits,
+    /// 同账号最长公共前缀
+    Prefix,
+    /// 都没有（如未定账号的失败请求）
+    Unknown,
+}
+
+/// 本次请求命中上游缓存的输入 token 数
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheRead {
+    pub tokens: i32,
+    pub source: CacheReadSource,
+}
+
+/// 估算本次请求的 cache_read（客户端 usage 与用量日志同一口径）。
 ///
-/// 优先级（高→低）：
-/// 1. **metering 真值**：上游 Kiro 返回的 cache_read / cache_creation 原始值
-/// 2. **prefix 估算结果**：调用方用 `token::count_prefix_tokens` 估算的 system+tools+history[0..n-1]
-///    本地 token 数（饱和裁剪到 final_input_tokens）
-/// 3. **fingerprint 命中**：账号级前缀指纹追踪输出
-/// 4. **ratio 兜底**：比例模拟（`from_ratio_config`）的产出
-///
-/// 所有分支输出均经 `clamp_to_total(final_input_tokens)` 截断，保证 5m/1h 不变性。
-pub fn select_final_usage(
-    final_input_tokens: i32,
-    metering: Option<(i32, i32)>,
-    prefix_estimated_read: Option<i32>,
-    fingerprint_usage: Option<PromptCacheUsage>,
-    ratio_fallback: PromptCacheUsage,
-) -> PromptCacheUsage {
-    if let Some((read, creation)) = metering {
-        // Kiro metering 不返回 5m/1h 拆分，默认全部归为 5m
-        return PromptCacheUsage {
-            input_tokens: final_input_tokens
-                .saturating_sub(read)
-                .saturating_sub(creation),
-            cache_creation_input_tokens: creation,
-            cache_read_input_tokens: read,
-            cache_creation_5m_input_tokens: creation,
-            cache_creation_1h_input_tokens: 0,
-        }
-        .clamp_to_total(final_input_tokens);
+/// 结果截到 `[0, input_tokens - 1]`：至少留 1 个未缓存输入。Claude Code 合并流式 usage 时
+/// 只用 message_delta 里大于 0 的字段覆盖 message_start，未缓存输入为 0 会让它保留
+/// message_start 的完整输入，与 cache_read 重复计数。
+pub fn estimate_cache_read(
+    model: &str,
+    input_tokens: i32,
+    metering_read: Option<i32>,
+    credits: Option<f64>,
+    replayed: &ReplayedReasoning,
+    output: &BilledOutput,
+    prefix_read: Option<i32>,
+) -> CacheRead {
+    let inferred = || {
+        credits
+            .and_then(|c| infer_cache_read_from_credits(model, input_tokens, replayed, output, c))
+    };
+    let (tokens, source) = if let Some(read) = metering_read {
+        (read, CacheReadSource::Metering)
+    } else if let Some(read) = inferred() {
+        (read, CacheReadSource::Credits)
+    } else if let Some(read) = prefix_read {
+        (read, CacheReadSource::Prefix)
+    } else {
+        (0, CacheReadSource::Unknown)
+    };
+    let max_read = input_tokens.saturating_sub(1).max(0);
+    CacheRead {
+        tokens: tokens.clamp(0, max_read),
+        source,
     }
-    if let Some(estimated) = prefix_estimated_read {
-        let read = estimated.min(final_input_tokens);
-        return PromptCacheUsage {
-            input_tokens: final_input_tokens.saturating_sub(read),
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: read,
-            cache_creation_5m_input_tokens: 0,
-            cache_creation_1h_input_tokens: 0,
-        }
-        .clamp_to_total(final_input_tokens);
-    }
-    if let Some(fp) = fingerprint_usage {
-        return fp.clamp_to_total(final_input_tokens);
-    }
-    ratio_fallback.clamp_to_total(final_input_tokens)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ratio_fallback(total: i32) -> PromptCacheUsage {
-        // 模拟 from_ratios 的产出：50% 缓存，其中 30% creation
-        let cached = ((total as f64) * 0.5) as i32;
-        let creation = ((cached as f64) * 0.3) as i32;
-        let read = cached - creation;
-        PromptCacheUsage {
-            input_tokens: total - cached,
-            cache_creation_input_tokens: creation,
-            cache_read_input_tokens: read,
-            cache_creation_5m_input_tokens: creation,
-            cache_creation_1h_input_tokens: 0,
+    const NO_REPLAY: ReplayedReasoning = ReplayedReasoning {
+        signature_chars: 0,
+        blocks: 0,
+    };
+
+    fn plain(tokens: i32) -> BilledOutput {
+        BilledOutput {
+            tokens,
+            native_reasoning_tokens: 0,
+            signature_chars: 0,
+            signature_blocks: 0,
         }
     }
 
-    fn invariant_holds(u: PromptCacheUsage, total: i32) -> bool {
-        u.input_tokens >= 0
-            && u.cache_creation_5m_input_tokens + u.cache_creation_1h_input_tokens
-                == u.cache_creation_input_tokens
-            && u.cache_read_input_tokens + u.cache_creation_input_tokens <= total
-            && u.total_input_tokens() == total
-    }
-
     #[test]
-    fn layer1_metering_wins_over_all() {
-        let total = 1000;
-        let metering = Some((600, 200));
-        let credits = Some(500); // 应被忽略
-        let fp = Some(PromptCacheUsage {
-            input_tokens: 0,
-            cache_creation_input_tokens: 100,
-            cache_read_input_tokens: 900,
-            cache_creation_5m_input_tokens: 100,
-            cache_creation_1h_input_tokens: 0,
-        });
-        let final_u = select_final_usage(total, metering, credits, fp, ratio_fallback(total));
-        assert_eq!(final_u.cache_read_input_tokens, 600);
-        assert_eq!(final_u.cache_creation_input_tokens, 200);
-        assert_eq!(final_u.input_tokens, 200);
-        assert!(invariant_holds(final_u, total));
-    }
-
-    #[test]
-    fn layer2_credits_wins_when_metering_absent() {
-        let total = 1000;
-        let credits = Some(400);
-        let fp = Some(PromptCacheUsage {
-            input_tokens: 0,
-            cache_creation_input_tokens: 100,
-            cache_read_input_tokens: 900,
-            cache_creation_5m_input_tokens: 100,
-            cache_creation_1h_input_tokens: 0,
-        });
-        let final_u = select_final_usage(total, None, credits, fp, ratio_fallback(total));
-        assert_eq!(final_u.cache_read_input_tokens, 400);
-        assert_eq!(final_u.cache_creation_input_tokens, 0);
-        assert_eq!(final_u.input_tokens, 600);
-        assert!(invariant_holds(final_u, total));
-    }
-
-    #[test]
-    fn layer3_fingerprint_wins_when_metering_and_credits_absent() {
-        let total = 1000;
-        let fp = Some(PromptCacheUsage {
-            input_tokens: 200,
-            cache_creation_input_tokens: 100,
-            cache_read_input_tokens: 700,
-            cache_creation_5m_input_tokens: 70,
-            cache_creation_1h_input_tokens: 30,
-        });
-        let final_u = select_final_usage(total, None, None, fp, ratio_fallback(total));
-        assert_eq!(final_u.cache_read_input_tokens, 700);
-        assert_eq!(final_u.cache_creation_input_tokens, 100);
-        assert_eq!(final_u.cache_creation_1h_input_tokens, 30);
-        assert!(invariant_holds(final_u, total));
-    }
-
-    #[test]
-    fn layer4_ratio_fallback_when_all_higher_absent() {
-        let total = 1000;
-        let fallback = ratio_fallback(total);
-        let final_u = select_final_usage(total, None, None, None, fallback);
+    fn metering_wins_then_credits_then_prefix() {
+        let est = |metering, credits, prefix| {
+            estimate_cache_read(
+                "claude-opus-5.5",
+                16_395,
+                metering,
+                credits,
+                &NO_REPLAY,
+                &plain(1),
+                prefix,
+            )
+        };
         assert_eq!(
-            final_u.cache_read_input_tokens,
-            fallback.cache_read_input_tokens
+            est(Some(100), Some(0.09022), Some(50)).source,
+            CacheReadSource::Metering
+        );
+
+        // 实测全命中的 credits：反推接近全部输入，不受前缀估算压低
+        let credits = est(None, Some(0.09022), Some(50));
+        assert_eq!(credits.source, CacheReadSource::Credits);
+        assert!(credits.tokens > 15_900, "{credits:?}");
+
+        // 未标定模型的 credits 无法反推：落到前缀估算
+        let other = estimate_cache_read(
+            "claude-sonnet-4.6",
+            16_395,
+            None,
+            Some(0.09),
+            &NO_REPLAY,
+            &plain(1),
+            Some(8_000),
         );
         assert_eq!(
-            final_u.cache_creation_input_tokens,
-            fallback.cache_creation_input_tokens
+            other,
+            CacheRead {
+                tokens: 8_000,
+                source: CacheReadSource::Prefix
+            }
         );
-        assert!(invariant_holds(final_u, total));
+
+        assert_eq!(
+            est(None, None, None),
+            CacheRead {
+                tokens: 0,
+                source: CacheReadSource::Unknown
+            }
+        );
     }
 
     #[test]
-    fn metering_over_total_is_clamped() {
-        // metering 数值大于 total，需被截断
-        let total = 100;
-        let metering = Some((80, 50)); // 80+50 = 130 > 100
-        let final_u = select_final_usage(total, metering, None, None, ratio_fallback(total));
-        // cache_read 优先保留：80，剩余 20 全给 creation
-        assert_eq!(final_u.cache_read_input_tokens, 80);
-        assert_eq!(final_u.cache_creation_input_tokens, 20);
-        assert_eq!(final_u.input_tokens, 0);
-        assert!(invariant_holds(final_u, total));
-    }
+    fn read_leaves_at_least_one_uncached_token() {
+        let read = estimate_cache_read("m", 1_000, Some(5_000), None, &NO_REPLAY, &plain(1), None);
+        assert_eq!(read.tokens, 999);
 
-    #[test]
-    fn credits_inferred_zero_is_valid_layer2() {
-        // credits 反推为 0（baseline ≤ credits） — 仍走 Layer 2，cache_read = 0
-        let total = 1000;
-        let final_u = select_final_usage(total, None, Some(0), None, ratio_fallback(total));
-        assert_eq!(final_u.cache_read_input_tokens, 0);
-        assert_eq!(final_u.cache_creation_input_tokens, 0);
-        assert_eq!(final_u.input_tokens, 1000);
-        assert!(invariant_holds(final_u, total));
-    }
-
-    #[test]
-    fn fingerprint_with_5m_1h_ratio_preserved() {
-        // 指纹层输出含 5m/1h 拆分，clamp 后比例需保持
-        let total = 1000;
-        let fp = Some(PromptCacheUsage {
-            input_tokens: 0,
-            cache_creation_input_tokens: 200,
-            cache_read_input_tokens: 800,
-            cache_creation_5m_input_tokens: 140,
-            cache_creation_1h_input_tokens: 60,
-        });
-        let final_u = select_final_usage(total, None, None, fp, ratio_fallback(total));
-        // 1h 比例 60/200 = 0.3 保持
-        assert_eq!(final_u.cache_creation_1h_input_tokens, 60);
-        assert_eq!(final_u.cache_creation_5m_input_tokens, 140);
-        assert!(invariant_holds(final_u, total));
+        let tiny = estimate_cache_read("m", 1, None, None, &NO_REPLAY, &plain(1), Some(1));
+        assert_eq!(tiny.tokens, 0);
     }
 }

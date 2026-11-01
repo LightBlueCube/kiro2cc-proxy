@@ -332,25 +332,33 @@ pub async fn get_credential_models(
 }
 
 /// GET /api/admin/rpm
-/// 获取实时 RPM 数据（含 sticky cache 命中/未命中统计）
+/// 获取实时 RPM 数据（含会话亲和命中 / 改绑计数）
 pub async fn get_rpm(State(state): State<AdminState>) -> impl IntoResponse {
     let Some(rpm_tracker) = &state.rpm_tracker else {
         let error = AdminErrorResponse::internal_error("RPM 监控未启用");
         return (StatusCode::SERVICE_UNAVAILABLE, Json(error)).into_response();
     };
-    let (sticky_hits, sticky_misses) = state.service.sticky_metrics();
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct RpmAndCacheSnapshot {
+    struct RpmAndAffinitySnapshot {
         #[serde(flatten)]
         rpm: crate::model::rpm::RpmSnapshot,
-        sticky_hits: u64,
-        sticky_misses: u64,
+        /// 选号落在会话绑定账号的次数
+        #[serde(skip_serializing_if = "Option::is_none")]
+        affinity_preferred: Option<u64>,
+        /// 有效绑定被改到其它账号的次数
+        #[serde(skip_serializing_if = "Option::is_none")]
+        affinity_rebinds: Option<u64>,
+        /// 无绑定的会话按前缀族落到已缓存该前缀的账号的次数
+        #[serde(skip_serializing_if = "Option::is_none")]
+        affinity_prefix_hits: Option<u64>,
     }
-    Json(RpmAndCacheSnapshot {
+    let metrics = state.affinity.as_ref().map(|a| a.metrics());
+    Json(RpmAndAffinitySnapshot {
         rpm: rpm_tracker.snapshot(),
-        sticky_hits,
-        sticky_misses,
+        affinity_preferred: metrics.map(|m| m.preferred),
+        affinity_rebinds: metrics.map(|m| m.rebinds),
+        affinity_prefix_hits: metrics.map(|m| m.prefix_hits),
     })
     .into_response()
 }

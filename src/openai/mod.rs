@@ -30,19 +30,25 @@ mod sse;
 
 pub(crate) use handlers::{post_chat_completions, post_responses};
 
-/// `user` 字段长度上限：客户端可控值，截断防止异常客户端传入超大字符串
-const MAX_USER_FIELD_LEN: usize = 256;
+/// 会话标识长度上限：客户端可控值，截断防止异常客户端传入超大字符串
+const MAX_SESSION_HINT_LEN: usize = 256;
 
-/// 将 OpenAI 请求的 `user` 字段（终端用户标识）透传为 Anthropic `metadata.user_id`
+/// 将 OpenAI 请求的会话标识透传为 Anthropic `metadata.user_id`
 ///
-/// 下游 converter 用它派生稳定 conversationId，命中上游 prompt cache。
-/// 值不可解析时（如 user-123、邮箱）由 fallback 派生兜底，不会退化为随机 UUID。
-pub(crate) fn pass_through_user(body: &serde_json::Value, anthropic: &mut serde_json::Value) {
-    if let Some(user) = body.get("user").and_then(serde_json::Value::as_str) {
-        let trimmed = user.trim();
-        if !trimmed.is_empty() {
-            let capped: String = trimmed.chars().take(MAX_USER_FIELD_LEN).collect();
-            anthropic["metadata"] = serde_json::json!({"user_id": capped});
-        }
+/// 优先 `prompt_cache_key`（OpenAI 定义的缓存分组键），其次 `user`（终端用户标识）。
+/// 下游 converter 用它与首条消息一起派生 conversationId（sticky 路由键），
+/// 同一用户的不同对话因首条消息不同仍各成会话。
+pub(crate) fn pass_through_session_hint(
+    body: &serde_json::Value,
+    anthropic: &mut serde_json::Value,
+) {
+    let hint = ["prompt_cache_key", "user"]
+        .iter()
+        .filter_map(|field| body.get(field).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty());
+    if let Some(hint) = hint {
+        let capped: String = hint.chars().take(MAX_SESSION_HINT_LEN).collect();
+        anthropic["metadata"] = serde_json::json!({"user_id": capped});
     }
 }

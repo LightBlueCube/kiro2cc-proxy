@@ -130,8 +130,8 @@ fn tool_use_to_call(block: &Value, index: usize) -> Option<Value> {
 
 /// 把 Anthropic 的 usage 换算为 OpenAI usage
 ///
-/// Anthropic 的 `input_tokens` **不含**缓存部分——`crate::cache::select_final_usage` 的每个分支
-/// 都会从总量里减掉 `cache_read` 与 `cache_creation`。而 OpenAI 的 `prompt_tokens` 是输入总量，
+/// Anthropic 的 `input_tokens` **不含**缓存部分（总量减去 `cache_read` 与 `cache_creation`，
+/// 见 `crate::cache`）。而 OpenAI 的 `prompt_tokens` 是输入总量，
 /// 缓存命中另由 `prompt_tokens_details.cached_tokens` 单列。直接对齐会让 `prompt_tokens` 系统性
 /// 偏低（默认比例模拟下约少一半），客户端的成本统计与上下文水位随之失真，所以这里把三部分加回来。
 ///

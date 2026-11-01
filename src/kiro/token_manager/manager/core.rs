@@ -1,10 +1,7 @@
 //! MultiTokenManager 核心：构造初始化、配置读取、每凭据 RPM 上限等基础能力。
 use super::super::entry::{CredentialEntry, DisabledReason, HealthStatus};
 use super::super::refresh::{is_token_expired, is_token_expiring_soon, refresh_token};
-use super::super::types::{
-    CallContext, MultiTokenManager, STICKY_CACHE_TTL, STICKY_THROTTLE_EVICT_THRESHOLD,
-    StickyCacheEntry, TOKEN_REFRESH_COOLDOWN,
-};
+use super::super::types::{CallContext, MultiTokenManager, Placement, TOKEN_REFRESH_COOLDOWN};
 use super::super::upstream_failures::UpstreamFailures;
 
 use crate::http_client::ProxyConfig;
@@ -152,9 +149,6 @@ impl MultiTokenManager {
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
             rr_counter: AtomicU64::new(0),
-            sticky_cache: Mutex::new(HashMap::new()),
-            sticky_hits: AtomicU64::new(0),
-            sticky_misses: AtomicU64::new(0),
             persist_lock: Mutex::new(()),
             next_id_counter: AtomicU64::new(final_max_id),
             max_rpm_per_credential: AtomicU32::new(max_rpm),
@@ -244,34 +238,22 @@ impl MultiTokenManager {
             .collect()
     }
 
-    /// 返回 (sticky_hits, sticky_misses) 累计计数
-    pub fn sticky_metrics(&self) -> (u64, u64) {
-        (
-            self.sticky_hits.load(Ordering::Relaxed),
-            self.sticky_misses.load(Ordering::Relaxed),
-        )
-    }
-
-    /// 根据负载均衡模式选择下一个账号
+    /// 本次可选的账号集合（负载均衡在其中挑选）
     ///
-    /// - priority 模式：选择优先级最高（priority 最小）的可用账号
-    /// - balanced 模式：轮询选择可用账号
-    ///
-    /// # 参数
-    /// - `model`: 可选的模型名称，用于过滤支持该模型的账号（如 opus 模型需要付费订阅）
-    fn select_next_credential(
+    /// 先按禁用、白名单、订阅等级、模型可用性硬性过滤，再优先取健康状态不为 Unhealthy、
+    /// 且该模型未在拒答冷却期的账号；全部不满足时退回硬性过滤后的全集，避免完全不可用
+    /// （拒答冷却的账号会把上游说明原文返回给客户端）。
+    fn candidate_pool<'a>(
         &self,
+        entries: &'a [CredentialEntry],
         model: Option<&str>,
         allowed_ids: &[u64],
-    ) -> Option<(u64, KiroCredentials)> {
-        let entries = self.entries.lock();
-
-        // 检查是否是 opus 模型
+        now: Instant,
+    ) -> Vec<&'a CredentialEntry> {
         let is_opus = model
             .map(|m| m.to_lowercase().contains("opus"))
             .unwrap_or(false);
 
-        // 过滤可用账号
         let available: Vec<_> = entries
             .iter()
             .filter(|e| {
@@ -293,13 +275,6 @@ impl MultiTokenManager {
         // 按账号实际可用模型过滤（探测结果未知时不排除，详见 prefer_model_supporters）
         let available = self.prefer_model_supporters(available, model);
 
-        if available.is_empty() {
-            return None;
-        }
-
-        // 优先选择健康状态不为 Unhealthy、且该模型未在拒答冷却期的账号；
-        // 全部不满足时才 fallback 避免完全不可用（拒答冷却的账号会把上游说明原文返回给客户端）
-        let now = Instant::now();
         let preferred: Vec<_> = available
             .iter()
             .filter(|e| {
@@ -308,11 +283,32 @@ impl MultiTokenManager {
             })
             .copied()
             .collect();
-        let pool: &[&CredentialEntry] = if preferred.is_empty() {
-            &available
+        if preferred.is_empty() {
+            available
         } else {
-            &preferred
-        };
+            preferred
+        }
+    }
+
+    /// 根据负载均衡模式选择下一个账号
+    ///
+    /// - priority 模式：选择优先级最高（priority 最小）的可用账号
+    /// - balanced 模式：轮询选择可用账号
+    ///
+    /// # 参数
+    /// - `model`: 可选的模型名称，用于过滤支持该模型的账号（如 opus 模型需要付费订阅）
+    fn select_next_credential(
+        &self,
+        model: Option<&str>,
+        allowed_ids: &[u64],
+    ) -> Option<(u64, KiroCredentials)> {
+        let entries = self.entries.lock();
+        let now = Instant::now();
+        let pool = self.candidate_pool(&entries, model, allowed_ids, now);
+        if pool.is_empty() {
+            return None;
+        }
+        let pool = pool.as_slice();
         // 降级账号相当于优先级 +0.5：同优先级内最后被选中，仍先于下一优先级
         let degraded =
             |e: &CredentialEntry| Self::compute_health_at(e, now) == HealthStatus::Degraded;
@@ -548,188 +544,49 @@ impl MultiTokenManager {
         }
     }
 
-    /// 基于 agentContinuationId 的 sticky 路由
+    /// 为一次上游请求选账号，`preferred` 是会话亲和偏好的账号
     ///
-    /// 同一会话优先路由到缓存中的同一账号，保证 Kiro prompt cache 命中率。
-    /// 缓存条目 TTL 60 分钟（每次命中续期），不健康时自动驱逐并重选。
-    ///
-    /// `avoid_ids` 是本次请求内已经限流或账号失败过的账号：绑定命中这些账号时跳过复用改选其它
-    /// 账号，但**不删除绑定关系**，下一次请求仍可回到原账号继续命中 prompt cache。
-    pub async fn acquire_context_sticky(
+    /// 偏好账号与负载均衡用同一个候选集（[`Self::candidate_pool`]）：在候选集里就用它，
+    /// 否则按负载均衡选号，规则完全一致。`avoid_ids` 是本次请求内已经限流、本地限额满或
+    /// 账号失败过的账号，重试时避开。
+    pub async fn acquire_for_request(
         &self,
         model: Option<&str>,
         allowed_ids: &[u64],
-        continuation_id: Option<&str>,
+        preferred: Option<u64>,
         avoid_ids: &[u64],
-    ) -> anyhow::Result<CallContext> {
-        let Some(cid) = continuation_id else {
-            // 新会话无 continuation_id 是正常流程，不计入 miss，避免稀释真实掉线率
-            if avoid_ids.is_empty() {
-                return self.acquire_context_filtered(model, allowed_ids).await;
-            }
-            return self
-                .acquire_context_avoiding(model, allowed_ids, avoid_ids)
-                .await;
-        };
-
-        // 绑定是否指向本次请求内已限流的账号：决定后续是否保留绑定
-        let bound_to_avoided = {
-            let cache = self.sticky_cache.lock();
-            cache
-                .get(cid)
-                .is_some_and(|e| avoid_ids.contains(&e.credential_id))
-        };
-
-        let is_opus = model
-            .map(|m| m.to_ascii_lowercase().contains("opus"))
-            .unwrap_or(false);
-
-        // 步骤 ①②：从 sticky_cache 查找，验证 TTL + 健康状态
-        let cached = {
-            let cache = self.sticky_cache.lock();
-            if let Some(entry) = cache.get(cid) {
-                if entry.inserted_at.elapsed() < STICKY_CACHE_TTL {
-                    // TTL 未过期，检查账号健康状态
-                    let entries = self.entries.lock();
-                    // 健康度门槛：仅 Unhealthy/Disabled 才放弃绑定。
-                    // Degraded/Warning 表示账号近期有限流但仍可服务，此时保留绑定
-                    // 更有利于 prompt cache 命中；真正不可用时下面的调用链会重选。
-                    entries
-                        .iter()
-                        .find(|e| {
-                            e.id == entry.credential_id
-                                && !avoid_ids.contains(&e.id)
-                                && !e.disabled
-                                && !matches!(
-                                    Self::compute_health(e),
-                                    HealthStatus::Unhealthy | HealthStatus::Disabled
-                                )
-                                && (allowed_ids.is_empty() || allowed_ids.contains(&e.id))
-                                && (!is_opus || e.credentials.supports_opus())
-                                && !self.is_known_unsupported(e.id, model)
-                                && !Self::model_restricted_at(e, model, Instant::now())
-                        })
-                        .map(|e| (e.id, e.credentials.clone()))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        // 步骤 ③：尝试使用缓存账号
-        if let Some((id, credentials)) = cached {
-            match self.try_ensure_token(id, &credentials).await {
-                Ok(ctx) => {
-                    // 命中，续期。连续限流计数不在此清零：选中不代表能承载，
-                    // 由请求成功后的 report_sticky_success 清零
-                    self.sticky_hits.fetch_add(1, Ordering::Relaxed);
-                    self.sticky_cache
-                        .lock()
-                        .entry(cid.to_string())
-                        .and_modify(|e| e.inserted_at = Instant::now());
-                    return Ok(ctx);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "sticky cache 账号 #{} token 刷新失败，驱逐并重选: {}",
-                        id,
-                        e
-                    );
-
-                    self.report_refresh_error(id, &e);
-
-                    self.sticky_cache.lock().remove(cid);
-                    self.sticky_misses.fetch_add(1, Ordering::Relaxed);
+    ) -> anyhow::Result<(CallContext, Placement)> {
+        if let Some(id) = preferred.filter(|id| !avoid_ids.contains(id)) {
+            let credentials = {
+                let entries = self.entries.lock();
+                self.candidate_pool(&entries, model, allowed_ids, Instant::now())
+                    .into_iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.credentials.clone())
+            };
+            if let Some(credentials) = credentials {
+                match self.try_ensure_token(id, &credentials).await {
+                    Ok(ctx) => return Ok((ctx, Placement::Preferred)),
+                    Err(e) => {
+                        tracing::warn!("亲和账号 #{} Token 刷新失败，改选其它账号: {}", id, e);
+                        self.report_refresh_error(id, &e);
+                    }
                 }
             }
-        } else if bound_to_avoided {
-            // 本次请求内该账号已限流：换账号完成这次调用，但保留绑定关系，
-            // 让后续请求仍能回到原账号命中 prompt cache。不计 miss，避免稀释掉线率。
-        } else {
-            // TTL 过期或不健康，清理旧条目
-            self.sticky_cache.lock().remove(cid);
-            self.sticky_misses.fetch_add(1, Ordering::Relaxed);
         }
 
-        // 步骤 ④：走原有选择逻辑（排除本次请求内已限流的账号）
         let ctx = if avoid_ids.is_empty() {
             self.acquire_context_filtered(model, allowed_ids).await?
         } else {
             self.acquire_context_avoiding(model, allowed_ids, avoid_ids)
                 .await?
         };
-
-        // 步骤 ⑤⑥：写入 sticky_cache，懒惰 GC
-        {
-            let mut cache = self.sticky_cache.lock();
-            // 绑定仍指向本次请求内被避让的账号时保留原绑定，不要改写为临时替补账号
-            if !bound_to_avoided {
-                cache.insert(
-                    cid.to_string(),
-                    StickyCacheEntry {
-                        credential_id: ctx.id,
-                        inserted_at: Instant::now(),
-                        consecutive_throttles: 0,
-                    },
-                );
-            }
-            // 懒惰 GC：清理所有过期条目
-            cache.retain(|_, v| v.inserted_at.elapsed() < STICKY_CACHE_TTL);
-        }
-
-        Ok(ctx)
-    }
-
-    /// 记录一次 429 并按阈值决定是否解除 sticky 绑定
-    ///
-    /// Kiro 的 429 多为端点级瞬时限流，此时 `rotation_bias` 递增与端点桶封禁已能让
-    /// 新会话避让该账号；若同时立刻解绑，长会话会反复丢失 prompt cache，触发更多
-    /// 输入 token 重算，反而加剧限流。因此仅当同一会话在同一账号上连续限流达到
-    /// `STICKY_THROTTLE_EVICT_THRESHOLD` 次，才认为该账号确实无法承载此会话。
-    ///
-    /// 返回 `true` 表示本次已解除绑定。
-    pub fn report_sticky_throttled(&self, continuation_id: &str, credential_id: u64) -> bool {
-        let mut cache = self.sticky_cache.lock();
-        let Some(entry) = cache.get_mut(continuation_id) else {
-            return false;
+        let placement = match preferred {
+            Some(id) if id == ctx.id => Placement::Preferred,
+            Some(id) if avoid_ids.contains(&id) => Placement::Spilled,
+            _ => Placement::Fresh,
         };
-        // 绑定已指向其它账号：本次限流与当前绑定无关，保留绑定
-        if entry.credential_id != credential_id {
-            return false;
-        }
-        entry.consecutive_throttles = entry.consecutive_throttles.saturating_add(1);
-        if entry.consecutive_throttles < STICKY_THROTTLE_EVICT_THRESHOLD {
-            tracing::debug!(
-                "sticky 绑定保留: continuation_id={} 账号 #{} 连续限流 {}/{}",
-                continuation_id,
-                credential_id,
-                entry.consecutive_throttles,
-                STICKY_THROTTLE_EVICT_THRESHOLD
-            );
-            return false;
-        }
-        cache.remove(continuation_id);
-        tracing::info!(
-            "sticky 绑定已解除: continuation_id={} 账号 #{} 连续限流达到 {} 次",
-            continuation_id,
-            credential_id,
-            STICKY_THROTTLE_EVICT_THRESHOLD
-        );
-        true
-    }
-
-    /// 会话在绑定账号上请求成功：清零连续限流计数
-    ///
-    /// 成功落在别的账号（本次请求避让了绑定账号）时不清零：绑定账号仍未证明能承载此会话。
-    pub fn report_sticky_success(&self, continuation_id: &str, credential_id: u64) {
-        let mut cache = self.sticky_cache.lock();
-        if let Some(entry) = cache.get_mut(continuation_id)
-            && entry.credential_id == credential_id
-        {
-            entry.consecutive_throttles = 0;
-        }
+        Ok((ctx, placement))
     }
 
     /// 切换到下一个优先级最高的可用账号（内部方法）

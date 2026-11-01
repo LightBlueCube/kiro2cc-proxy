@@ -48,4 +48,4 @@ pub use stream::{
 };
 
 #[cfg(test)]
-pub(crate) use converter::convert_request;
+pub(crate) use converter::tests::convert_request;

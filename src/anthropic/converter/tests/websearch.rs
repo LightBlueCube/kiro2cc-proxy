@@ -1,10 +1,10 @@
 //! converter 测试（自 tests.rs 拆分，纯代码搬移）
 #![cfg(test)]
 
-use super::super::convert::convert_request;
 use super::super::websearch::{
     collect_history_tool_names, is_web_search_server_tool, strip_web_search_server_tool,
 };
+use super::convert_request;
 use super::fallback_req;
 use crate::anthropic::types::MessagesRequest;
 use crate::kiro::model::requests::conversation::Message;

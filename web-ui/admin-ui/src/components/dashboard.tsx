@@ -106,6 +106,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data: serverInfo, isError: serverInfoError } = useServerInfo()
   const { data: apiKeys } = useApiKeys()
   const { data: rpmData } = useRpm()
+  // 后端三项同时出现或同时缺省（未启用亲和）
+  const affinityCounts =
+    rpmData?.affinityPreferred === undefined
+      ? null
+      : {
+          preferred: rpmData.affinityPreferred,
+          prefixHits: rpmData.affinityPrefixHits ?? 0,
+          rebinds: rpmData.affinityRebinds ?? 0,
+        }
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutateAsync: resetFailure } = useResetFailure()
   const { mutateAsync: setDisabled } = useSetDisabled()
@@ -813,6 +822,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           cumulativeFailureRate={cumulativeFailureRate}
           onTodayClick={() => { setDailyView('list'); setDailyFromSidebar(false); setDailyRange('today'); setDailyCustomRange(null); setDailyDetailFromSummary(false) }}
           onOpenDocs={() => { setActiveTab('docs'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) }}
+          affinity={affinityCounts}
         />
 
         {/* 凭据列表（自本文件拆出，纯代码搬移） */}

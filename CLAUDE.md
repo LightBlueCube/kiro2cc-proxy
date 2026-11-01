@@ -70,8 +70,9 @@ Client (Anthropic SSE format)
 - **模型映射按关键词**（`converter/model.rs::map_model`）：请求模型名含 `sonnet`/`opus`/`haiku`/`gpt`/`fable` 等关键词即路由到对应 Kiro 模型，版本号（如 4.5、4.6、4.7、4.8、5、5.5）决定具体代际；未明确指定版本时 opus 兜底 4.6；未命中关键词的模型 ID 剥离 `-thinking` 后透传。
 - **模型名含 `thinking` 时覆写 thinking 配置**（`handlers/helpers.rs::override_thinking_from_model_name`）：opus 4.6+ 覆写为 adaptive，其余为 enabled，budget 固定 20000。
 - **additionalModelRequestFields 有"模型代际 × 字段"约束矩阵**：max_tokens 下限 1024 对全部 Claude 代际生效，上限按代际分 128K/64K 档；4.5 代际与 qwen3-coder-next / glm-5 / deepseek-3.2 / minimax-m2.5 / kimi-k3 整体跳过该字段（`converter/thinking.rs::additional_fields_skipped`）；GPT 系改发 `reasoning.effort`。详见 `converter/fields.rs::build_additional_model_request_fields` 注释与 `docs/源码全景解析.md` 难点 8。
-- **Prompt cache 用量四层降级链**（`src/cache/mod.rs`）：metering 真值 → `token::count_prefix_tokens` 前缀估算 → fingerprint 前缀指纹追踪（账号级）→ 比例模拟兜底。
-  开启 `promptCacheAccounting` 时，前缀估算被 `src/cache/breakpoint.rs` 的 cache_control 断点模拟取代（按 API Key + Kiro 模型 ID 隔离，直接解析原始 body，plan → 上游成功后 commit；本地模拟，不代表 Kiro 真实成本）。
+- **Kiro 缓存按「账号 + 内容前缀」命中，TTL 5 分钟、命中续期**（与 conversationId 无关）。因此：
+  - 路由（`src/kiro/affinity.rs`）：会话绑定账号 > 同前缀族（模型 + tools + history[0]）所在账号 > 常规选号，尽量让同一前缀落回同一账号。
+  - 用量（`src/cache/mod.rs::estimate_cache_read`）：cache_read 取 metering 真值 > credits 反推 > 同账号前缀观测（`src/cache/prefix.rs`）；cache_creation 恒为 0。客户端 usage 与用量日志同一个值，message_start 报完整输入、缓存为 0，终值在 message_delta。
 - **Token 计数用 tiktoken cl100k_base BPE**（`src/token.rs`，全局单例）。`stream/calib.rs` 的 `CLIENT_TOKEN_DISPLAY_SCALE`（0.6657）是配合旧公式校准的显示缩放系数，控制客户端 auto-compact 触发时机——改动 token 口径时需评估是否需重新校准。
 - **history[0] 冻结是 prompt cache 的命脉**：系统提示中的 `cch=` 计费哈希规范化（`normalize_billing_header`）、`agentContinuationId` 由 conversationId 派生、标题生成请求隔离等机制都为让 history[0] 跨请求逐字节稳定。改动 converter 中系统提示/历史消息构建时必须保持这些不变量，否则 Kiro 侧缓存全量失效。
 

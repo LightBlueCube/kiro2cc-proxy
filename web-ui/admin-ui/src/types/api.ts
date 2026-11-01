@@ -286,6 +286,12 @@ export interface RpmSnapshot {
   concurrencyGlobal: number
   concurrencyByCredential: Record<string, number>
   concurrencyByApiKey: Record<string, number>
+  /** 启动以来选号落在会话绑定账号的次数（未启用亲和时缺省） */
+  affinityPreferred?: number
+  /** 启动以来有效绑定被改到其它账号的次数 */
+  affinityRebinds?: number
+  /** 启动以来无绑定会话按前缀族落到已缓存该前缀账号的次数 */
+  affinityPrefixHits?: number
 }
 
 // 单条原始请求记录

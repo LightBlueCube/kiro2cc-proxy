@@ -12,7 +12,7 @@ use axum::{
 use bytes::Bytes;
 use std::time::Duration;
 
-use crate::anthropic::converter::{ConversionError, convert_request};
+use crate::anthropic::converter::{ConversionError, Tenant, convert_request};
 use crate::anthropic::middleware::{ApiKeyContext, AppState};
 use crate::anthropic::types::ErrorResponse;
 
@@ -28,10 +28,6 @@ use crate::anthropic::websearch;
 
 /// /cc/v1/messages 流式响应全局 deadline（秒），防止上游挂起导致请求永不结束
 const CC_STREAM_DEADLINE_SECS: u64 = 300;
-/// prompt cache 模拟：读命中比例
-const CC_CACHE_READ_RATIO: f64 = 0.85;
-/// prompt cache 模拟：creation 创建比例
-const CC_CACHE_CREATION_RATIO: f64 = 0.1;
 
 /// POST /cc/v1/messages
 ///
@@ -131,7 +127,10 @@ pub async fn post_messages_cc(
     }
 
     // 转换请求
-    let conversion_result = match convert_request(&payload) {
+    let tenant = identity
+        .as_ref()
+        .map_or_else(Tenant::anonymous, |ext| Tenant::api_key(ext.0.id));
+    let conversion_result = match convert_request(&payload, &tenant, &state.sessions) {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {
@@ -158,15 +157,11 @@ pub async fn post_messages_cc(
 
     // 是否为 Claude Code /compact 压缩请求（决定上游超时：普通 180s / 压缩 1000s）
     let is_compact_request = conversion_result.is_compact_request;
-    let prefix_cached = conversion_result.prefix_cached;
     // 实际发往上游的 effort 与 thinking 预算（随 usage 记录入库）
     let effort = conversion_result.effort.clone();
     let thinking_budget_tokens = conversion_result.thinking_budget_tokens;
     let history_thinking_loss = conversion_result.history_thinking_loss;
     let history_reasoning_replay = conversion_result.history_reasoning_replay;
-
-    // 会话 conversationId（cache-miss 诊断用）；须在 conversation_state move 前取出
-    let conversation_id = Some(conversion_result.conversation_state.conversation_id.clone());
 
     // 构建 Kiro 请求
     let kiro_request = KiroRequest {
@@ -192,50 +187,17 @@ pub async fn post_messages_cc(
 
     // 请求体可能包含 API Key 与敏感上下文，禁止整包入日志（cr-result C4）
 
-    // 构造 fingerprint profile（cc 端点同样接入指纹追踪）
-    // 断点缓存记账：按原始 body 的 cache_control 断点 plan（类型化 payload 已丢弃 cache_control）
-    // 缓存按 API Key 隔离（无 Key 上下文时归入同一匿名域）；模型取映射后的 Kiro ID，
-    // 同一模型的不同写法（claude-opus-4-6 / claude-opus-4.6）共享缓存
-    let cache_accounting = match state.breakpoint_cache.as_ref() {
-        Some(cache) => {
-            let tenant = identity
-                .as_ref()
-                .map_or_else(|| "anon".to_string(), |ext| format!("key:{}", ext.0.id));
-            let kiro_model = crate::anthropic::converter::map_model(&payload.model)
-                .unwrap_or_else(|| payload.model.clone());
-            crate::cache::breakpoint::CacheAccounting::from_request(
-                cache,
-                body.clone(),
-                tenant,
-                kiro_model,
-            )
-            .await
-        }
-        None => None,
-    };
+    let prefix_probe =
+        super::helpers::prefix_probe(&state.prefix_cache, &kiro_request.conversation_state);
 
-    let fp_tracker = state.fingerprint_tracker.clone();
-    let fp_profile = fp_tracker.as_ref().map(|_| {
-        crate::cache::fingerprint::FingerprintTracker::build_profile_with_tools(
-            payload.system.as_deref(),
-            &payload.messages,
-            payload.tools.as_deref(),
-        )
-    });
-
-    // 估算"缓存前缀" token 数（与 post_messages 共用同一实现，口径与门控见 helpers::estimate_prefix_tokens）
-    let (raw_prefix_tokens, prefix_estimated_tokens) =
-        super::helpers::estimate_prefix_tokens(&payload, prefix_cached);
-
-    // 估算输入 tokens（复用上方已计算的 prefix_estimated_tokens，避免重复编码历史消息）
+    // 估算输入 tokens
     // 先取出 thinking_enabled 判断所需字段，避免 payload.tools 等被移动后无法整体借用
     let thinking_enabled = resolve_thinking_enabled(&payload.model, &payload.thinking);
-    let input_tokens = token::count_all_tokens_with_prefix(
+    let input_tokens = token::count_all_tokens(
         payload.model.clone(),
         payload.system,
         payload.messages,
         payload.tools,
-        raw_prefix_tokens,
     ) as i32;
 
     // 提取用量追踪信息
@@ -243,13 +205,6 @@ pub async fn post_messages_cc(
     let usage_tracker = state.usage_tracker.clone();
     let client_ip = extract_client_ip(&headers, Some(&addr));
     let user_agent = extract_user_agent(&headers);
-
-    // 计算 prompt cache 模拟 usage
-    let prompt_cache_usage = crate::cache::PromptCacheUsage::from_ratio_config(
-        input_tokens,
-        crate::cache::CacheSimulationRatioConfig::fixed(CC_CACHE_READ_RATIO),
-        CC_CACHE_CREATION_RATIO,
-    );
 
     let json_schema_requested = payload
         .output_config
@@ -271,11 +226,10 @@ pub async fn post_messages_cc(
             request_body,
             &payload.model,
             input_tokens,
-            prefix_estimated_tokens,
+            prefix_probe,
             thinking_enabled,
             usage_tracker.clone(),
             api_key_id,
-            prompt_cache_usage,
             bound_ids,
             client_ip,
             Some(Duration::from_secs(CC_STREAM_DEADLINE_SECS)),
@@ -284,8 +238,6 @@ pub async fn post_messages_cc(
             thinking_budget_tokens,
             thinking_as_text,
             user_agent,
-            cache_accounting,
-            conversation_id,
             history_thinking_loss,
             history_reasoning_replay,
             crate::model::usage::ApiFormat::CcMessages,
@@ -299,21 +251,16 @@ pub async fn post_messages_cc(
             &request_body,
             &payload.model,
             input_tokens,
-            prefix_estimated_tokens,
+            prefix_probe,
             usage_tracker,
             api_key_id,
-            prompt_cache_usage,
             bound_ids,
             client_ip,
             json_schema_requested,
-            fp_tracker,
-            fp_profile,
             is_compact_request,
             effort,
             thinking_budget_tokens,
             user_agent,
-            cache_accounting,
-            conversation_id,
             history_thinking_loss,
             history_reasoning_replay,
             crate::model::usage::ApiFormat::CcMessages,

@@ -16,6 +16,7 @@ use parking_lot::RwLock;
 use super::service::AdminService;
 use super::types::AdminErrorResponse;
 use crate::common::auth;
+use crate::kiro::affinity::Affinity;
 use crate::log_capture::LogCapture;
 use crate::model::api_key::ApiKeyManager;
 use crate::model::failure_log::FailureLogStore;
@@ -37,6 +38,8 @@ pub struct AdminState {
     pub usage_tracker: Option<Arc<UsageTracker>>,
     /// RPM 追踪器（可选）
     pub rpm_tracker: Option<Arc<RpmTracker>>,
+    /// 会话亲和状态（可选，读取命中 / 改绑计数）
+    pub affinity: Option<Arc<Affinity>>,
     /// 限流日志存储（可选）
     pub throttle_log_store: Option<Arc<ThrottleLogStore>>,
     /// 失败日志存储（可选）
@@ -62,6 +65,7 @@ impl AdminState {
             api_key_manager: None,
             usage_tracker: None,
             rpm_tracker: None,
+            affinity: None,
             throttle_log_store: None,
             failure_log_store: None,
             log_capture: None,
@@ -84,6 +88,11 @@ impl AdminState {
 
     pub fn with_rpm_tracker(mut self, tracker: Arc<RpmTracker>) -> Self {
         self.rpm_tracker = Some(tracker);
+        self
+    }
+
+    pub fn with_affinity(mut self, affinity: Arc<Affinity>) -> Self {
+        self.affinity = Some(affinity);
         self
     }
 

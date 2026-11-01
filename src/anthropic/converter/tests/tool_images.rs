@@ -1,7 +1,7 @@
 //! Claude Code Read 图片工具结果的回归测试；只检验协议转换，不请求上游。
 
-use super::super::convert::convert_request_with_chunking;
 use super::super::message::process_message_content;
+use super::convert_request_with_chunking;
 use crate::anthropic::types::MessagesRequest;
 use crate::kiro::model::requests::conversation::Message;
 use crate::kiro::model::requests::tool::ToolResult;

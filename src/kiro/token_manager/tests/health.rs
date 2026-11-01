@@ -4,8 +4,8 @@
 mod tests {
     use super::super::super::entry::HealthStatus;
     use super::super::super::types::MultiTokenManager;
+    use super::super::affinity::tests::make_valid_cred;
     use super::super::multi::tests::test_error;
-    use super::super::sticky::tests::make_valid_cred;
     use crate::model::config::Config;
     use std::time::{Duration, Instant};
 

@@ -159,12 +159,6 @@ pub struct MultiTokenManager {
     pub(crate) stats_dirty: AtomicBool,
     /// Round-Robin 计数器（balanced 模式下用于均匀轮转账号）
     pub(crate) rr_counter: AtomicU64,
-    /// Sticky cache：agentContinuationId → 账号绑定关系
-    pub(crate) sticky_cache: Mutex<HashMap<String, StickyCacheEntry>>,
-    /// Sticky cache 命中次数（lock-free 统计）
-    pub(crate) sticky_hits: AtomicU64,
-    /// Sticky cache 未命中次数（包括无 continuation_id、TTL 过期、账号不健康）
-    pub(crate) sticky_misses: AtomicU64,
     /// 持久化串行锁：串行化 credentials/stats 的序列化+写盘，避免多路径并发交错写
     pub(crate) persist_lock: Mutex<()>,
     /// 历史最大账号 ID（单调递增，跨账号删除/重启持久化，防止 ID 被复用导致
@@ -217,28 +211,17 @@ pub(crate) const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 pub const QUOTA_EXHAUSTED_ALL_MARKER: &str = "QUOTA_EXHAUSTED_ALL";
 /// 统计数据持久化防抖间隔
 pub(crate) const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);
-/// Sticky cache 条目存活时间（60 分钟不活跃后自动淘汰）
-pub(crate) const STICKY_CACHE_TTL: StdDuration = StdDuration::from_secs(60 * 60);
-
-/// 同一会话在同一账号上连续 429 多少次后才解除 sticky 绑定
-///
-/// Kiro 的 429 常是端点级短时限流，配合 rotation_bias 递增与端点桶封禁已足以让
-/// 新会话避让该账号；过早解绑会让长会话反复丢失 prompt cache，反而放大限流。
-pub(crate) const STICKY_THROTTLE_EVICT_THRESHOLD: u32 = 3;
-
 pub(crate) const TOKEN_REFRESH_COOLDOWN: StdDuration = StdDuration::from_secs(30);
 
-/// Sticky cache 条目：记录会话到账号的绑定关系
-pub(crate) struct StickyCacheEntry {
-    pub(crate) credential_id: u64,
-    /// 最后一次命中/写入时间，用于 TTL 计算
-    pub(crate) inserted_at: Instant,
-    /// 该会话在当前绑定账号上连续遭遇 429 的次数
-    ///
-    /// 单次 429 多为端点级瞬时限流，立即解绑会丢弃已建立的 prompt cache。
-    /// 仅当连续限流达到 STICKY_THROTTLE_EVICT_THRESHOLD 才判定该账号确实不适合
-    /// 承载此会话，执行解绑重选。任一次成功即清零。
-    pub(crate) consecutive_throttles: u32,
+/// 本次选号结果与会话亲和偏好的关系（见 [`MultiTokenManager::acquire_for_request`]）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// 落在偏好账号上
+    Preferred,
+    /// 偏好账号本次请求内被避让（限流、本地限额满、账号失败），临时换到其它账号
+    Spilled,
+    /// 没有偏好账号，或偏好账号不在候选集里（不可用、不支持该模型等）
+    Fresh,
 }
 
 /// API 调用上下文

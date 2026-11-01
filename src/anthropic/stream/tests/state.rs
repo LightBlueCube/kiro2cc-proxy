@@ -6,7 +6,6 @@ mod tests {
         SseEvent, SseStateManager, StreamContext, scale_for_client, scale_for_client_with,
         split_thinking_and_visible,
     };
-    use crate::cache::PromptCacheUsage;
     use serde_json::json;
 
     /// 非流式整段分离：thinking 与可见文本必须彻底分开，标签原文不得残留
@@ -138,37 +137,18 @@ mod tests {
         assert!(ctx.output_tokens() >= visible_true + thinking_true);
     }
 
-    /// message_start 与 message_delta 的 cache_* 必须同口径 —— 防止 message_start
-    /// 泄漏 PromptCacheUsage 模拟值，被客户端记成凭空的 cache write。
+    /// message_start 在 credits 到达前不估缓存：报完整输入，cache_* 为 0，终值由 message_delta 覆盖
     #[test]
-    fn test_message_start_cache_usage_matches_final() {
-        let ctx = StreamContext::new_with_thinking("gpt-5.6-luna", 45409, false)
-            // 模拟值刻意给非零 creation，若被泄漏则断言失败
-            .with_prompt_cache_usage(PromptCacheUsage {
-                input_tokens: 5000,
-                cache_creation_input_tokens: 3906,
-                cache_read_input_tokens: 36503,
-                cache_creation_5m_input_tokens: 3906,
-                cache_creation_1h_input_tokens: 0,
-            })
-            .with_prefix_estimated_tokens(36348);
+    fn test_message_start_reports_full_input_without_cache() {
+        let ctx = StreamContext::new_with_thinking("gpt-5.6-luna", 45409, false);
 
         let start = ctx.create_message_start_event();
         let start_usage = &start["message"]["usage"];
         assert_eq!(start_usage["cache_creation_input_tokens"], 0);
-        assert_eq!(
-            start_usage["cache_read_input_tokens"],
-            scale_for_client(36348, "gpt-5.6-luna")
-        );
+        assert_eq!(start_usage["cache_read_input_tokens"], 0);
         assert_eq!(
             start_usage["input_tokens"],
-            scale_for_client(45409 - 36348, "gpt-5.6-luna")
-        );
-
-        // 末尾 message_delta 走同一派生逻辑，三元组必须一致
-        assert_eq!(
-            ctx.derive_report_cache_usage(45409, None, &Default::default()),
-            (9061, 0, 36348)
+            scale_for_client(45409, "gpt-5.6-luna")
         );
     }
 

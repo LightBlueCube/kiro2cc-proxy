@@ -7,16 +7,16 @@ pub(crate) mod tests {
 
     use super::super::super::refresh::validate_refresh_token;
     use super::super::super::types::{
-        MAX_FAILURES_PER_CREDENTIAL, MultiTokenManager, QUOTA_EXHAUSTED_ALL_MARKER,
+        MAX_FAILURES_PER_CREDENTIAL, MultiTokenManager, Placement, QUOTA_EXHAUSTED_ALL_MARKER,
     };
 
     use crate::kiro::model::credentials::KiroCredentials;
 
+    use crate::kiro::token_manager::tests::affinity::tests::make_valid_cred;
     use crate::kiro::token_manager::tests::ext_idp::tests::{
         TempDirGuard, spawn_single_response_server,
     };
     use crate::kiro::token_manager::tests::multi::tests::test_error;
-    use crate::kiro::token_manager::tests::sticky::tests::make_valid_cred;
     use crate::model::config::Config;
     use chrono::{Duration, Utc};
 
@@ -56,19 +56,18 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_acquire_context_sticky_production_path_classifies_invalid_grant() {
-        // 验证生产路径 acquire_context_sticky 命中缓存后的 Err(e) 分支确实接入了
-        // RefreshTokenInvalidError 分类逻辑（覆盖 T11 / design.md 决策 10 的核心风险点：
-        // provider.rs 实际调用的是 acquire_context_sticky，遗漏该路径等于本次改动未生效）
+    async fn test_acquire_for_request_preferred_path_classifies_invalid_grant() {
+        // 验证生产路径 acquire_for_request 的亲和账号分支刷新失败时接入了
+        // RefreshTokenInvalidError 分类逻辑（provider 实际调用的是 acquire_for_request，
+        // 遗漏该路径等于分类未生效）
         let config = Config::default();
         let cred1 = make_valid_cred("t1");
         let cred2 = make_valid_cred("t2");
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
-        // 首次调用建立 sticky 绑定
-        let ctx1 = manager
-            .acquire_context_sticky(None, &[], Some("session-invalid-grant"), &[])
+        let (ctx1, _) = manager
+            .acquire_for_request(None, &[], None, &[])
             .await
             .unwrap();
         let bound_id = ctx1.id;
@@ -87,12 +86,13 @@ pub(crate) mod tests {
             entry.credentials.token_endpoint = Some(endpoint);
         }
 
-        // 命中同一 continuation_id：走缓存命中分支，刷新失败应驱逐并重选到另一账号
-        let ctx2 = manager
-            .acquire_context_sticky(None, &[], Some("session-invalid-grant"), &[])
+        // 以该账号为亲和账号：刷新失败应禁用它并改选另一账号
+        let (ctx2, placement) = manager
+            .acquire_for_request(None, &[], Some(bound_id), &[])
             .await
             .unwrap();
         assert_ne!(ctx2.id, bound_id);
+        assert_eq!(placement, Placement::Fresh);
 
         let entries = manager.entries.lock();
         let entry = entries.iter().find(|e| e.id == bound_id).unwrap();

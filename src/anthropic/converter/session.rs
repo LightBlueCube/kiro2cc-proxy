@@ -69,8 +69,8 @@ pub(super) fn extract_session_id(user_id: &str) -> Option<String> {
 /// 从 conversationId 派生稳定的 agentContinuationId
 ///
 /// 使用 conversationId 的 SHA-256 哈希前 16 字节，格式化为 UUID 形式。
-/// 同一 conversationId 始终产生相同的 agentContinuationId，
-/// 让 Kiro 后端能识别同一会话的连续请求，启用跨请求 prompt caching。
+/// 同一 conversationId 始终产生相同的 agentContinuationId。
+/// （会话亲和路由按 conversationId；上游 prompt cache 两者都不依赖，见 [`derive_conversation_id`]）
 pub(super) fn derive_agent_continuation_id(conversation_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"agent-continuation:");
@@ -165,68 +165,128 @@ pub(crate) fn is_compact_request(messages: &[crate::anthropic::types::Message]) 
     has_critical && has_detailed
 }
 
-/// 为无 metadata 的第三方客户端派生稳定的 conversation UUID。
-///
-/// seed 由三部分组成：system 文本、排序后的工具名集合、首条消息内容。
-/// 前两项对同一客户端跨会话恒定，单独作为 seed 会把所有会话折叠成同一个 ID，
-/// 使 sticky 路由把全部流量钉在同一个账号上（多账号退化为单账号，反而加剧 429）。
-/// 首条消息是请求体内唯一满足「同一会话跨轮不变、不同会话之间不同」的成分——
-/// 客户端每轮都重发完整历史，`messages[0]` 保持原样。
-/// 不能纳入全部 messages：那样每轮 hash 都会变，粘性直接归零。
-///
-/// system 与 tools 皆空时仅用首条消息派生——裸请求（脚本、简单 SDK 用法）
-/// 同样需要跨轮稳定的会话身份才能命中上游 prompt cache（实测可省约 38% credits）。
-/// 折叠代价可接受：需同时满足相同首条消息（前 4096 字符）才折叠，且影响仅限
-/// 共享 sticky 路由与上游缓存，不影响正确性。
-///
-/// 已知权衡：客户端若做上下文压缩并改写了 `messages[0]`（如 auto-compact），
-/// 该会话会在压缩发生的那一轮重新派生 ID 并重新绑定账号；
-/// 此时上游 prompt cache 本已因历史被改写而失效，可接受。
-/// 首条消息前 4096 字符相同的两个会话同样会被折叠，概率低且可接受。
-pub(super) fn derive_fallback_conversation_id(req: &MessagesRequest) -> Option<String> {
-    // messages 为空时 convert_request 已提前返回 Err，此处仅防御
-    if req.messages.is_empty() {
-        return None;
+/// 参与会话 seed 的文本上限（字符），避免超长 system / 首条消息拖慢 hash
+const SEED_TEXT_MAX_CHARS: usize = 4096;
+
+/// 会话所属租户。conversationId 按租户派生：不同 API Key 的请求即便内容完全相同，
+/// 也不会共用会话（sticky 绑定与会话级 history[0] / baseline 状态互不干扰）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tenant(String);
+
+impl Tenant {
+    pub fn api_key(id: u32) -> Self {
+        Self(format!("key:{id}"))
     }
-    let system_seed = req
+
+    /// 无 API Key 上下文的请求（如管理员 Key）共用一个租户
+    pub fn anonymous() -> Self {
+        Self("anon".to_string())
+    }
+}
+
+/// conversationId 的派生依据（日志用）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConversationIdSource {
+    /// metadata.user_id 携带的客户端会话标识 + 首条消息
+    ClientSession,
+    /// 无客户端会话标识：system + 工具名 + 首条消息
+    Content,
+}
+
+/// 派生上游 conversationId（UUID v4 形态，上游严格的 UUID 解析器会拒绝其它形态）。
+///
+/// 实测（2026-11-01，`e2e/p0-identity.mjs`）上游 prompt cache 按「账号 + 内容前缀」寻址，
+/// 与 conversationId 无关；conversationId 只决定 sticky 路由与会话级状态，因此要求：
+/// - 同一会话跨轮稳定：客户端每轮重发完整历史，首条消息不变
+/// - 不同会话不同：同一客户端会话里的主对话、子代理、辅助请求首条消息各不相同，各成一个会话
+/// - 按租户隔离
+///
+/// seed：有客户端会话标识（metadata.user_id，能解析出 session UUID 时取 UUID，否则取原值）时
+/// 为「标识 + 首条消息」；否则为「system + 排序后的工具名 + 首条消息」——system 与工具对同一
+/// 客户端跨会话恒定，单独作 seed 会把所有会话折叠成同一个 ID。首条消息只取顶层文本块，
+/// 文本相同、仅附件不同的两个会话会被判为同一会话。
+///
+/// 已知权衡：客户端压缩上下文改写了首条消息时，会话在压缩那一轮换新 ID、重新绑定账号；
+/// 此时上游缓存本已因历史改写失效。
+///
+/// 调用方保证 `req.messages` 非空。
+pub(super) fn derive_conversation_id(
+    req: &MessagesRequest,
+    tenant: &Tenant,
+) -> (String, ConversationIdSource) {
+    let client_session = req
+        .metadata
+        .as_ref()
+        .and_then(|m| m.user_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| extract_session_id(id).unwrap_or_else(|| id.to_string()));
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"conversation:v2");
+    update_field(&mut hasher, tenant.0.as_bytes());
+    let source = match &client_session {
+        Some(session) => {
+            update_field(&mut hasher, b"session");
+            update_field(&mut hasher, session.as_bytes());
+            ConversationIdSource::ClientSession
+        }
+        None => {
+            update_field(&mut hasher, b"content");
+            update_system_and_tools(&mut hasher, req);
+            ConversationIdSource::Content
+        }
+    };
+    let first = &req.messages[0];
+    update_field(&mut hasher, first.role.as_bytes());
+    update_field(
+        &mut hasher,
+        collect_text_for_hash(&first.content, SEED_TEXT_MAX_CHARS).as_bytes(),
+    );
+
+    (uuid_v4_from_digest(&hasher.finalize()), source)
+}
+
+/// 带长度前缀写入一个字段，避免相邻字段拼接产生歧义（"ab"+"c" 与 "a"+"bc"）
+fn update_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn update_system_and_tools(hasher: &mut Sha256, req: &MessagesRequest) {
+    let system = req
         .system
         .as_ref()
-        .map(|s| {
-            s.iter()
+        .map(|blocks| {
+            blocks
+                .iter()
                 .map(|b| b.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n")
         })
         .unwrap_or_default();
+    update_field(
+        hasher,
+        truncate_chars(&system, SEED_TEXT_MAX_CHARS).as_bytes(),
+    );
+
     let mut tool_names: Vec<&str> = req
         .tools
         .as_deref()
         .map(|tools| tools.iter().map(|t| t.name.as_str()).collect())
         .unwrap_or_default();
     tool_names.sort_unstable();
-    // 首条消息：role + 顶层文本块（已在 collect_text_for_hash 内限长）
-    let first_message_seed = req
-        .messages
-        .first()
-        .map(|m| format!("{}:{}", m.role, collect_text_for_hash(&m.content, 4096)))
-        .unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(b"fallback-conversation:");
-    hasher.update(truncate_chars(&system_seed, 4096).as_bytes());
-    hasher.update(b"|tools=");
-    for name in &tool_names {
-        hasher.update(name.as_bytes());
-        hasher.update(b",");
+    update_field(hasher, &(tool_names.len() as u64).to_le_bytes());
+    for name in tool_names {
+        update_field(hasher, name.as_bytes());
     }
-    hasher.update(b"|first=");
-    hasher.update(first_message_seed.as_bytes());
-    let result = hasher.finalize();
+}
+
+/// 取摘要前 16 字节并置 UUID v4 的 Version / Variant 位
+fn uuid_v4_from_digest(digest: &[u8]) -> String {
     let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&result[..16]);
-    // 强制设置 UUID v4 的 Version (4) 和 Variant (8/9/A/B) 位
-    // 确保上游严格的 UUID 解析器不会将其拒绝为非法格式 (400 Bad Request)
+    bytes.copy_from_slice(&digest[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    Some(uuid::Uuid::from_bytes(bytes).to_string())
+    uuid::Uuid::from_bytes(bytes).to_string()
 }

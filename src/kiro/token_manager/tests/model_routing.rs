@@ -3,9 +3,9 @@
 #[cfg(test)]
 mod tests {
     use super::super::super::types::{
-        MODEL_SUPPORT_FAILURE_TTL, MODEL_SUPPORT_TTL, ModelSupport, MultiTokenManager,
+        MODEL_SUPPORT_FAILURE_TTL, MODEL_SUPPORT_TTL, ModelSupport, MultiTokenManager, Placement,
     };
-    use super::super::sticky::tests::make_valid_cred;
+    use super::super::affinity::tests::make_valid_cred;
     use crate::kiro::model::available_models::{
         AvailableModelInfo, AvailableModelsResponse, TokenLimits,
     };
@@ -110,36 +110,30 @@ mod tests {
         set_models(&m, 1, &["gpt-5.6-sol"]);
         set_models(&m, 2, &[MODEL]);
         // 白名单只含 #1 且其明确不支持：候选全部不支持，保持原行为（不回退到白名单之外）
-        let ctx = m
-            .acquire_context_sticky(Some(MODEL), &[1], None, &[])
+        let (ctx, _) = m
+            .acquire_for_request(Some(MODEL), &[1], None, &[])
             .await
             .unwrap();
         assert_eq!(ctx.id, 1);
-        let ctx = m
-            .acquire_context_sticky(Some(MODEL), &[1, 2], None, &[])
+        let (ctx, _) = m
+            .acquire_for_request(Some(MODEL), &[1, 2], None, &[])
             .await
             .unwrap();
         assert_eq!(ctx.id, 2);
     }
 
     #[tokio::test]
-    async fn sticky_binding_to_unsupported_account_is_replaced() {
+    async fn preferred_account_without_model_support_is_replaced() {
         let m = manager_with_two();
-        // 先让会话绑定到 #1
-        let first = m
-            .acquire_context_sticky(Some(MODEL), &[], Some("session-x"), &[])
-            .await
-            .unwrap();
-        assert_eq!(first.id, 1);
-
-        // 之后探测到 #1 不支持该模型：会话应改绑到 #2
+        // 会话亲和 #1，之后探测到 #1 不支持该模型：应改选 #2
         set_models(&m, 1, &["gpt-5.6-sol"]);
         set_models(&m, 2, &[MODEL]);
-        let second = m
-            .acquire_context_sticky(Some(MODEL), &[], Some("session-x"), &[])
+        let (ctx, placement) = m
+            .acquire_for_request(Some(MODEL), &[], Some(1), &[])
             .await
             .unwrap();
-        assert_eq!(second.id, 2);
+        assert_eq!(ctx.id, 2);
+        assert_eq!(placement, Placement::Fresh);
     }
 
     #[tokio::test]

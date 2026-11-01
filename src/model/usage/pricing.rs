@@ -363,30 +363,3 @@ pub(crate) fn infer_cache_read_from_credits(
         }
     }
 }
-
-/// 结合静态前缀上界与 `creditsUsed` 反推值校准最终 `cache_read_input_tokens`。
-///
-/// - `prefix_estimated_tokens <= 0`（首轮或 `history[0]` 重置）时锁定为 `0`；
-/// - 满足反推条件时取 `min(prefix_estimated_tokens, inferred_read, final_input_tokens)`
-///   （比冷价还贵时反推值为 0）；
-/// - 其余情况（`< 4096`、无 `credits_used`、未标定模型、比全命中价还便宜）保留
-///   `min(prefix_estimated_tokens, final_input_tokens)`。
-pub(crate) fn refine_prefix_cache_read(
-    model: &str,
-    prefix_estimated_tokens: i32,
-    final_input_tokens: i32,
-    replayed: &ReplayedReasoning,
-    output: &BilledOutput,
-    credits_used: Option<f64>,
-) -> i32 {
-    if prefix_estimated_tokens <= 0 || final_input_tokens <= 0 {
-        return 0;
-    }
-    let capped_prefix = prefix_estimated_tokens.min(final_input_tokens);
-    match credits_used.and_then(|cu| {
-        infer_cache_read_from_credits(model, final_input_tokens, replayed, output, cu)
-    }) {
-        Some(inferred) => capped_prefix.min(inferred),
-        None => capped_prefix,
-    }
-}

@@ -312,27 +312,21 @@ pub(crate) fn is_suggestion_mode_request(payload: &MessagesRequest) -> bool {
         })
 }
 
-/// 估算缓存前缀 tokens 并按 `prefix_cached` 门控 cache_read 口径。
+/// 为本次 Kiro 请求建立前缀命中观测（响应结束后在实际账号上结算，见 `crate::cache`）。
 ///
-/// 返回 `(raw_prefix_tokens, prefix_estimated_tokens)`：
-/// - `raw_prefix_tokens`：system + tools + 除最后一条消息外的全部历史（`count_prefix_tokens`
-///   口径），**始终**供 `count_all_tokens_with_prefix` 累加总输入，不受门控影响
-/// - `prefix_estimated_tokens`：仅当会话前缀已命中冻结缓存（`ConversionResult::prefix_cached`，
-///   详见其文档）时等于 `raw_prefix_tokens`，否则为 0 —— 新窗口首条消息、单条消息重发、
-///   history[0] 首次出现/漂移重置的轮次不计入 cache_read
-///
+/// 画像构建失败时本次不按前缀估算 cache_read（credits 反推不受影响）。
 /// `/v1/messages` 与 `/cc/v1/messages` 共用，保证两端点口径一致。
-pub(crate) fn estimate_prefix_tokens(payload: &MessagesRequest, prefix_cached: bool) -> (u64, i32) {
-    let n = payload.messages.len();
-    let prior: &[_] = if n > 0 {
-        &payload.messages[..n - 1]
-    } else {
-        &[]
-    };
-    let raw =
-        token::count_prefix_tokens(payload.system.as_deref(), prior, payload.tools.as_deref());
-    let gated = if prefix_cached { raw as i32 } else { 0 };
-    (raw, gated)
+pub(crate) fn prefix_probe(
+    cache: &std::sync::Arc<crate::cache::PrefixCache>,
+    state: &crate::kiro::model::requests::conversation::ConversationState,
+) -> Option<crate::cache::PrefixProbe> {
+    match crate::cache::PrefixProfile::from_state(state) {
+        Ok(profile) => Some(crate::cache::PrefixProbe::new(cache.clone(), profile)),
+        Err(e) => {
+            tracing::warn!("前缀画像构建失败，本次不按前缀估算 cache_read: {}", e);
+            None
+        }
+    }
 }
 
 /// 为建议请求构造空响应（按 stream 分流）。

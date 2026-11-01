@@ -1,8 +1,8 @@
 //! converter 测试（自 tests.rs 拆分，纯代码搬移）
 #![cfg(test)]
 
-use super::super::convert::convert_request;
 use super::super::result::ConversionResult;
+use super::convert_request;
 #[allow(unused_imports)]
 use crate::anthropic::types::ContentBlock as _;
 use crate::anthropic::types::MessagesRequest;
@@ -275,8 +275,6 @@ fn test_inline_system_requires_user_message() {
 
 #[test]
 fn test_inline_system_cache_and_session_identity() {
-    use super::super::session::derive_fallback_conversation_id;
-
     for metadata in [false, true] {
         let make_request = |rules: &str, extended: bool| {
             let mut messages = vec![
@@ -298,19 +296,16 @@ fn test_inline_system_cache_and_session_identity() {
         };
         let first_req = make_request("rules-v1", false);
         let original_messages = serde_json::to_value(&first_req.messages).unwrap();
-        let expected_id = if metadata {
-            "23083fc0-9423-4a8b-9f54-28667ec939fe".to_string()
-        } else {
-            derive_fallback_conversation_id(&first_req).unwrap()
-        };
         let first = convert_request(&first_req).unwrap();
         let grown = convert_request(&make_request("rules-v1", true)).unwrap();
         let updated = convert_request(&make_request("rules-v2", true)).unwrap();
         assert_eq!(system_history(&first), "TOP\ninitial\nrules-v1");
         assert_eq!(system_history(&first), system_history(&grown));
         assert_eq!(system_history(&updated), "TOP\ninitial\nrules-v2");
-        for result in [&first, &grown, &updated] {
-            assert_eq!(result.conversation_state.conversation_id, expected_id);
+        // 内联 system 变化不改变会话身份
+        let expected_id = &first.conversation_state.conversation_id;
+        for result in [&grown, &updated] {
+            assert_eq!(&result.conversation_state.conversation_id, expected_id);
         }
         assert_eq!(
             serde_json::to_value(&first_req.messages).unwrap(),
@@ -901,60 +896,56 @@ fn test_system_block_added_mid_session_is_diverted_from_history_zero() {
 }
 
 #[test]
-fn prefix_cached_is_false_on_first_turn_and_true_on_subsequent_turns() {
+fn session_state_lives_in_the_store_passed_in() {
+    use crate::anthropic::converter::{SessionStore, Tenant};
     use crate::anthropic::types::{Message as AnthropicMessage, Metadata, SystemMessage};
 
-    let session = Some(Metadata {
-        user_id: Some("user_account__session_9e4a1b2c-3d5f-4a7e-8b9c-1d2e3f4a5b6c".to_string()),
-    });
-    let make_req = |sys: &str, msgs: Vec<(&str, &str)>| MessagesRequest {
+    let base = format!("base system {}", "x".repeat(2_000));
+    let rule = format!("late-rule late.md {}", "r".repeat(200));
+    let make_req = |blocks: &[&str]| MessagesRequest {
         model: "claude-haiku-5-5".to_string(),
         max_tokens: 1024,
-        messages: msgs
-            .into_iter()
-            .map(|(role, text)| AnthropicMessage {
-                role: role.to_string(),
-                content: serde_json::json!(text),
-            })
-            .collect(),
+        messages: vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: serde_json::json!("store isolation probe"),
+        }],
         stream: true,
-        system: Some(vec![SystemMessage {
-            text: sys.to_string(),
-        }]),
+        system: Some(
+            blocks
+                .iter()
+                .map(|text| SystemMessage {
+                    text: text.to_string(),
+                })
+                .collect(),
+        ),
         tools: None,
         tool_choice: None,
         thinking: None,
         output_config: None,
-        metadata: session.clone(),
+        metadata: Some(Metadata {
+            user_id: Some("user_account__session_0c6f2d1e-4b7a-4e19-9a3d-5f8b2c7e1a04".to_string()),
+        }),
+    };
+    let current_text = |r: &ConversionResult| {
+        r.conversation_state
+            .current_message
+            .user_input_message
+            .content
+            .clone()
+    };
+    let convert = |store: &SessionStore, blocks: &[&str]| {
+        crate::anthropic::converter::convert_request(&make_req(blocks), &Tenant::anonymous(), store)
+            .unwrap()
     };
 
-    // 1. 新窗口第一条消息：history_end_index == 0 且 history[0] first → prefix_cached 必为 false
-    let turn1 = convert_request(&make_req("system prompt v1", vec![("user", "hi")])).unwrap();
-    assert!(!turn1.prefix_cached);
+    // 同一个 store：首个请求登记基线，之后新增的块分流出 history[0]
+    let seen = SessionStore::new();
+    convert(&seen, &[&base]);
+    let diverted = convert(&seen, &[&base, &rule]);
+    assert!(!system_history(&diverted).contains("late.md"));
+    assert!(current_text(&diverted).contains("late.md"));
 
-    // 2. 单条消息重发：虽然 PREV_H0 已登记，但无历史对话轮次 → 仍为 false
-    let turn1_retry = convert_request(&make_req("system prompt v1", vec![("user", "hi")])).unwrap();
-    assert!(!turn1_retry.prefix_cached);
-
-    // 3. 第二轮对话：存在历史轮次且 history[0] 命中 frozen → prefix_cached 为 true
-    let turn2 = convert_request(&make_req(
-        "system prompt v1",
-        vec![("user", "hi"), ("assistant", "hello"), ("user", "next")],
-    ))
-    .unwrap();
-    assert!(turn2.prefix_cached);
-
-    // 4. 系统提示被改写导致 history[0] 漂移重置（first）→ 当轮 prefix_cached 回落为 false
-    let turn3_reset = convert_request(&make_req(
-        "system prompt v2 rewritten",
-        vec![
-            ("user", "hi"),
-            ("assistant", "hello"),
-            ("user", "next"),
-            ("assistant", "ok"),
-            ("user", "after reset"),
-        ],
-    ))
-    .unwrap();
-    assert!(!turn3_reset.prefix_cached);
+    // 全新的 store 没有该会话的基线：同样的请求原样进入 history[0]
+    let fresh = convert(&SessionStore::new(), &[&base, &rule]);
+    assert!(system_history(&fresh).contains("late.md"));
 }

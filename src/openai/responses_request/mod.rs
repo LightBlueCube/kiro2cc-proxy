@@ -124,7 +124,7 @@ pub(crate) fn convert(body: &Value) -> Result<ConvertedResponsesRequest, String>
         anthropic["tools"] = Value::Array(std::mem::take(&mut tools.tools));
     }
 
-    super::pass_through_user(body, &mut anthropic);
+    super::pass_through_session_hint(body, &mut anthropic);
 
     warn_if_tool_choice_unsupported(body.get("tool_choice"));
 

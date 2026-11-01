@@ -4,7 +4,7 @@
 //! 负责将 Anthropic API 请求格式转换为 Kiro API 请求格式。
 //! 原单体 converter.rs 按功能域拆分为以下子模块（外部符号路径不变）：
 //! - `schema`: JSON Schema 规范化（$ref 展开、Kiro 严格模式清洗）
-//! - `cache`: 会话级 history[0] 冻结缓存基建
+//! - `session_store`: 会话级转换状态（转换本身不持有全局状态）
 //! - `baseline`: 会话系统块基线（会话中途新增的系统块分流出 history[0]）
 //! - `prompt`: 计费头规范化、输出格式与近期知识提示注入
 //! - `drift_diag`: history[0] 漂移诊断（DEBUG 日志，列出新增/消失的系统块）
@@ -23,7 +23,6 @@
 //! - `tests/`: 原内联测试按被测子模块拆分为目录（model/schema/pdf/prompt/fields/session/websearch/tools/thinking_gpt/history_cache）
 
 mod baseline;
-mod cache;
 mod convert;
 mod drift_diag;
 mod fields;
@@ -36,8 +35,9 @@ mod rejected_signatures;
 mod result;
 mod schema;
 mod session;
+mod session_store;
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     /// 构造用于 fallback 派生测试的最小请求（system + 工具名 + 消息序列）
     fn fallback_req(
@@ -86,6 +86,30 @@ mod tests {
         }
     }
 
+    /// 测试共用的会话状态：多轮用例靠它延续同一会话（各用例的会话内容互不相同）
+    static TEST_SESSIONS: std::sync::LazyLock<super::SessionStore> =
+        std::sync::LazyLock::new(super::SessionStore::new);
+
+    /// 以匿名租户转换（会话隔离之外的转换行为与租户无关）
+    pub(crate) fn convert_request(
+        req: &crate::anthropic::types::MessagesRequest,
+    ) -> Result<super::result::ConversionResult, super::ConversionError> {
+        super::convert::convert_request(req, &super::Tenant::anonymous(), &TEST_SESSIONS)
+    }
+
+    /// 同 [`convert_request`]，显式指定分块写入行数上限
+    fn convert_request_with_chunking(
+        req: &crate::anthropic::types::MessagesRequest,
+        chunk_max_lines: u32,
+    ) -> Result<super::result::ConversionResult, super::ConversionError> {
+        super::convert::convert_request_with_chunking(
+            req,
+            &super::Tenant::anonymous(),
+            &TEST_SESSIONS,
+            chunk_max_lines,
+        )
+    }
+
     mod fields;
     mod history_cache;
     mod model;
@@ -106,6 +130,8 @@ pub use convert::convert_request;
 pub(crate) use model::map_model;
 pub(crate) use rejected_signatures::remember_rejected_signatures;
 pub use result::{ConversionError, HistoryReasoningReplay, HistoryThinkingLoss};
+pub use session::Tenant;
+pub use session_store::SessionStore;
 pub use tools::{
     DEFAULT_WRITE_CHUNKING_MAX_LINES, set_write_chunking_max_lines, write_chunking_max_lines,
 };

@@ -11,8 +11,8 @@ pub(crate) mod tests {
 
     use crate::kiro::model::credentials::KiroCredentials;
 
+    use crate::kiro::token_manager::tests::affinity::tests::make_valid_cred;
     use crate::kiro::token_manager::tests::ext_idp::tests::spawn_single_response_server;
-    use crate::kiro::token_manager::tests::sticky::tests::make_valid_cred;
     use crate::model::config::Config;
     use chrono::{Duration, Utc};
     use std::sync::Arc;
@@ -241,8 +241,8 @@ pub(crate) mod tests {
         assert_eq!(entry.model_restrictions[0].message, MESSAGE);
 
         for _ in 0..4 {
-            let ctx = manager
-                .acquire_context_sticky(Some(MODEL), &[], None, &[])
+            let (ctx, _) = manager
+                .acquire_for_request(Some(MODEL), &[], None, &[])
                 .await
                 .unwrap();
             assert_eq!(ctx.id, 2);

@@ -1,8 +1,6 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 //! convert_request 主入口与触发类型判定
 
-use uuid::Uuid;
-
 use crate::anthropic::types::MessagesRequest;
 use crate::kiro::model::requests::conversation::{
     ConversationState, CurrentMessage, UserInputMessage, UserInputMessageContext,
@@ -15,9 +13,9 @@ use super::model::map_model;
 use super::prompt::{append_output_format_instruction, append_recent_knowledge_hints};
 use super::result::{ConversionError, ConversionResult};
 use super::session::{
-    derive_agent_continuation_id, derive_fallback_conversation_id, extract_session_id,
-    is_compact_request,
+    Tenant, derive_agent_continuation_id, derive_conversation_id, is_compact_request,
 };
+use super::session_store::SessionStore;
 use super::tools::{
     convert_tools, has_content_writing_tool, remove_orphaned_tool_uses, validate_tool_pairing,
     write_chunking_max_lines, write_chunking_system_note,
@@ -26,15 +24,21 @@ use super::websearch::{
     collect_history_tool_names, create_placeholder_tool, strip_web_search_server_tool,
 };
 
-/// 将 Anthropic 请求转换为 Kiro 请求
-pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, ConversionError> {
-    convert_request_with_chunking(req, write_chunking_max_lines())
+/// 将 Anthropic 请求转换为 Kiro 请求（会话身份按 `tenant` 隔离，跨请求状态存于 `sessions`）
+pub fn convert_request(
+    req: &MessagesRequest,
+    tenant: &Tenant,
+    sessions: &SessionStore,
+) -> Result<ConversionResult, ConversionError> {
+    convert_request_with_chunking(req, tenant, sessions, write_chunking_max_lines())
 }
 
 /// 同 [`convert_request`]，但显式指定分块写入行数上限（0 = 不追加约束）。
 /// 测试用它避免读写全局设置。
 pub(super) fn convert_request_with_chunking(
     req: &MessagesRequest,
+    tenant: &Tenant,
+    sessions: &SessionStore,
     chunk_max_lines: u32,
 ) -> Result<ConversionResult, ConversionError> {
     // 1. 映射模型
@@ -113,24 +117,12 @@ pub(super) fn convert_request_with_chunking(
         );
     }
 
-    // 3. 生成会话 ID 和代理 ID
-    // 优先级：
-    //   1. metadata.user_id 中的 session UUID（Claude Code 标准格式 / 纯 UUID 直通）
-    //   2. system + 工具名 + 首条消息的 SHA-256 派生（含裸请求，全部走首条消息 seed）
-    //   3. 完全随机 UUID（仅防御路径：messages 为空时 fallback 不可用，实际不可达）
-    let (conversation_id, id_source) = req
-        .metadata
-        .as_ref()
-        .and_then(|m| m.user_id.as_ref())
-        .and_then(|user_id| extract_session_id(user_id))
-        .map(|id| (id, "metadata"))
-        .or_else(|| derive_fallback_conversation_id(req).map(|id| (id, "fallback")))
-        .unwrap_or_else(|| (Uuid::new_v4().to_string(), "random"));
-    // agentContinuationId 基于 conversationId 派生，保持同一会话内稳定
-    // 这样 Kiro 后端能识别连续请求，对历史消息做跨请求 prompt caching
+    // 3. 生成会话 ID 和代理 ID（req.messages 非空已在第 2 步校验）
+    let (conversation_id, id_source) = derive_conversation_id(req, tenant);
+    // agentContinuationId 基于 conversationId 派生，同一会话内稳定
     let agent_continuation_id = derive_agent_continuation_id(&conversation_id);
     tracing::info!(
-        "[session] conversationId={} agentContinuationId={} source={} (同一会话的连续请求这两个值应保持不变)",
+        "[session] conversationId={} agentContinuationId={} source={:?} (同一会话的连续请求这两个值应保持不变)",
         conversation_id,
         agent_continuation_id,
         id_source
@@ -166,7 +158,6 @@ pub(super) fn convert_request_with_chunking(
         mut history,
         dynamic_system,
         injected_thinking_budget,
-        prefix_cached,
         thinking_loss: history_thinking_loss,
         reasoning_replay: history_reasoning_replay,
     } = build_history(
@@ -175,6 +166,7 @@ pub(super) fn convert_request_with_chunking(
         system.as_deref(),
         &model_id,
         &conversation_id,
+        &mut sessions.session(&conversation_id).lock(),
     )?;
     // 被分流出 history[0] 的动态块放到当前消息文本**开头**（请求无动态块时为空，
     // 不改动 text_content）。放开头而非末尾：当前消息末尾通常是 skill / 用户指令正文，
@@ -286,7 +278,6 @@ pub(super) fn convert_request_with_chunking(
         conversation_state,
         additional_model_request_fields,
         is_compact_request: is_compact,
-        prefix_cached,
         effort,
         thinking_budget_tokens: injected_thinking_budget,
         history_thinking_loss,

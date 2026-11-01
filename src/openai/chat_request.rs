@@ -98,7 +98,7 @@ pub(crate) fn convert(body: &Value) -> Result<ConvertedChatRequest, String> {
         anthropic["tools"] = Value::Array(tools);
     }
 
-    super::pass_through_user(body, &mut anthropic);
+    super::pass_through_session_hint(body, &mut anthropic);
 
     warn_if_tool_choice_unsupported(body.get("tool_choice"));
 
@@ -916,10 +916,29 @@ mod tests {
     }
 
     #[test]
+    fn prompt_cache_key_takes_precedence_over_user() {
+        let r = convert_ok(json!({
+            "model": "gpt-5-codex",
+            "user": "user-123",
+            "prompt_cache_key": "thread-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        assert_eq!(r.anthropic_body["metadata"]["user_id"], json!("thread-7"));
+
+        // 空白 prompt_cache_key 视为未提供，回落到 user
+        let r = convert_ok(json!({
+            "model": "gpt-5-codex",
+            "user": "user-123",
+            "prompt_cache_key": "  ",
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        assert_eq!(r.anthropic_body["metadata"]["user_id"], json!("user-123"));
+    }
+
+    #[test]
     fn non_uuid_user_keeps_stable_conversation_id_across_calls() {
-        // 非 UUID user（如 user-123）无法走 metadata 解析路径，落到 fallback 派生；
-        // fallback 依赖首条消息，同一请求体连续两次转换必须得到相同 conversationId
-        // （旧实现 metadata 解析失败退化为随机 UUID，导致每轮全价）
+        // 非 UUID user（如 user-123）原值作为会话标识，与首条消息一起派生 conversationId：
+        // 同一请求体连续两次转换必须得到相同 conversationId
         let body = json!({
             "model": "gpt-5-codex",
             "user": "user-123",

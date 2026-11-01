@@ -115,6 +115,13 @@ async fn main() {
         }
     }
 
+    for setting in config.removed_settings() {
+        tracing::warn!(
+            "配置 {} 已废弃并被忽略：缓存用量改为按 credits 反推 / 同账号前缀估算",
+            setting
+        );
+    }
+
     // 客户端 token 直通开关（true 时 usage 字段 1:1 上报，见 Issue #44）
     anthropic::set_client_token_passthrough(config.client_token_passthrough);
     anthropic::set_output_tokens_include_thinking(config.output_tokens_include_thinking);
@@ -230,6 +237,7 @@ async fn main() {
         .with_rpm_tracker(rpm_tracker.clone())
         .with_throttle_log_store(throttle_log_store.clone())
         .with_failure_log_store(failure_log_store.clone());
+    let affinity = kiro_provider.affinity();
 
     // 初始化 count_tokens 配置
     token::init_config(token::CountTokensConfig {
@@ -276,17 +284,6 @@ async fn main() {
         (None, None)
     };
 
-    // 启动 prompt cache 指纹追踪器（生产模式自动启动 30s 周期 evict 后台任务）
-    let fingerprint_tracker = cache::fingerprint::FingerprintTracker::new(config.cache_simulation);
-    tracing::info!(
-        "FingerprintTracker 启动 (enabled={}, ttl_5m={}s, max_breakpoints={})",
-        config.cache_simulation.fingerprint_enabled,
-        config.cache_simulation.fingerprint_ttl_5m,
-        config
-            .cache_simulation
-            .fingerprint_max_breakpoints_per_account
-    );
-
     // Suggestion Mode 放行开关：anthropic AppState 与 AdminState 共享同一 Arc 实例，
     // Admin API（PUT /api/admin/config/suggestion-mode）修改后即时生效
     let suggestion_mode = Arc::new(std::sync::atomic::AtomicBool::new(
@@ -295,27 +292,7 @@ async fn main() {
     let mut anthropic_app_state = anthropic::middleware::AppState::new()
         .with_rpm_tracker(rpm_tracker.clone())
         .with_forward_suggestion_mode(config.forward_suggestion_mode)
-        .with_forward_suggestion_mode_arc(suggestion_mode.clone())
-        .with_fingerprint_tracker(fingerprint_tracker.clone());
-    if config.prompt_cache_accounting {
-        let snapshot = throttle_data_dir.join("prompt_cache.json");
-        let cache = Arc::new(cache::breakpoint::BreakpointCache::new(
-            config.prompt_cache_min_tokens,
-            Some(snapshot.clone()),
-        ));
-        cache.start_maintenance();
-        tracing::info!(
-            "Prompt cache 断点记账已启用 (min_tokens={}, 已恢复 {} 条, 快照 {:?})",
-            if config.prompt_cache_min_tokens > 0 {
-                config.prompt_cache_min_tokens.to_string()
-            } else {
-                "按模型".to_string()
-            },
-            cache.len(),
-            snapshot
-        );
-        anthropic_app_state = anthropic_app_state.with_breakpoint_cache(cache);
-    }
+        .with_forward_suggestion_mode_arc(suggestion_mode.clone());
     if config.forward_suggestion_mode {
         tracing::info!(
             "Suggestion Mode 输入建议请求已放行（forward_suggestion_mode=true），将正常转发上游"
@@ -352,6 +329,7 @@ async fn main() {
             let admin_psw_shared = Arc::new(parking_lot::RwLock::new(admin_key.clone()));
             let mut admin_state = admin::AdminState::new(admin_psw_shared, admin_service)
                 .with_rpm_tracker(rpm_tracker.clone())
+                .with_affinity(affinity.clone())
                 .with_config_path(std::path::PathBuf::from(&config_path))
                 .with_geo_resolver(geo_resolver.clone());
             if let Some(ref manager) = api_key_manager {

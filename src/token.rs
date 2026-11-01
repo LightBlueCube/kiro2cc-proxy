@@ -104,31 +104,6 @@ pub(crate) fn count_all_tokens(
     count_all_tokens_local(system, messages, tools)
 }
 
-/// 估算请求的输入 tokens，复用调用方已算好的前缀（system + tools + 除最后一条消息外的历史）token 数，
-/// 避免与 `count_prefix_tokens` 重复对同一段内容做 BPE 编码。
-///
-/// 远程 API 路径与 `count_all_tokens` 完全一致；仅本地回退路径改为
-/// `prefix_tokens + 最后一条消息的 token 数`，与 `count_all_tokens_local` 数学等价
-/// （二者对 system/messages/tools 的遍历口径完全相同，唯一差异是历史消息部分改为复用已算好的值）。
-/// `messages` 为空时视为 0（此时 `prefix_tokens` 本身已是 system+tools 全部 token）。
-///
-/// **契约：** `prefix_tokens` 必须由 `count_prefix_tokens(system, &messages[..len-1], tools)`
-/// 产出；传入手工构造的值将破坏与 `count_all_tokens_local` 的数学等价性。
-pub(crate) fn count_all_tokens_with_prefix(
-    model: String,
-    system: Option<Vec<SystemMessage>>,
-    messages: Vec<Message>,
-    tools: Option<Vec<Tool>>,
-    prefix_tokens: u64,
-) -> u64 {
-    if let Some(tokens) = try_remote_count_tokens(&model, &system, &messages, &tools) {
-        return tokens;
-    }
-
-    let last_message_tokens = messages.last().map(count_message_tokens).unwrap_or(0);
-    (prefix_tokens + last_message_tokens).max(1)
-}
-
 /// 调用远程 count_tokens API
 async fn call_remote_count_tokens(
     api_url: &str,
@@ -267,42 +242,6 @@ fn count_all_tokens_local(
     }
 
     total.max(1)
-}
-
-/// 估算"缓存前缀"token 数：system + tools + history 中除最后一条 user 之外的全部内容。
-///
-/// 用于 cache_read 派生：Anthropic 协议下 prompt cache 仅覆盖前缀，
-/// 当前 user turn 不进缓存。tools 跨请求基本稳定，恒视为前缀（即使首条请求也不计入新输入）。
-///
-/// 估算口径与 `count_all_tokens_local` 完全一致（同一 `count_tokens` 加权公式），
-/// 保证 `prefix.min(input_total)` 不会因口径差异溢出。
-pub(crate) fn count_prefix_tokens(
-    system: Option<&[SystemMessage]>,
-    prior_messages: &[Message],
-    tools: Option<&[Tool]>,
-) -> u64 {
-    let mut total = 0;
-
-    if let Some(system) = system {
-        for msg in system {
-            total += count_tokens(&msg.text);
-        }
-    }
-
-    for msg in prior_messages {
-        total += count_message_tokens(msg);
-    }
-
-    if let Some(tools) = tools {
-        for tool in tools {
-            total += count_tokens(&tool.name);
-            total += count_tokens(&tool.description);
-            let input_schema_json = serde_json::to_string(&tool.input_schema).unwrap_or_default();
-            total += count_tokens(&input_schema_json);
-        }
-    }
-
-    total
 }
 
 #[cfg(test)]
@@ -468,19 +407,15 @@ mod tests {
     }
 
     #[test]
-    fn test_count_prefix_tokens_with_tool_messages() {
-        use crate::anthropic::types::Message;
-        let baseline_msgs = vec![Message {
+    fn test_count_all_tokens_includes_tool_messages() {
+        let text = |t: &str| Message {
             role: "user".into(),
-            content: serde_json::json!([{"type": "text", "text": "hi"}]),
-        }];
-        let baseline = count_prefix_tokens(None, &baseline_msgs, None);
+            content: serde_json::json!([{"type": "text", "text": t}]),
+        };
+        let baseline = count_all_tokens_local(None, vec![text("hi")], None);
 
         let with_tools = vec![
-            Message {
-                role: "user".into(),
-                content: serde_json::json!([{"type": "text", "text": "hi"}]),
-            },
+            text("hi"),
             Message {
                 role: "assistant".into(),
                 content: serde_json::json!([{
@@ -499,109 +434,12 @@ mod tests {
                 }]),
             },
         ];
-        let extended = count_prefix_tokens(None, &with_tools, None);
+        let extended = count_all_tokens_local(None, with_tools, None);
 
         assert!(
             extended > baseline,
-            "含 tool_use+tool_result 的前缀估算应显著大于纯 text 基线: extended={}, baseline={}",
-            extended,
-            baseline
+            "含 tool_use+tool_result 的输入应大于纯 text 基线: extended={extended}, baseline={baseline}"
         );
-    }
-
-    // ---------- count_all_tokens_with_prefix 与 count_all_tokens_local 等价性 ----------
-
-    fn sample_system() -> Option<Vec<SystemMessage>> {
-        Some(vec![SystemMessage {
-            text: "you are a helpful assistant".into(),
-        }])
-    }
-
-    fn sample_tools() -> Option<Vec<Tool>> {
-        let mut input_schema = std::collections::HashMap::new();
-        input_schema.insert("type".to_string(), serde_json::json!("object"));
-        input_schema.insert(
-            "properties".to_string(),
-            serde_json::json!({"file_path": {"type": "string"}}),
-        );
-        Some(vec![Tool {
-            tool_type: None,
-            name: "Read".into(),
-            description: "读取文件内容".into(),
-            input_schema,
-            max_uses: None,
-            defer_loading: None,
-        }])
-    }
-
-    fn sample_messages() -> Vec<Message> {
-        vec![
-            Message {
-                role: "user".into(),
-                content: serde_json::json!([{"type": "text", "text": "hi"}]),
-            },
-            Message {
-                role: "assistant".into(),
-                content: serde_json::json!([{
-                    "type": "tool_use",
-                    "id": "toolu_1",
-                    "name": "Read",
-                    "input": {"file_path": "/very/long/path/to/file.txt"}
-                }]),
-            },
-            Message {
-                role: "user".into(),
-                content: serde_json::json!([{
-                    "type": "tool_result",
-                    "tool_use_id": "toolu_1",
-                    "content": "file contents with some words and numbers 12345"
-                }]),
-            },
-        ]
-    }
-
-    #[test]
-    fn test_count_all_tokens_with_prefix_matches_local_combination() {
-        let system = sample_system();
-        let tools = sample_tools();
-        let messages = sample_messages();
-
-        let prior = &messages[..messages.len() - 1];
-        let prefix = count_prefix_tokens(system.as_deref(), prior, tools.as_deref());
-
-        let expected = count_all_tokens_local(system.clone(), messages.clone(), tools.clone());
-        let actual =
-            count_all_tokens_with_prefix("claude-test".into(), system, messages, tools, prefix);
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_count_all_tokens_with_prefix_empty_messages() {
-        let system = sample_system();
-        let tools = sample_tools();
-        let messages: Vec<Message> = vec![];
-
-        let prefix = count_prefix_tokens(system.as_deref(), &[], tools.as_deref());
-
-        let expected = count_all_tokens_local(system.clone(), messages.clone(), tools.clone());
-        let actual =
-            count_all_tokens_with_prefix("claude-test".into(), system, messages, tools, prefix);
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_count_all_tokens_with_prefix_no_system_or_tools() {
-        let messages = sample_messages();
-        let prior = &messages[..messages.len() - 1];
-        let prefix = count_prefix_tokens(None, prior, None);
-
-        let expected = count_all_tokens_local(None, messages.clone(), None);
-        let actual =
-            count_all_tokens_with_prefix("claude-test".into(), None, messages, None, prefix);
-
-        assert_eq!(actual, expected);
     }
 }
 

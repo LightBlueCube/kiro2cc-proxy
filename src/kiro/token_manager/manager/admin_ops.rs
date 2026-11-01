@@ -1056,23 +1056,6 @@ impl MultiTokenManager {
         tracing::info!("负载均衡模式已设置为: {}", mode);
         Ok(())
     }
-
-    /// 测试辅助：向 sticky_cache 写入一条已过期的条目（模拟 TTL 已超出）
-    #[cfg(test)]
-    pub(crate) fn insert_expired_sticky_entry(&self, key: &str, credential_id: u64) {
-        use super::super::types::{STICKY_CACHE_TTL, StickyCacheEntry};
-        use std::time::Duration as StdDuration;
-
-        let mut cache = self.sticky_cache.lock();
-        cache.insert(
-            key.to_string(),
-            StickyCacheEntry {
-                credential_id,
-                inserted_at: Instant::now() - STICKY_CACHE_TTL - StdDuration::from_secs(1),
-                consecutive_throttles: 0,
-            },
-        );
-    }
 }
 
 impl Drop for MultiTokenManager {

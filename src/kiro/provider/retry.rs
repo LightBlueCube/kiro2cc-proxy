@@ -234,9 +234,9 @@ impl KiroProvider {
         let mut last_error: Option<anyhow::Error> = None;
         let api_type = if is_stream { "流式" } else { "非流式" };
 
-        // 尝试从请求体中提取会话 ID（模型信息已在上方提取）
-        let continuation_id = Self::extract_continuation_id_from_request(request_body);
-        // 本次请求内要避开的账号（上游限流、本地限额满、账号失败）：重试时避开，但不销毁 sticky 绑定
+        // 会话亲和的键（模型信息已在上方提取）
+        let route_keys = Self::extract_route_keys_from_request(request_body);
+        // 本次请求内要避开的账号（上游限流、本地限额满、账号失败）：重试时避开，但不改动亲和绑定
         let mut throttled_in_request: Vec<u64> = Vec::new();
         // 其中被上游限流的账号：没有别的可换、重回它时须先退避
         let mut upstream_throttled: Vec<u64> = Vec::new();
@@ -260,18 +260,26 @@ impl KiroProvider {
             if let Some(delay) = backoff.take() {
                 sleep(delay).await;
             }
-            // 获取调用上下文（优先路由到同一会话的缓存账号）
+            // 获取调用上下文（优先路由到会话亲和的账号）
+            let preferred = route_keys
+                .as_ref()
+                .and_then(|keys| self.affinity.preferred(keys));
             let ctx = match self
                 .token_manager
-                .acquire_context_sticky(
+                .acquire_for_request(
                     model.as_deref(),
                     bound_ids,
-                    continuation_id.as_deref(),
+                    preferred,
                     &throttled_in_request,
                 )
                 .await
             {
-                Ok(c) => c,
+                Ok((ctx, placement)) => {
+                    if let Some(keys) = &route_keys {
+                        self.affinity.on_routed(keys, ctx.id, placement);
+                    }
+                    ctx
+                }
                 Err(e) => {
                     last_error = Some(e);
                     continue;
@@ -377,9 +385,7 @@ impl KiroProvider {
                         }
                     );
                     self.token_manager.report_throttled_for_rotation(ctx.id);
-                    if let Some(cid) = continuation_id.as_deref() {
-                        self.token_manager.report_sticky_throttled(cid, ctx.id);
-                    }
+                    // 本地限额满不是上游限流，不动亲和绑定：本次溢出到其它账号即可
                     push_unique(&mut throttled_in_request, ctx.id);
                     last_error = Some(anyhow::anyhow!("账号 {} 本地限额：{}", ctx.id, full));
                     if can_switch {
@@ -431,17 +437,16 @@ impl KiroProvider {
             let route = super::UpstreamRoute {
                 credential_id: ctx.id,
                 endpoint: endpoint.name,
-                continuation_id: continuation_id.clone(),
+                conversation_id: route_keys.as_ref().map(|keys| keys.conversation.clone()),
                 model: model.clone(),
                 attempt: attempt as u32 + 1,
             };
 
             // 成功响应
             if status.is_success() {
+                // 亲和绑定的限流计数要等响应完整产出才清零（UpstreamFeedback::completed）：
+                // 响应头 200 后流中途仍可能被限流
                 self.token_manager.report_success(ctx.id);
-                if let Some(cid) = continuation_id.as_deref() {
-                    self.token_manager.report_sticky_success(cid, ctx.id);
-                }
                 return Ok(super::ApiResponse {
                     response,
                     credential_id: ctx.id,
@@ -663,7 +668,7 @@ impl KiroProvider {
         Err(last_error)
     }
 
-    /// 上游限流记账：账号限流计数与轮转偏移、端点桶封禁、sticky 连续限流、限流日志
+    /// 上游限流记账：账号限流计数与轮转偏移、端点桶封禁、会话亲和限流计数、限流日志
     fn note_upstream_throttle(
         &self,
         route: &super::UpstreamRoute,
@@ -677,8 +682,8 @@ impl KiroProvider {
         // 端点级：封禁命中桶（不动其它桶）
         self.endpoint_registry
             .throttle(id, route.endpoint, BUCKET_THROTTLE_DURATION);
-        if let Some(cid) = route.continuation_id.as_deref() {
-            self.token_manager.report_sticky_throttled(cid, id);
+        if let Some(key) = route.conversation_id.as_deref() {
+            self.affinity.on_upstream_throttled(key, id);
         }
         if let Some(store) = &self.throttle_log_store {
             let context = ThrottleContext {

@@ -15,67 +15,6 @@ pub enum TlsBackend {
     NativeTls,
 }
 
-/// Prompt cache 模拟与指纹追踪配置
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CacheSimulationConfig {
-    /// 是否启用指纹追踪（替代 from_ratio_config 末层兜底）
-    #[serde(default = "default_fingerprint_enabled")]
-    pub fingerprint_enabled: bool,
-
-    /// 5m ephemeral TTL（秒）
-    #[serde(default = "default_fingerprint_ttl_5m")]
-    pub fingerprint_ttl_5m: u64,
-
-    /// 1h ephemeral TTL（秒）
-    #[serde(default = "default_fingerprint_ttl_1h")]
-    pub fingerprint_ttl_1h: u64,
-
-    /// 新建 cache_creation 中 1h tier 占比（0.0~1.0，默认 0.0 全部 5m）
-    #[serde(default = "default_ephemeral_1h_ratio")]
-    pub ephemeral_1h_ratio: f64,
-
-    /// 单账号指纹断点上限（超出按 LRU 淘汰）
-    #[serde(default = "default_fingerprint_max_breakpoints")]
-    pub fingerprint_max_breakpoints_per_account: usize,
-}
-
-/// 0 = 按模型使用 Anthropic 官方最小可缓存长度（见 `cache::breakpoint::min_cacheable_tokens`）
-fn default_prompt_cache_min_tokens() -> i32 {
-    0
-}
-
-fn default_fingerprint_enabled() -> bool {
-    true
-}
-fn default_fingerprint_ttl_5m() -> u64 {
-    5 * 60
-}
-fn default_fingerprint_ttl_1h() -> u64 {
-    60 * 60
-}
-fn default_ephemeral_1h_ratio() -> f64 {
-    0.0
-}
-
-const DEFAULT_FINGERPRINT_MAX_BREAKPOINTS: usize = 256;
-
-fn default_fingerprint_max_breakpoints() -> usize {
-    DEFAULT_FINGERPRINT_MAX_BREAKPOINTS
-}
-
-impl Default for CacheSimulationConfig {
-    fn default() -> Self {
-        Self {
-            fingerprint_enabled: default_fingerprint_enabled(),
-            fingerprint_ttl_5m: default_fingerprint_ttl_5m(),
-            fingerprint_ttl_1h: default_fingerprint_ttl_1h(),
-            ephemeral_1h_ratio: default_ephemeral_1h_ratio(),
-            fingerprint_max_breakpoints_per_account: default_fingerprint_max_breakpoints(),
-        }
-    }
-}
-
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,26 +98,10 @@ pub struct Config {
     #[serde(default = "default_model_cache_ttl_secs")]
     pub model_cache_ttl_secs: u64,
 
-    /// Prompt cache 模拟与指纹追踪配置
-    #[serde(default)]
-    pub cache_simulation: CacheSimulationConfig,
-
     /// 客户端 token 直通（true 时 usage 字段 1:1 上报真实值，不再按
     /// CLIENT_TOKEN_DISPLAY_SCALE 缩放）。默认 false 维持既有展示缩放。
     #[serde(default)]
     pub client_token_passthrough: bool,
-
-    /// 按 Anthropic cache_control 断点规则模拟缓存记账（见 `cache::breakpoint`）
-    ///
-    /// 开启后 cache_read / cache_creation 按请求里的断点、20 block 回看、TTL 计算，
-    /// 取代"除最后一条外全部算缓存读、写入恒为 0"的前缀估算。默认 false 保持既有行为。
-    #[serde(default)]
-    pub prompt_cache_accounting: bool,
-
-    /// 断点模拟最小可缓存长度的全局覆盖（token）。默认 0 = 按模型取官方值
-    /// （512 / 1024 / 2048 / 4096 不等）；> 0 时对所有模型统一使用该值
-    #[serde(default = "default_prompt_cache_min_tokens")]
-    pub prompt_cache_min_tokens: i32,
 
     /// `/v1/models` 是否为点号模型 ID 追加官方连字符别名（如 `claude-opus-4.6` →
     /// `claude-opus-4-6`）。供按模型列表生成映射的下游网关使用；默认 false，
@@ -252,6 +175,10 @@ pub struct Config {
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
+
+    /// 读到的已废弃配置项与环境变量（运行时元数据：加载时日志尚未初始化，由启动流程统一告警）
+    #[serde(skip)]
+    removed_settings: Vec<&'static str>,
 }
 
 fn default_write_chunking_max_lines() -> u32 {
@@ -327,10 +254,7 @@ impl Default for Config {
             max_rpm_per_credential: default_max_rpm_per_credential(),
             max_concurrency_per_credential: 0,
             model_cache_ttl_secs: default_model_cache_ttl_secs(),
-            cache_simulation: CacheSimulationConfig::default(),
             client_token_passthrough: false,
-            prompt_cache_accounting: false,
-            prompt_cache_min_tokens: default_prompt_cache_min_tokens(),
             models_official_aliases: false,
             output_tokens_include_thinking: false,
             forward_suggestion_mode: false,
@@ -340,6 +264,7 @@ impl Default for Config {
             log_file: None,
             debug_logs: false,
             config_path: None,
+            removed_settings: Vec::new(),
         }
     }
 }
@@ -374,8 +299,15 @@ impl Config {
 
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
+        config.removed_settings = removed_keys_in(&content)?;
         config.config_path = Some(path.to_path_buf());
         Ok(config)
+    }
+
+    /// 读到的已废弃配置项（config.json 键名）与环境变量名。缓存用量改为按 credits 反推 /
+    /// 同账号前缀估算（见 `crate::cache`），这些设置不再生效
+    pub fn removed_settings(&self) -> &[&'static str] {
+        &self.removed_settings
     }
 
     /// 获取配置文件路径（如果有）
@@ -446,16 +378,6 @@ impl Config {
         {
             self.client_token_passthrough = b;
         }
-        if let Ok(v) = env::var("PROMPT_CACHE_ACCOUNTING")
-            && let Ok(b) = v.parse::<bool>()
-        {
-            self.prompt_cache_accounting = b;
-        }
-        if let Ok(v) = env::var("PROMPT_CACHE_MIN_TOKENS")
-            && let Ok(n) = v.parse::<i32>()
-        {
-            self.prompt_cache_min_tokens = n;
-        }
         if let Ok(v) = env::var("MODELS_OFFICIAL_ALIASES")
             && let Ok(b) = v.parse::<bool>()
         {
@@ -497,39 +419,56 @@ impl Config {
             self.write_chunking_max_lines = n;
         }
 
-        // CacheSimulationConfig 嵌套字段覆盖
-        if let Ok(v) = env::var("CACHE_SIMULATION_FINGERPRINT_ENABLED")
-            && let Ok(b) = v.parse::<bool>()
-        {
-            self.cache_simulation.fingerprint_enabled = b;
-        }
-        if let Ok(v) = env::var("CACHE_SIMULATION_FINGERPRINT_TTL_5M")
-            && let Ok(n) = v.parse::<u64>()
-        {
-            self.cache_simulation.fingerprint_ttl_5m = n;
-        }
-        if let Ok(v) = env::var("CACHE_SIMULATION_FINGERPRINT_TTL_1H")
-            && let Ok(n) = v.parse::<u64>()
-        {
-            self.cache_simulation.fingerprint_ttl_1h = n;
-        }
-        if let Ok(v) = env::var("CACHE_SIMULATION_EPHEMERAL_1H_RATIO")
-            && let Ok(f) = v.parse::<f64>()
-        {
-            self.cache_simulation.ephemeral_1h_ratio = f.clamp(0.0, 1.0);
-        }
-        if let Ok(v) = env::var("CACHE_SIMULATION_FINGERPRINT_MAX_BREAKPOINTS")
-            && let Ok(n) = v.parse::<usize>()
-        {
-            self.cache_simulation
-                .fingerprint_max_breakpoints_per_account = n;
-        }
+        self.removed_settings.extend(
+            REMOVED_ENV_VARS
+                .into_iter()
+                .filter(|name| env::var_os(name).is_some()),
+        );
     }
+}
+
+/// 已废弃的缓存模拟配置项（config.json 键名）。读到时只告警，不影响启动；
+/// 下次保存配置时自然移除
+const REMOVED_KEYS: [&str; 3] = [
+    "cacheSimulation",
+    "promptCacheAccounting",
+    "promptCacheMinTokens",
+];
+
+/// 已废弃的缓存模拟环境变量（同 [`REMOVED_KEYS`]）
+const REMOVED_ENV_VARS: [&str; 7] = [
+    "PROMPT_CACHE_ACCOUNTING",
+    "PROMPT_CACHE_MIN_TOKENS",
+    "CACHE_SIMULATION_FINGERPRINT_ENABLED",
+    "CACHE_SIMULATION_FINGERPRINT_TTL_5M",
+    "CACHE_SIMULATION_FINGERPRINT_TTL_1H",
+    "CACHE_SIMULATION_EPHEMERAL_1H_RATIO",
+    "CACHE_SIMULATION_FINGERPRINT_MAX_BREAKPOINTS",
+];
+
+/// config.json 中仍带着的废弃键
+fn removed_keys_in(content: &str) -> serde_json::Result<Vec<&'static str>> {
+    let value: serde_json::Value = serde_json::from_str(content)?;
+    Ok(REMOVED_KEYS
+        .into_iter()
+        .filter(|key| value.get(key).is_some())
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_cache_keys_are_detected_and_ignored() {
+        let content = r#"{"promptCacheAccounting": true, "cacheSimulation": {}, "port": 1}"#;
+        let config: Config = serde_json::from_str(content).unwrap();
+        assert_eq!(config.port, 1);
+        assert_eq!(
+            removed_keys_in(content).unwrap(),
+            ["cacheSimulation", "promptCacheAccounting"]
+        );
+    }
 
     #[test]
     fn test_model_cache_ttl_default() {

@@ -2,9 +2,6 @@
 //! 历史消息构建：系统消息冻结、user/assistant 合并
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Instant;
 
 use crate::anthropic::types::{ContentBlock, MessagesRequest};
 use crate::kiro::model::requests::conversation::{
@@ -13,13 +10,13 @@ use crate::kiro::model::requests::conversation::{
 };
 use crate::kiro::model::requests::tool::ToolUseEntry;
 
-use super::cache::{CacheEntry, PREV_H0, evict_oldest_if_full};
 use super::message::process_message_content_with_tool_filter;
 use super::prompt::{
     is_dynamic_hook_injection, is_token_budget_reminder, normalize_billing_header,
 };
 use super::rejected_signatures::is_rejected_signature;
 use super::result::{ConversionError, HistoryReasoningReplay, HistoryThinkingLoss};
+use super::session_store::SessionState;
 use super::thinking::{
     generate_thinking_prefix, gpt_anti_pseudo_tag_hint, has_thinking_tags, thinking_prefix_budget,
 };
@@ -39,8 +36,6 @@ pub(super) struct BuiltHistory {
     pub dynamic_system: String,
     /// 实际注入 history[0] 的 thinking 文本标签所带预算（未注入为 None）
     pub injected_thinking_budget: Option<i32>,
-    /// 缓存前缀是否已命中会话级冻结缓存（判定见 [`determine_prefix_cached`]）
-    pub prefix_cached: bool,
     /// 带推理却没能回传上游的 assistant 轮次
     pub thinking_loss: HistoryThinkingLoss,
     /// 回传上游的推理签名
@@ -54,15 +49,16 @@ pub(super) struct BuiltHistory {
 /// * `messages` - 移除内联 system 和末尾 assistant prefill 后的消息引用，末尾必为 user。
 /// * `system` - 顶层 system 与内联 system 按顺序归并后的文本，不改变原请求。
 /// * `model_id` - 已映射的 Kiro 模型 ID
+/// * `session_id` / `session` - conversationId 及其会话状态（系统块基线、history[0] 诊断）
 pub(super) fn build_history(
     req: &MessagesRequest,
     messages: &[&crate::anthropic::types::Message],
     system: Option<&[&str]>,
     model_id: &str,
     session_id: &str,
+    session: &mut SessionState,
 ) -> Result<BuiltHistory, ConversionError> {
     let mut history = Vec::new();
-    let mut h0_frozen = true;
 
     // 生成 thinking 前缀（仅 luna 不使用 Claude/Kiro 文本控制标签）
     let thinking_budget = thinking_prefix_budget(req, model_id);
@@ -88,12 +84,13 @@ pub(super) fn build_history(
     // 文本前缀只能识别已知的动态块；CC 还会中途追加按路径加载的 rules 等新块（实测一次
     // 4KB 的 rules 块使 history[0] 重置、单轮多花约 0.5 credits）。再按会话基线把
     // 「会话开始后才出现」的块也分流出去，与块的文本无关（见 `baseline` 模块）。
-    let (stable_system, new_blocks) = super::baseline::split_new_blocks(session_id, &stable_system);
+    let (stable_system, new_blocks) =
+        super::baseline::split_new_blocks(&mut session.baselines, session_id, &stable_system);
     dynamic_system.extend(new_blocks);
     // 全部块都被分流（stable 拼接结果为空，含仅剩空文本块）时按"无系统消息"处理，
     // 保留 thinking 前缀 / 引导语注入
     let stable_content = stable_system.join("\n");
-    super::drift_diag::log_diverted(session_id, &dynamic_system);
+    super::drift_diag::log_diverted(&mut session.drift, session_id, &dynamic_system);
     let system_present =
         system.is_some() && (dynamic_system.is_empty() || !stable_content.is_empty());
     let dynamic_content = dynamic_system.join("\n\n");
@@ -124,46 +121,26 @@ pub(super) fn build_history(
             // 将 cch= 固定为 0，使 history[0] 跨请求稳定，命中 Kiro prompt cache。
             let cache_content = normalize_billing_header(final_content);
 
-            // 只冻结稳定系统内容；reminder 保留在原消息中，不搬入系统缓存。
-            // 完整内容参与 key，避免前缀相同的辅助请求串槽。
-            let final_content = {
-                let cache = PREV_H0.get_or_init(|| Mutex::new(HashMap::new()));
-                let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
-                let mut hasher = Sha256::new();
-                hasher.update(cache_content.as_bytes());
-                let h0_key = format!(
-                    "{}#{}",
-                    session_id,
-                    &format!("{:x}", hasher.finalize())[..16]
-                );
-
-                if let Some(entry) = map.get_mut(&h0_key) {
-                    entry.last_used = Instant::now();
-                    super::drift_diag::observe(session_id, &stable_system, false);
-                    tracing::info!(
-                        "[exp2] history[0] frozen hash={} len={} session={}",
-                        &h0_key[h0_key.len().saturating_sub(16)..],
-                        entry.value.len(),
-                        session_id
-                    );
-                    entry.value.clone()
-                } else {
-                    h0_frozen = false;
-                    super::drift_diag::observe(session_id, &stable_system, true);
-                    tracing::info!(
-                        "[exp2] history[0] first hash={} len={} session={}",
-                        &h0_key[h0_key.len().saturating_sub(16)..],
-                        cache_content.len(),
-                        session_id
-                    );
-                    map.insert(h0_key, CacheEntry::new(cache_content.clone()));
-                    evict_oldest_if_full(&mut map);
-                    cache_content
-                }
-            };
+            // 诊断：同一会话里 history[0] 是否变化（变化即上游前缀缓存整段失效）。
+            // 完整内容参与摘要，避免前缀相同的辅助请求混为一谈
+            let digest: [u8; 32] = Sha256::digest(cache_content.as_bytes()).into();
+            let mut short = [0u8; 16];
+            short.copy_from_slice(&digest[..16]);
+            let first = session.observe_history0(short);
+            super::drift_diag::observe(&mut session.drift, session_id, &stable_system, first);
+            tracing::info!(
+                "[exp2] history[0] {} hash={} len={} session={}",
+                if first { "first" } else { "frozen" },
+                short[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+                cache_content.len(),
+                session_id
+            );
 
             // 系统消息作为 user + assistant 配对
-            let user_msg = HistoryUserMessage::new(final_content, model_id);
+            let user_msg = HistoryUserMessage::new(cache_content, model_id);
             history.push(Message::User(user_msg));
 
             let assistant_msg = HistoryAssistantMessage::new(HistoryAssistantMessage::SYSTEM_ACK);
@@ -256,7 +233,6 @@ pub(super) fn build_history(
         history,
         dynamic_system: dynamic_content,
         injected_thinking_budget,
-        prefix_cached: determine_prefix_cached(history_end_index > 0, h0_frozen),
         thinking_loss,
         reasoning_replay,
     })
@@ -344,25 +320,6 @@ fn lost_thinking_form(turn: &[&crate::anthropic::types::Message]) -> Option<Lost
         .filter(|block| str_field(block, "type") == Some("text"))
         .any(|block| str_field(block, "text").is_some_and(is_rendered));
     (rendered_string || rendered_block).then_some(LostThinkingForm::Rendered)
-}
-
-/// `prefix_cached` 判定：本请求的缓存前缀（history[0] + 历史轮次）是否已命中会话级冻结缓存。
-///
-/// 完整判定矩阵（`h0_frozen` 仅在 `system_present && !stable_content.is_empty()`
-/// 分支走 `PREV_H0` 查表时才可能被置 `false`，其余分支保持初始值 `true`）：
-///
-/// | system_present | stable_content | h0_frozen 取值 | prefix_cached 决定因素 |
-/// |---|---|---|---|
-/// | true  | 非空 | PREV_H0 查表实际结果 | 历史轮次 × 查表命中 |
-/// | true  | 空（全被分流） | 恒 true | 仅历史轮次 |
-/// | false | —    | 恒 true | 仅历史轮次 |
-///
-/// 「无 system 分支仅由历史轮次门控」的前提：Anthropic Messages 协议无状态，客户端
-/// 每次请求全量重发历史，无 system 会话的前缀（tools + 历史）跨轮次字节稳定，
-/// 第 2 轮起计入 cache_read 是正确近似；若未来引入增量发送模式需重新评估。
-/// 详见 `result.rs::ConversionResult::prefix_cached` 文档。
-fn determine_prefix_cached(has_history_turns: bool, h0_frozen: bool) -> bool {
-    has_history_turns && h0_frozen
 }
 
 /// 合并多个 user 消息

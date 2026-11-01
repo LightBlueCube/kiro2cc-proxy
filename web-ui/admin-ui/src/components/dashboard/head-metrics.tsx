@@ -3,7 +3,7 @@
 import { useTranslation } from 'react-i18next'
 import { FileText } from 'lucide-react'
 
-import { AccountMetrics } from '@/components/account-metrics'
+import { AccountMetrics, type AffinityCounts } from '@/components/account-metrics'
 import { PageHead } from '@/components/page-head'
 
 interface HeadMetricsProps {
@@ -30,6 +30,7 @@ interface HeadMetricsProps {
   onTodayClick: () => void
   /** 打开使用文档页（账号管理页头右上角唯一入口） */
   onOpenDocs: () => void
+  affinity: AffinityCounts | null
 }
 
 export function DashboardHeadMetrics({
@@ -54,6 +55,7 @@ export function DashboardHeadMetrics({
   cumulativeFailureRate,
   onTodayClick,
   onOpenDocs,
+  affinity,
 }: HeadMetricsProps) {
   const { t } = useTranslation()
 
@@ -98,6 +100,7 @@ export function DashboardHeadMetrics({
             cumulativeFailures={cumulativeFailures}
             cumulativeFailureRate={cumulativeFailureRate}
             onTodayClick={onTodayClick}
+            affinity={affinity}
           />
         </div>
     </>

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 import { useTranslation } from 'react-i18next'
-import { Activity, Coins, CreditCard, Hash, Wallet } from 'lucide-react'
+import { Activity, Coins, CreditCard, Hash, Link2, Wallet } from 'lucide-react'
 import {
   Delta,
   FootSep,
@@ -57,6 +57,17 @@ export interface AccountMetricsProps {
   cumulativeFailureRate: number | null
   /** 点击「今日调用」段进入日用量列表 */
   onTodayClick: () => void
+  /** 会话亲和累计计数（启动以来）；null = RPM 数据未加载或未启用亲和 */
+  affinity: AffinityCounts | null
+}
+
+export interface AffinityCounts {
+  /** 选号落在会话绑定账号的次数 */
+  preferred: number
+  /** 无绑定会话按前缀族落到已缓存该前缀账号的次数 */
+  prefixHits: number
+  /** 有效绑定被改到其它账号的次数 */
+  rebinds: number
 }
 
 /** 剩余百分比切色（仅用于脚注 label 映射；环形图统一走 brand/ok 渐变，不随阈值变色）；阈值与消费额度进度条共用同一常量源 */
@@ -73,7 +84,7 @@ function remainingStatusLabel(t: (k: string) => string, percent: number): string
   return t('credentials.metricRemainingStatusCritical')
 }
 
-/** 指标条（方案1 unified-card-bar）：账号池 / 全局剩余积分 / 全局消费积分 / 今日调用 / 今日消耗积分 */
+/** 指标条（方案1 unified-card-bar）：账号池 / 全局剩余积分 / 全局消费积分 / 今日调用 / 今日消耗积分 / 会话亲和 */
 export function AccountMetrics({
   total,
   enabledCount,
@@ -95,6 +106,7 @@ export function AccountMetrics({
   cumulativeFailures,
   cumulativeFailureRate,
   onTodayClick,
+  affinity,
 }: AccountMetricsProps) {
   const { t } = useTranslation()
   // 展示层兜底：上游若给出 NaN / Infinity，一律降级为「无数据」，绝不把 "NaN" 吐给用户
@@ -105,7 +117,7 @@ export function AccountMetrics({
   const savedCredits = Number.isFinite(todayCreditsSaved) ? todayCreditsSaved! : null
   const cacheRate = Number.isFinite(todayCacheRatePercent) ? todayCacheRatePercent! : null
   return (
-    <MetricsBar cols={5}>
+    <MetricsBar cols={6}>
       {/* 卡 1：账号池 */}
       <Metric label={t('credentials.metricPoolLabel')} icon={<Hash />}>
         <MetricBody>
@@ -223,6 +235,33 @@ export function AccountMetrics({
               {cacheRate === null ? '—' : `${cacheRate.toFixed(1)}%`}
             </b>
           </span>
+        </MetricFoot>
+      </Metric>
+
+      {/* 卡 6：会话亲和（启动以来累计；回原账号与前缀命中越多，上游缓存复用越多） */}
+      <Metric label={t('credentials.metricAffinityLabel')} icon={<Link2 />}>
+        <MetricBody>
+          <MetricValue
+            value={affinity === null ? '—' : affinity.preferred.toLocaleString()}
+            unit={affinity === null ? undefined : t('credentials.metricAffinityUnit')}
+          />
+        </MetricBody>
+        <MetricFoot className="truncate">
+          {affinity === null ? (
+            t('credentials.metricAffinityHint')
+          ) : (
+            <>
+              <span>
+                {t('credentials.metricAffinityPrefixHitsPrefix')}{' '}
+                <b className="font-medium text-ink-2">{affinity.prefixHits.toLocaleString()}</b>
+              </span>
+              <FootSep />
+              <span>
+                {t('credentials.metricAffinityRebindsPrefix')}{' '}
+                <b className="font-medium text-ink-2">{affinity.rebinds.toLocaleString()}</b>
+              </span>
+            </>
+          )}
         </MetricFoot>
       </Metric>
     </MetricsBar>

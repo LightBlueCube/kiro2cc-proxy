@@ -266,16 +266,8 @@ fn forward_to_anthropic(
     anthropic_body: &Value,
     api_format: ApiFormat,
 ) -> impl std::future::Future<Output = Response> + use<> {
-    // OpenAI 协议是自动前缀缓存：断点记账开启时补顶层自动缓存标记（见 ensure_auto_cache_control）
-    // 只有开启时才需要可变副本；默认关闭路径不做整包深拷贝
     // Value 一定可序列化，unwrap_or_default 只为避免 panic 路径
-    let bytes = if state.breakpoint_cache.is_some() {
-        let mut owned = anthropic_body.clone();
-        crate::cache::breakpoint::ensure_auto_cache_control(&mut owned);
-        Bytes::from(serde_json::to_vec(&owned).unwrap_or_default())
-    } else {
-        Bytes::from(serde_json::to_vec(anthropic_body).unwrap_or_default())
-    };
+    let bytes = Bytes::from(serde_json::to_vec(anthropic_body).unwrap_or_default());
     post_messages_as(state, identity, addr, headers, bytes, api_format)
 }
 

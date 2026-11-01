@@ -563,4 +563,59 @@ mod tests {
         assert!(headers.get("x-amz-target").is_none());
         assert_eq!(headers.get("host").unwrap(), "q.us-east-1.amazonaws.com");
     }
+
+    /// 最小 Kiro 请求体：history 首条为系统提示
+    fn route_body(conversation: &str, system: Option<&str>, tools: &str, current: &str) -> String {
+        let history = match system {
+            Some(text) => serde_json::json!([
+                {"userInputMessage": {"content": text, "modelId": "m"}},
+                {"assistantResponseMessage": {"content": "ok"}}
+            ]),
+            None => serde_json::json!([]),
+        };
+        serde_json::json!({
+            "conversationState": {
+                "conversationId": conversation,
+                "history": history,
+                "currentMessage": {"userInputMessage": {
+                    "content": current,
+                    "modelId": "m",
+                    "userInputMessageContext": {"tools": [{"toolSpecification": {"name": tools}}]}
+                }}
+            }
+        })
+        .to_string()
+    }
+
+    fn family(body: &str) -> Option<String> {
+        KiroProvider::extract_route_keys_from_request(body)
+            .unwrap()
+            .prefix_family
+    }
+
+    #[test]
+    fn test_prefix_family_shared_across_sessions_with_same_prefix() {
+        let a = route_body("a", Some("system"), "Read", "hello");
+        let b = route_body("b", Some("system"), "Read", "other task");
+
+        let keys = KiroProvider::extract_route_keys_from_request(&a).unwrap();
+        assert_eq!(keys.conversation, "a");
+        assert!(keys.prefix_family.is_some());
+        assert_eq!(keys.prefix_family, family(&b));
+    }
+
+    #[test]
+    fn test_prefix_family_differs_by_system_or_tools() {
+        let base = family(&route_body("a", Some("system"), "Read", "x"));
+        assert_ne!(
+            base,
+            family(&route_body("a", Some("system 2"), "Read", "x"))
+        );
+        assert_ne!(base, family(&route_body("a", Some("system"), "Write", "x")));
+    }
+
+    #[test]
+    fn test_prefix_family_absent_without_history() {
+        assert_eq!(family(&route_body("a", None, "Read", "x")), None);
+    }
 }

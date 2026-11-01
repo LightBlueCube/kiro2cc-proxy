@@ -29,11 +29,11 @@ pub(crate) async fn handle_stream_request(
     request_body: String,
     model: &str,
     input_tokens: i32,
-    prefix_estimated_tokens: i32,
+    // 前缀命中观测（收尾时在实际账号上结算 cache_read，见 `crate::cache`）
+    prefix_probe: Option<crate::cache::PrefixProbe>,
     thinking_enabled: bool,
     usage_tracker: Option<std::sync::Arc<crate::model::usage::UsageTracker>>,
     api_key_id: Option<u32>,
-    prompt_cache_usage: crate::cache::PromptCacheUsage,
     bound_ids: Vec<u64>,
     client_ip: Option<String>,
     // 上游流的全局超时；None 表示不限时（/v1 的现有行为）
@@ -48,10 +48,6 @@ pub(crate) async fn handle_stream_request(
     thinking_as_text_allowed: Option<crate::anthropic::stream::ThinkingTextStyle>,
     // 客户端 User-Agent（随 usage 记录入库）
     user_agent: Option<String>,
-    // 断点缓存记账（promptCacheAccounting 开启时为 Some）
-    cache_accounting: Option<crate::cache::breakpoint::CacheAccounting>,
-    // 会话 conversationId（cache-miss 诊断按会话计算结算间隔与凭据变化）
-    conversation_id: Option<String>,
     // 历史中没能回传上游的推理（ConversionResult::history_thinking_loss），随 usage 记录入库
     history_thinking_loss: crate::anthropic::converter::HistoryThinkingLoss,
     // 历史中回传上游的推理签名（ConversionResult::history_reasoning_replay），供 credits 反推
@@ -100,10 +96,7 @@ pub(crate) async fn handle_stream_request(
                 client_ip,
                 user_agent,
             )
-            .with_prompt_cache_usage(prompt_cache_usage)
-            .with_prefix_estimated_tokens(prefix_estimated_tokens)
-            .with_cache_accounting(cache_accounting)
-            .with_conversation_id(conversation_id)
+            .with_prefix_probe(prefix_probe)
             .with_effort(effort)
             .with_thinking_budget_tokens(thinking_budget_tokens)
             // 计时起点在 call_api_stream 之前注入（见函数开头注释）

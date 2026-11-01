@@ -176,15 +176,13 @@ pub(crate) async fn handle_non_stream_request(
     request_body: &str,
     model: &str,
     input_tokens: i32,
-    prefix_estimated_tokens: i32,
+    // 前缀命中观测（响应结束后在实际账号上结算 cache_read，见 `crate::cache`）
+    prefix_probe: Option<crate::cache::PrefixProbe>,
     usage_tracker: Option<std::sync::Arc<crate::model::usage::UsageTracker>>,
     api_key_id: Option<u32>,
-    prompt_cache_usage: crate::cache::PromptCacheUsage,
     bound_ids: Vec<u64>,
     client_ip: Option<String>,
     json_schema_requested: bool,
-    fp_tracker: Option<std::sync::Arc<crate::cache::fingerprint::FingerprintTracker>>,
-    fp_profile: Option<Vec<crate::cache::fingerprint::ContentSegment>>,
     // 是否为 Claude Code /compact 压缩请求（决定上游超时：普通 180s / 压缩 1000s）
     is_compact_request: bool,
     // 实际发往上游的 effort（ConversionResult::effort），随 usage 记录入库
@@ -193,10 +191,6 @@ pub(crate) async fn handle_non_stream_request(
     thinking_budget_tokens: Option<i32>,
     // 客户端 User-Agent（随 usage 记录入库）
     user_agent: Option<String>,
-    // 断点缓存记账（promptCacheAccounting 开启时为 Some）
-    cache_accounting: Option<crate::cache::breakpoint::CacheAccounting>,
-    // 会话 conversationId（cache-miss 诊断按会话计算结算间隔与凭据变化）
-    conversation_id: Option<String>,
     // 历史中没能回传上游的推理（ConversionResult::history_thinking_loss），随 usage 记录入库
     history_thinking_loss: crate::anthropic::converter::HistoryThinkingLoss,
     // 历史中回传上游的推理签名（ConversionResult::history_reasoning_replay），供 credits 反推
@@ -249,7 +243,6 @@ pub(crate) async fn handle_non_stream_request(
     // 从 contextUsageEvent 计算的实际输入 tokens（已弃用，保留诊断字段恒为 None）
     let context_input_tokens: Option<i32> = None;
     let mut metering_cache_read_tokens: Option<i32> = None;
-    let mut metering_cache_creation_tokens: Option<i32> = None;
     let mut metering_usage: Option<f64> = None;
 
     // 收集工具调用的增量 JSON
@@ -329,7 +322,6 @@ pub(crate) async fn handle_non_stream_request(
                         }
                         Event::Metering(metering) => {
                             metering_cache_read_tokens = metering.cache_read_input_tokens;
-                            metering_cache_creation_tokens = metering.cache_creation_input_tokens;
                             metering_usage = Some(metering.usage);
                         }
                         Event::Exception { exception_type, .. }
@@ -457,97 +449,54 @@ pub(crate) async fn handle_non_stream_request(
         final_input_tokens
     );
 
-    // 四层降级链：metering 真值 → prefix 估算 → 指纹追踪 → 比例模拟
-    let sim_usage = prompt_cache_usage.scale_to(final_input_tokens);
-    let metering_pair = match (metering_cache_read_tokens, metering_cache_creation_tokens) {
-        (Some(read), Some(creation)) => Some((read, creation)),
-        _ => None,
-    };
     let billed_output = crate::model::usage::BilledOutput {
         tokens: billed_output_tokens,
         native_reasoning_tokens,
         signature_chars,
         signature_blocks,
     };
-    // 显式注入：handler 始终算出了 prefix_estimated_tokens（可能为 0），
-    // 结合 metering_usage 反推校准后以 Some 传入 select_final_usage 选用 prefix 分支
     let replayed_reasoning =
         super::helpers::replayed_reasoning(history_reasoning_replay, &signature_repair);
-    let prefix_estimated = Some(crate::model::usage::refine_prefix_cache_read(
-        model,
-        prefix_estimated_tokens,
-        final_input_tokens,
-        &replayed_reasoning,
-        &billed_output,
-        metering_usage,
-    ));
-    // cache-miss 诊断：credits 反推实际生效（metering 真值未透传、无断点账本）
-    // 且命中率低于阈值时输出，量化本次结算并登记会话注册表
-    crate::cache::cache_miss_diag::maybe_log(
-        conversation_id.as_deref().unwrap_or(""),
-        model,
-        prefix_estimated_tokens,
-        final_input_tokens,
-        &replayed_reasoning,
-        &billed_output,
-        metering_usage,
-        // 与实际用量选路（metering_pair）同口径：read/creation 任一缺失即无完整真值
-        metering_pair.is_none() && cache_accounting.is_none(),
-        credential_id,
-        request_started_at,
-    );
-    let fingerprint_usage = match (fp_tracker.as_ref(), fp_profile.as_ref()) {
-        (Some(tracker), Some(profile)) => {
-            let account_id = credential_id.to_string();
-            tracker.compute(&account_id, profile, final_input_tokens)
-        }
-        _ => None,
-    };
-    // 本地写入的提交与上报口径解耦：即便本次用 metering 真值上报也要提交，
-    // 否则后续请求回落到本地模拟时（如换到不返回缓存字段的端点）读不到这次的前缀。
-    // 没有产出内容的请求不提交（与流式同口径）
-    if produced_content && let Some(acc) = &cache_accounting {
-        acc.commit();
-    }
-    let final_usage = match (&cache_accounting, metering_pair) {
-        // 断点记账：metering 未透传缓存真值时取代前缀估算
-        (Some(acc), None) => acc.usage_for(final_input_tokens),
-        _ => crate::cache::select_final_usage(
-            final_input_tokens,
-            metering_pair,
-            prefix_estimated,
-            fingerprint_usage,
-            sim_usage,
-        ),
-    };
 
-    // 流结束后写入指纹表（仅当 credential_id 确定；没有产出内容的请求不写）
-    if produced_content
-        && let (Some(tracker), Some(profile)) = (fp_tracker.as_ref(), fp_profile.clone())
-    {
-        let account_id = credential_id.to_string();
-        tracker.update(&account_id, profile);
-    }
-
-    let report_input = final_usage.input_tokens;
-    let report_cache_creation = final_usage.cache_creation_input_tokens;
-    let report_cache_read = final_usage.cache_read_input_tokens;
-    let report_creation_5m = final_usage.cache_creation_5m_input_tokens;
-    let report_creation_1h = final_usage.cache_creation_1h_input_tokens;
-
-    // 记录用量（内部使用真实值；出错的请求只在上游计费时记）
+    // 客户端 usage 与用量日志同一个 cache_read（口径见 `crate::cache`）。上游没产出内容
+    // 且未计费时多半没处理这段前缀，不登记到账号
     let usage_error = outcome.usage_error();
+    let upstream_processed = produced_content || metering_usage.is_some();
+    let prefix_read = prefix_probe
+        .as_ref()
+        .filter(|_| upstream_processed)
+        .map(|probe| probe.settle(credential_id, final_input_tokens));
+    let cache_read = crate::cache::estimate_cache_read(
+        model,
+        final_input_tokens,
+        metering_cache_read_tokens,
+        metering_usage,
+        &replayed_reasoning,
+        &billed_output,
+        prefix_read,
+    );
+    tracing::info!(
+        model,
+        input_tokens = final_input_tokens,
+        cache_read = cache_read.tokens,
+        source = ?cache_read.source,
+        prefix_read,
+        "[cache] 本次缓存命中估算"
+    );
+    let report_cache_read = cache_read.tokens;
+    let report_input = final_input_tokens - report_cache_read;
+
+    // 记录用量（出错的请求只在上游计费时记）
     if should_record_usage(usage_error, metering_usage)
         && let (Some(tracker), Some(key_id)) = (&usage_tracker, api_key_id)
     {
         tracing::info!(
-            "[usage] 入库: model={} input={} output={} metering_credits={:?} cache_read={} cache_creation={} api_key={} credential=Some({})",
+            "[usage] 入库: model={} input={} output={} metering_credits={:?} cache_read={} api_key={} credential=Some({})",
             model,
             final_input_tokens,
             output_tokens,
             metering_usage,
             report_cache_read,
-            report_cache_creation,
             key_id,
             credential_id
         );
@@ -561,7 +510,7 @@ pub(crate) async fn handle_non_stream_request(
                 client_ip,
                 credits_used: metering_usage,
                 cache_read_input_tokens: Some(report_cache_read),
-                cache_creation_input_tokens: Some(report_cache_creation),
+                cache_creation_input_tokens: Some(0),
                 effort: effort.clone(),
                 thinking_budget_tokens,
                 first_token_ms: None,
@@ -609,11 +558,11 @@ pub(crate) async fn handle_non_stream_request(
         "usage": {
             "input_tokens": super::super::stream::scale_for_client(report_input, model),
             "output_tokens": output_tokens,
-            "cache_creation_input_tokens": super::super::stream::scale_for_client(report_cache_creation, model),
+            "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": super::super::stream::scale_for_client(report_cache_read, model),
             "cache_creation": {
-                "ephemeral_5m_input_tokens": super::super::stream::scale_for_client(report_creation_5m, model),
-                "ephemeral_1h_input_tokens": super::super::stream::scale_for_client(report_creation_1h, model)
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 0
             }
         }
     });
@@ -715,9 +664,8 @@ mod native_tests {
     }
 
     #[test]
-    fn test_nonstream_prefix_estimated_refined_with_thinking_billed_output() {
+    fn test_nonstream_cache_read_inferred_with_thinking_billed_output() {
         let final_input_tokens = 53_776;
-        let prefix_estimated_tokens = 53_650;
         for native in [false, true] {
             let thinking = "reasoning ".repeat(146);
             let native_blocks = if native {
@@ -755,17 +703,17 @@ mod native_tests {
                     signature_chars,
                     signature_blocks,
                 };
-                assert_eq!(
-                    crate::model::usage::refine_prefix_cache_read(
-                        "claude-haiku-5-5",
-                        prefix_estimated_tokens,
-                        final_input_tokens,
-                        &Default::default(),
-                        &output,
-                        Some(credits),
-                    ),
-                    20_000
+                let read = crate::cache::estimate_cache_read(
+                    "claude-haiku-5-5",
+                    final_input_tokens,
+                    None,
+                    Some(credits),
+                    &Default::default(),
+                    &output,
+                    None,
                 );
+                assert_eq!(read.tokens, 20_000);
+                assert_eq!(read.source, crate::cache::CacheReadSource::Credits);
             }
         }
     }

@@ -7,6 +7,8 @@ import { createContext, useContext, useId, type ReactNode } from 'react'
  */
 
 const BAR_COLS_5 = '1.1fr 1.35fr 1fr 1.25fr 1.1fr'
+// 等宽；带图表的段内容更宽时，1fr 的 auto 下限会自动让出空间
+const BAR_COLS_6 = 'repeat(6, 1fr)'
 const BAR_COLS_3 = '1fr 1.3fr 1fr'
 const BAR_COLS_4 = '1fr 1fr 1fr 1fr'
 const BAR_COLS_7 = 'repeat(7, minmax(136px, 1fr))'
@@ -20,7 +22,7 @@ export function MetricsBar({
   cols = 4,
   children,
 }: {
-  cols?: 3 | 4 | 5 | 7 | 8
+  cols?: 3 | 4 | 5 | 6 | 7 | 8
   children: ReactNode
 }) {
   const template =
@@ -28,11 +30,13 @@ export function MetricsBar({
       ? BAR_COLS_8
       : cols === 7
         ? BAR_COLS_7
-        : cols === 5
-          ? BAR_COLS_5
-          : cols === 3
-            ? BAR_COLS_3
-            : BAR_COLS_4
+        : cols === 6
+          ? BAR_COLS_6
+          : cols === 5
+            ? BAR_COLS_5
+            : cols === 3
+              ? BAR_COLS_3
+              : BAR_COLS_4
   const compact = cols >= 7
   return (
     <CompactContext.Provider value={compact}>
@@ -278,7 +282,7 @@ export function Delta({ percent }: { percent: number }) {
   const flat = Math.abs(percent) < 0.05
   const tone = flat ? 'bg-surface-3 text-ink-3' : percent > 0 ? 'bg-danger-soft text-danger' : 'bg-ok-soft text-ok'
   return (
-    <span className={`inline-flex items-center gap-0.5 rounded-[6px] px-[7px] py-0.5 text-[11px] font-semibold tabular-nums ${tone}`}>
+    <span className={`inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-[6px] px-[7px] py-0.5 text-[11px] font-semibold tabular-nums ${tone}`}>
       {flat ? '—' : percent > 0 ? '↑' : '↓'} {Math.abs(percent).toFixed(1)}%
     </span>
   )

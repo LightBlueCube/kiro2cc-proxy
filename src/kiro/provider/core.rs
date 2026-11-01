@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::http_client::{ProxyConfig, build_client};
+use crate::kiro::affinity::{Affinity, RouteKeys};
 use crate::kiro::endpoint::{Endpoint, EndpointBucketRegistry, EndpointName};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
@@ -18,6 +19,7 @@ use crate::model::failure_log::FailureLogStore;
 use crate::model::rpm::RpmTracker;
 use crate::model::throttle_log::ThrottleLogStore;
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 /// 每个账号的最大重试次数
@@ -72,6 +74,8 @@ pub struct KiroProvider {
     pub(crate) failure_log_store: Option<Arc<FailureLogStore>>,
     /// 端点级 429 状态注册表（多端点 LB 使用）
     pub(crate) endpoint_registry: Arc<EndpointBucketRegistry>,
+    /// 会话亲和：同一会话尽量路由到同一账号
+    pub(crate) affinity: Arc<Affinity>,
 }
 
 #[allow(dead_code)] // 拆分自原 provider.rs：部分方法仅测试/预留使用
@@ -101,7 +105,13 @@ impl KiroProvider {
             throttle_log_store: None,
             failure_log_store: None,
             endpoint_registry: Arc::new(EndpointBucketRegistry::new()),
+            affinity: Arc::new(Affinity::new()),
         }
+    }
+
+    /// 会话亲和状态（管理页读取计数）
+    pub fn affinity(&self) -> Arc<Affinity> {
+        self.affinity.clone()
     }
 
     /// 注入外部 endpoint_registry（多 provider 共享桶状态时使用）
@@ -252,12 +262,36 @@ impl KiroProvider {
         }
     }
 
-    /// 提取 conversationState.agentContinuationId，用于 sticky cache 路由
-    pub(crate) fn extract_continuation_id_from_request(request_body: &str) -> Option<String> {
+    /// 提取会话亲和的键：conversationState.conversationId 与前缀族
+    pub(crate) fn extract_route_keys_from_request(request_body: &str) -> Option<RouteKeys> {
         let json: serde_json::Value = serde_json::from_str(request_body).ok()?;
-        json.get("conversationState")?
-            .get("agentContinuationId")?
-            .as_str()
-            .map(|s| s.to_string())
+        let state = json.get("conversationState")?;
+        let conversation = state.get("conversationId")?.as_str()?.to_string();
+        Some(RouteKeys {
+            conversation,
+            prefix_family: prefix_family(state),
+        })
     }
+}
+
+/// 前缀族：模型 + 工具定义 + history[0]（系统提示）的摘要。
+///
+/// 上游 prompt cache 按「账号 + 内容前缀」寻址，这三者相同的请求共享开头一段缓存
+/// （Claude Code 的系统提示 + 工具定义约 2~3 万 token）。没有历史时前缀从当前消息起算，
+/// 不构成可共享的族。
+fn prefix_family(state: &serde_json::Value) -> Option<String> {
+    let first = state.get("history")?.as_array()?.first()?;
+    let input = state.get("currentMessage")?.get("userInputMessage")?;
+    let model = input.get("modelId")?.as_str()?;
+    let tools = input
+        .get("userInputMessageContext")
+        .and_then(|context| context.get("tools"))
+        .map_or_else(String::new, |tools| tools.to_string());
+
+    let mut hasher = Sha256::new();
+    for part in [model, tools.as_str(), first.to_string().as_str()] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }

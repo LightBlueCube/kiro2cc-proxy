@@ -1,13 +1,12 @@
 //! converter 测试（自 tests.rs 拆分，纯代码搬移）
 #![cfg(test)]
 
-use super::super::convert::{
-    convert_request, determine_agent_task_type, determine_chat_trigger_type,
-};
+use super::super::convert::{determine_agent_task_type, determine_chat_trigger_type};
 use super::super::session::{
-    derive_fallback_conversation_id, extract_session_id, is_compact_request, is_valid_uuid,
+    ConversationIdSource, Tenant, derive_conversation_id, extract_session_id, is_compact_request,
+    is_valid_uuid,
 };
-use super::fallback_req;
+use super::{convert_request, fallback_req};
 #[allow(unused_imports)]
 use crate::anthropic::types::ContentBlock as _;
 use crate::anthropic::types::MessagesRequest;
@@ -262,10 +261,24 @@ fn test_extract_session_id_non_ascii_no_panic() {
     assert_eq!(extract_session_id("session_短"), None);
 }
 
-/// 构造用于 fallback 派生测试的最小请求（system + 工具名 + 消息序列）
+/// 匿名租户下派生的 conversationId
+fn derive(req: &MessagesRequest) -> String {
+    derive_conversation_id(req, &Tenant::anonymous()).0
+}
+
+/// 带 metadata.user_id 的最小请求
+fn session_req(user_id: &str, system: Option<&str>, messages: &[(&str, &str)]) -> MessagesRequest {
+    let mut req = fallback_req(system, &["Read"], messages);
+    req.metadata = Some(crate::anthropic::types::Metadata {
+        user_id: Some(user_id.to_string()),
+    });
+    req
+}
+
+const CC_SESSION: &str = "user_0dede55c6dcc4a11a30bbb5e7f22e6fdf86cdeba3820019cc27612af4e1243cd_account__session_a0662283-7fd3-4399-a7eb-52b9a717ae88";
 
 #[test]
-fn test_derive_fallback_distinguishes_different_sessions() {
+fn test_derive_content_distinguishes_different_sessions() {
     // 回归 issue #27：system 与工具集完全相同的两个会话，
     // 旧实现会折叠成同一个 conversationId，导致 sticky 把全部流量钉在同一账号上
     let a = fallback_req(
@@ -278,9 +291,68 @@ fn test_derive_fallback_distinguishes_different_sessions() {
         &["Read", "Write"],
         &[("user", "帮我重构 token_manager")],
     );
-    let id_a = derive_fallback_conversation_id(&a).expect("应派生出 ID");
-    let id_b = derive_fallback_conversation_id(&b).expect("应派生出 ID");
-    assert_ne!(id_a, id_b, "不同会话必须派生出不同的 conversationId");
+    assert_ne!(
+        derive(&a),
+        derive(&b),
+        "不同会话必须派生出不同的 conversationId"
+    );
+    assert_eq!(
+        derive_conversation_id(&a, &Tenant::anonymous()).1,
+        ConversationIdSource::Content
+    );
+}
+
+#[test]
+fn test_derive_client_session_stable_across_turns() {
+    let turn1 = session_req(CC_SESSION, Some("cch=1"), &[("user", "实现登录")]);
+    let turn3 = session_req(
+        CC_SESSION,
+        // system 逐轮变化（计费头、会话中途追加的块）不影响会话身份
+        Some("cch=2\nrules"),
+        &[("user", "实现登录"), ("assistant", "好"), ("user", "继续")],
+    );
+    assert_eq!(derive(&turn1), derive(&turn3));
+    assert_eq!(
+        derive_conversation_id(&turn1, &Tenant::anonymous()).1,
+        ConversationIdSource::ClientSession
+    );
+}
+
+#[test]
+fn test_derive_client_session_splits_subagents() {
+    // Claude Code 的子代理与主对话共用 session：首条消息不同 → 各自成会话
+    let main = session_req(CC_SESSION, Some("main"), &[("user", "实现登录")]);
+    let subagent = session_req(CC_SESSION, Some("explore"), &[("user", "查找登录相关文件")]);
+    assert_ne!(derive(&main), derive(&subagent));
+}
+
+#[test]
+fn test_derive_client_session_differs_across_sessions() {
+    let other = "user_0dede55c6dcc4a11a30bbb5e7f22e6fdf86cdeba3820019cc27612af4e1243cd_account__session_b1773394-8be4-4400-b8fc-63c0b828bf99";
+    let a = session_req(CC_SESSION, None, &[("user", "Hello")]);
+    let b = session_req(other, None, &[("user", "Hello")]);
+    assert_ne!(derive(&a), derive(&b));
+}
+
+#[test]
+fn test_derive_raw_user_id_is_session_hint() {
+    // OpenAI `user` / prompt_cache_key 等任意字符串：原值作为会话标识
+    let alice = session_req("alice", None, &[("user", "Hello")]);
+    let bob = session_req("bob", None, &[("user", "Hello")]);
+    assert_ne!(derive(&alice), derive(&bob));
+    assert_eq!(
+        derive_conversation_id(&alice, &Tenant::anonymous()).1,
+        ConversationIdSource::ClientSession
+    );
+}
+
+#[test]
+fn test_derive_isolates_tenants() {
+    let req = fallback_req(None, &[], &[("user", "hi")]);
+    let a = derive_conversation_id(&req, &Tenant::api_key(1)).0;
+    let b = derive_conversation_id(&req, &Tenant::api_key(2)).0;
+    assert_ne!(a, b, "内容完全相同的请求在不同租户下不得共用会话");
+    assert_eq!(a, derive_conversation_id(&req, &Tenant::api_key(1)).0);
 }
 
 #[test]
@@ -302,8 +374,8 @@ fn test_derive_fallback_stable_across_turns() {
         ],
     );
     assert_eq!(
-        derive_fallback_conversation_id(&turn1),
-        derive_fallback_conversation_id(&turn3),
+        derive(&turn1),
+        derive(&turn3),
         "同一会话跨轮次的 conversationId 必须一致"
     );
 }
@@ -323,14 +395,14 @@ fn test_derive_fallback_array_content_ignores_binary_blocks() {
     };
     // 文本相同、仅图片数据不同 → 判为同一会话
     assert_eq!(
-        derive_fallback_conversation_id(&with_image("AAAA", "看这张图")),
-        derive_fallback_conversation_id(&with_image("BBBB", "看这张图")),
+        derive(&with_image("AAAA", "看这张图")),
+        derive(&with_image("BBBB", "看这张图")),
         "仅附件不同不应改变会话身份"
     );
     // 文本不同 → 判为不同会话
     assert_ne!(
-        derive_fallback_conversation_id(&with_image("AAAA", "看这张图")),
-        derive_fallback_conversation_id(&with_image("AAAA", "换个问题")),
+        derive(&with_image("AAAA", "看这张图")),
+        derive(&with_image("AAAA", "换个问题")),
         "数组型 content 的文本变化必须体现在会话 ID 上"
     );
 }
@@ -341,14 +413,15 @@ fn test_derive_fallback_bare_request_uses_first_message() {
     // 上游 prompt cache 依赖跨轮会话身份稳定，实测可省约 38% credits
     // （旧实现返回 None 退化为随机 UUID，导致裸请求每轮全价）
     let req = fallback_req(None, &[], &[("user", "Hello")]);
-    let id = derive_fallback_conversation_id(&req).expect("裸请求应派生出 ID");
+    let id = derive(&req);
     // 派生结果必须是合法 UUID v4（供上游严格解析器接受）
     assert!(is_valid_uuid(&id), "派生 ID 应为合法 UUID: {id}");
+    assert_eq!(id.as_bytes()[14], b'4', "UUID 版本位应为 4: {id}");
     // 与带 system 的派生结果不同（seed 成分不同）
     let with_system = fallback_req(Some("You are Claude Code."), &[], &[("user", "Hello")]);
     assert_ne!(
-        derive_fallback_conversation_id(&with_system),
-        Some(id),
+        derive(&with_system),
+        id,
         "裸请求与带 system 的请求应派生不同 ID"
     );
 }
@@ -363,15 +436,15 @@ fn test_derive_fallback_bare_request_stable_across_turns() {
         &[("user", "Hello"), ("assistant", "Hi"), ("user", "继续")],
     );
     assert_eq!(
-        derive_fallback_conversation_id(&turn1),
-        derive_fallback_conversation_id(&turn2),
+        derive(&turn1),
+        derive(&turn2),
         "裸请求同一会话跨轮次必须派生相同 conversationId"
     );
     // 不同首条消息 → 不同 ID（低熵折叠风险收窄到「首条消息完全一致」）
     let other = fallback_req(None, &[], &[("user", "hi")]);
     assert_ne!(
-        derive_fallback_conversation_id(&turn1),
-        derive_fallback_conversation_id(&other),
+        derive(&turn1),
+        derive(&other),
         "不同首条消息的裸请求必须派生不同 conversationId"
     );
 }
@@ -448,7 +521,7 @@ fn test_agent_continuation_id_differs_across_sessions() {
     };
 
     let result1 = convert_request(&make_req("a0662283-7fd3-4399-a7eb-52b9a717ae88")).unwrap();
-    let result2 = convert_request(&make_req("b1773394-8ge4-4400-b8fc-63c0b828bf99")).unwrap();
+    let result2 = convert_request(&make_req("b1773394-8be4-4400-b8fc-63c0b828bf99")).unwrap();
 
     assert_ne!(
         result1.conversation_state.agent_continuation_id,
@@ -497,7 +570,7 @@ fn test_agent_continuation_id_stable_for_bare_request_without_metadata() {
 fn test_convert_request_with_session_metadata() {
     use crate::anthropic::types::{Message as AnthropicMessage, Metadata};
 
-    // 测试带有 metadata 的请求，应该使用 session UUID 作为 conversationId
+    // 带 metadata 的请求：conversationId 由 session 与首条消息派生（不再直接采用 session UUID）
     let req = MessagesRequest {
             model: "claude-sonnet-4".to_string(),
             max_tokens: 1024,
@@ -519,7 +592,8 @@ fn test_convert_request_with_session_metadata() {
         };
 
     let result = convert_request(&req).unwrap();
-    assert_eq!(
+    assert_eq!(result.conversation_state.conversation_id, derive(&req));
+    assert_ne!(
         result.conversation_state.conversation_id,
         "a0662283-7fd3-4399-a7eb-52b9a717ae88"
     );
@@ -529,7 +603,7 @@ fn test_convert_request_with_session_metadata() {
 fn test_convert_request_without_metadata() {
     use crate::anthropic::types::Message as AnthropicMessage;
 
-    // 测试没有 metadata 的请求，应该生成新的 UUID
+    // 没有 metadata 的请求：按内容派生合法 UUID
     let req = MessagesRequest {
         model: "claude-sonnet-4".to_string(),
         max_tokens: 1024,

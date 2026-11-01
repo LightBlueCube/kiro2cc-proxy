@@ -155,8 +155,8 @@ export function buildGuides(baseUrl: string, locale: DocsLocale): GuideSpec[] {
           'The service freezes history[0] (the first message) so the Kiro prefix cache stays byte-stable across requests: billing-hash normalization in the system prompt and conversation-derived continuation IDs all serve this. Do not rewrite the first message mid-session on the client side, or the upstream cache fully invalidates and TTFT rises sharply.',
         ),
         c(
-          '用量中的 cache_read / cache_creation 上报有四层降级链：metering 真值 → 前缀估算 → 前缀指纹 → 比例模拟。开启 promptCacheAccounting 后改用 cache_control 断点模拟（按 API Key + Kiro 模型隔离），记账口径更接近 Anthropic 官方，属本地模拟、不代表 Kiro 真实成本。',
-          'Reported cache_read / cache_creation goes through a four-tier fallback: metering truth → prefix estimate → prefix fingerprint → ratio simulation. With promptCacheAccounting on, cache_control breakpoint simulation takes over (isolated per API key + Kiro model), which tracks Anthropic accounting closer but is a local simulation, not Kiro real cost.',
+          'Kiro 的缓存按「账号 + 内容前缀」命中，5 分钟内复用会续期。服务会把同一会话、同一前缀的请求尽量路由回同一账号。用量中的 cache_read 依次取上游 metering 真值、按 credits 反推、同账号前缀观测估算；cache_creation 恒为 0。客户端看到的数值与用量日志一致。',
+          'Kiro caches by account + content prefix; reuse within 5 minutes renews the entry. The service routes requests of the same session or prefix back to the same account where possible. Reported cache_read comes from upstream metering when present, otherwise from credits inference, otherwise from same-account prefix tracking; cache_creation is always 0. Clients see the same numbers as the usage log.',
         ),
       ],
     },

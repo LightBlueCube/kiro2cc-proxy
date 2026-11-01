@@ -15,13 +15,6 @@ pub struct ConversionResult {
     /// 用于 provider 层选择更长的上游超时（压缩请求通常处理超长历史，
     /// 耗时明显高于普通请求）。检测逻辑见 `is_compact_request`。
     pub is_compact_request: bool,
-    /// 本次请求的缓存前缀（`history[0]` + 历史对话轮次）是否已命中会话级冻结缓存。
-    ///
-    /// 仅当存在历史对话轮次（去除内联 system 与末尾 prefill 后 `messages.len() > 1`）
-    /// 且 `history[0]` 命中 `PREV_H0`（无系统消息时仅要求存在历史轮次）时为 `true`。
-    /// 新窗口首条消息或 `history[0]` 首次出现/漂移重置时为 `false`，handler 层据此将
-    /// `prefix_estimated_tokens` 置 0，避免把首条消息尚未建立缓存的 `system + tools` 误计入 `cache_read`。
-    pub prefix_cached: bool,
     /// 实际发往上游的 effort（`output_config.effort` / GPT 系 `reasoning.effort`；未发送为 None）
     pub effort: Option<String>,
     /// 实际注入 history[0] 的 thinking 文本标签预算（`max_thinking_length`；未注入为 None）

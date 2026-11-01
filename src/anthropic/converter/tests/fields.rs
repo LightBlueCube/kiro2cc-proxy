@@ -1,8 +1,8 @@
 //! converter 测试（自 tests.rs 拆分，纯代码搬移）
 #![cfg(test)]
 
-use super::super::convert::convert_request;
 use super::super::fields::model_max_output_tokens;
+use super::convert_request;
 #[allow(unused_imports)]
 use crate::anthropic::types::ContentBlock as _;
 use crate::anthropic::types::MessagesRequest;

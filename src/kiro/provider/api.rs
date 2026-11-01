@@ -61,6 +61,11 @@ impl UpstreamFeedback {
         self.provider
             .token_manager
             .report_response_completed(self.route.credential_id, self.route.model.as_deref());
+        if let Some(key) = self.route.conversation_id.as_deref() {
+            self.provider
+                .affinity
+                .on_completed(key, self.route.credential_id);
+        }
     }
 
     /// 模型拒答（stopReason=content_filtered，参数为上游说明原文）：计入该账号该模型的连续拒答
@@ -78,7 +83,8 @@ impl UpstreamFeedback {
 pub struct UpstreamRoute {
     pub(super) credential_id: u64,
     pub(super) endpoint: crate::kiro::endpoint::EndpointName,
-    pub(super) continuation_id: Option<String>,
+    /// 会话亲和的键（conversationId）
+    pub(super) conversation_id: Option<String>,
     pub(super) model: Option<String>,
     /// 本次请求内第几次尝试（从 1 起）
     pub(super) attempt: u32,
@@ -162,8 +168,8 @@ impl KiroProvider {
         let small_pool = effective_pool <= 1;
         let mut last_error: Option<anyhow::Error> = None;
 
-        let continuation_id = Self::extract_continuation_id_from_request(request_body);
-        // 退避、限额与 429 的处理与 call_api_with_retry 同口径（见该函数注释）
+        // 退避、限额与 429 的处理与 call_api_with_retry 同口径（见该函数注释）。
+        // MCP 请求体是 JSON-RPC，没有会话，不参与会话亲和
         let mut throttled_in_request: Vec<u64> = Vec::new();
         let mut upstream_throttled: Vec<u64> = Vec::new();
         let mut queue_deadline: Option<Instant> = None;
@@ -175,18 +181,13 @@ impl KiroProvider {
             if let Some(delay) = backoff.take() {
                 sleep(delay).await;
             }
-            // 获取调用上下文（MCP 不涉及模型选择，但同样应用 sticky 路由）
+            // 获取调用上下文（MCP 不涉及模型选择）
             let ctx = match self
                 .token_manager
-                .acquire_context_sticky(
-                    None,
-                    bound_ids,
-                    continuation_id.as_deref(),
-                    &throttled_in_request,
-                )
+                .acquire_for_request(None, bound_ids, None, &throttled_in_request)
                 .await
             {
-                Ok(c) => c,
+                Ok((ctx, _)) => ctx,
                 Err(e) => {
                     last_error = Some(e);
                     continue;
@@ -214,9 +215,6 @@ impl KiroProvider {
                     throttled = true;
                     tracing::info!("[LOCAL-LIMIT] credential={} {}（MCP）", ctx.id, full);
                     self.token_manager.report_throttled_for_rotation(ctx.id);
-                    if let Some(cid) = continuation_id.as_deref() {
-                        self.token_manager.report_sticky_throttled(cid, ctx.id);
-                    }
                     push_unique(&mut throttled_in_request, ctx.id);
                     last_error = Some(anyhow::anyhow!("账号 {} 本地限额：{}", ctx.id, full));
                     if can_switch {
@@ -279,9 +277,6 @@ impl KiroProvider {
                 self.token_manager.report_success(ctx.id);
                 // MCP 响应很短，拿到 200 即视为正常完成
                 self.token_manager.report_response_completed(ctx.id, None);
-                if let Some(cid) = continuation_id.as_deref() {
-                    self.token_manager.report_sticky_success(cid, ctx.id);
-                }
                 return Ok((response, ctx.id));
             }
 
@@ -346,7 +341,7 @@ impl KiroProvider {
                 continue;
             }
 
-            // 429 Too Many Requests - 限流：驱逐 sticky cache + rotation bias 轮转
+            // 429 Too Many Requests - 限流：rotation bias 轮转，本次请求避让该账号
             if status.as_u16() == 429 {
                 tracing::warn!(
                     "MCP 请求失败（上游限流，{}重试，尝试 {}/{}）: {} {}",
@@ -362,9 +357,6 @@ impl KiroProvider {
                 );
                 self.token_manager.report_throttled(ctx.id);
                 self.token_manager.report_throttled_for_rotation(ctx.id);
-                if let Some(cid) = continuation_id.as_deref() {
-                    self.token_manager.report_sticky_throttled(cid, ctx.id);
-                }
                 push_unique(&mut throttled_in_request, ctx.id);
                 push_unique(&mut upstream_throttled, ctx.id);
                 throttled = true;

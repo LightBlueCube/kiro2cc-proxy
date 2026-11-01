@@ -15,10 +15,10 @@
 //! INFO 记录诊断摘要和系统块开头原文预览（80 / 40 个字符）。
 //! 不依赖 Admin 设置页的 `debugLogs` 开关；INFO 未启用时跳过诊断。
 //! 只在 key 变化、或分流块数量变化时各输出一行。
+//!
+//! 状态随会话存放在 [`super::session_store::SessionState`]。
 
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, OnceLock};
 
 use super::prompt::normalize_billing_header;
 
@@ -26,8 +26,6 @@ use super::prompt::normalize_billing_header;
 const PREVIEW_CHARS: usize = 80;
 /// 分流块预览长度（字符数）
 const DIVERTED_PREVIEW_CHARS: usize = 40;
-/// 最多记录的会话数；超出后整体清空（诊断数据，丢失无影响）
-const MAX_SESSIONS: usize = 256;
 /// 单次日志最多列出的新增 / 消失块数
 const MAX_LISTED: usize = 8;
 /// 每个会话最多保留的快照数（主对话 + 若干类辅助 / 子代理请求）
@@ -36,9 +34,14 @@ const MAX_SNAPSHOTS_PER_SESSION: usize = 4;
 /// 单个系统块的指纹：内容哈希 + 字节长度
 pub(super) type Fingerprint = (u64, usize);
 
-static PREV_BLOCKS: OnceLock<Mutex<HashMap<String, Vec<Vec<Fingerprint>>>>> = OnceLock::new();
-/// 每个会话上一次被分流的动态块数量，用于只在数量变化时写日志
-static PREV_DIVERTED: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+/// 一个会话的漂移诊断状态
+#[derive(Default)]
+pub(super) struct DriftDiag {
+    /// 最近几类请求的稳定系统块指纹
+    snapshots: Vec<Vec<Fingerprint>>,
+    /// 上一次被分流的动态块数量，用于只在数量变化时写日志
+    diverted: usize,
+}
 
 /// 一个新增块：在当前系统区中的序号、字节长度、预览
 #[derive(Debug, PartialEq, Eq)]
@@ -121,7 +124,12 @@ fn is_related(prev: &[Fingerprint], cur: &[Fingerprint], shared: usize) -> bool 
 /// 记录本次请求的稳定系统块；`key_changed` 为 true（history[0] 缓存 key 首次出现）且该会话
 /// 之前有记录时：与某份快照足够相似则输出新增 / 消失块，与所有快照都几乎无重叠则输出
 /// 「新请求类型」提示（多为辅助 / 子代理请求，不是漂移）。
-pub(super) fn observe(session_id: &str, stable_blocks: &[&str], key_changed: bool) {
+pub(super) fn observe(
+    diag: &mut DriftDiag,
+    session_id: &str,
+    stable_blocks: &[&str],
+    key_changed: bool,
+) {
     if !tracing::enabled!(tracing::Level::INFO) {
         return;
     }
@@ -134,12 +142,7 @@ pub(super) fn observe(session_id: &str, stable_blocks: &[&str], key_changed: boo
     let cur_total = total_len(&fps);
 
     let matched = {
-        let map = PREV_BLOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= MAX_SESSIONS && !map.contains_key(session_id) {
-            map.clear();
-        }
-        let snaps = map.entry(session_id.to_string()).or_default();
+        let snaps = &mut diag.snapshots;
         let best = snaps
             .iter()
             .enumerate()
@@ -203,20 +206,13 @@ pub(super) fn observe(session_id: &str, stable_blocks: &[&str], key_changed: boo
 /// 与前 40 个字符的原文预览。
 /// 用来确认分流规则确实命中（例如任务工具提醒）。同一会话内只在分流块数量变化时输出，
 /// 避免动态块持续存在时每轮刷屏；无动态块且数量未变化时不输出。
-pub(super) fn log_diverted(session_id: &str, dynamic_blocks: &[&str]) {
+pub(super) fn log_diverted(diag: &mut DriftDiag, session_id: &str, dynamic_blocks: &[&str]) {
     if !tracing::enabled!(tracing::Level::INFO) {
         return;
     }
-    {
-        let map = PREV_DIVERTED.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= MAX_SESSIONS && !map.contains_key(session_id) {
-            map.clear();
-        }
-        let prev = map.insert(session_id.to_string(), dynamic_blocks.len());
-        if prev.unwrap_or(0) == dynamic_blocks.len() {
-            return;
-        }
+    let prev = std::mem::replace(&mut diag.diverted, dynamic_blocks.len());
+    if prev == dynamic_blocks.len() {
+        return;
     }
     if dynamic_blocks.is_empty() {
         return;
@@ -283,7 +279,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct BufWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl std::io::Write for BufWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -306,12 +302,13 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             let sid = "drift-test-session";
+            let d = &mut DriftDiag::default();
             // 会话首次出现：没有上一次可比，不输出
-            observe(sid, &["core prompt"], true);
+            observe(d, sid, &["core prompt"], true);
             // key 未变：只更新快照，不输出
-            observe(sid, &["core prompt"], false);
+            observe(d, sid, &["core prompt"], false);
             // key 变化：输出新增块
-            observe(sid, &["core prompt", "APPENDED-BY-CC reminder"], true);
+            observe(d, sid, &["core prompt", "APPENDED-BY-CC reminder"], true);
         });
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert_eq!(out.matches("[drift]").count(), 1, "{out}");
@@ -351,14 +348,15 @@ mod tests {
         let aux = "short auxiliary prompt ".repeat(50);
         let out = capture(|| {
             let sid = "drift-aux-session";
+            let d = &mut DriftDiag::default();
             // 先到的辅助请求（如标题生成）：会话首次出现，无输出
-            observe(sid, &[&aux], true);
+            observe(d, sid, &[&aux], true);
             // 主请求首次出现：与辅助请求无重叠 → 新请求类型，而不是「新增 / 消失」
-            observe(sid, &[&main_a, &main_b], true);
+            observe(d, sid, &[&main_a, &main_b], true);
             // 辅助请求再次出现但 key 未变：只更新快照
-            observe(sid, &[&aux], false);
+            observe(d, sid, &[&aux], false);
             // 主请求中途真的追加了一块：必须和主请求快照比较（added=1 removed=0）
-            observe(sid, &[&main_a, &main_b, "APPENDED-BY-CC reminder"], true);
+            observe(d, sid, &[&main_a, &main_b, "APPENDED-BY-CC reminder"], true);
         });
         assert_eq!(out.matches("新请求类型").count(), 1, "{out}");
         assert_eq!(out.matches("缓存 key 变化").count(), 1, "{out}");
@@ -370,13 +368,13 @@ mod tests {
     #[test]
     fn snapshots_per_session_are_capped() {
         let sid = "drift-cap-session";
+        let mut d = DriftDiag::default();
         capture(|| {
             for i in 0..(MAX_SNAPSHOTS_PER_SESSION + 3) {
-                observe(sid, &[&format!("kind-{i}-").repeat(500)], true);
+                observe(&mut d, sid, &[&format!("kind-{i}-").repeat(500)], true);
             }
         });
-        let map = PREV_BLOCKS.get().unwrap().lock().unwrap();
-        assert_eq!(map.get(sid).unwrap().len(), MAX_SNAPSHOTS_PER_SESSION);
+        assert_eq!(d.snapshots.len(), MAX_SNAPSHOTS_PER_SESSION);
     }
 
     #[test]
@@ -389,10 +387,12 @@ mod tests {
             .with_writer(move || writer.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            log_diverted("s", &[]);
-            log_diverted("s", &["  The task tools haven't been used recently.\nmore"]);
+            let d = &mut DriftDiag::default();
+            let reminder = "  The task tools haven't been used recently.\nmore";
+            log_diverted(d, "s", &[]);
+            log_diverted(d, "s", &[reminder]);
             // 数量未变化：不重复输出
-            log_diverted("s", &["  The task tools haven't been used recently.\nmore"]);
+            log_diverted(d, "s", &[reminder]);
         });
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert_eq!(out.matches("[drift]").count(), 1, "{out}");
@@ -405,9 +405,10 @@ mod tests {
     fn info_logs_include_previews_without_duplicates_at_debug() {
         let out = capture_at(tracing::Level::DEBUG, || {
             let sid = "drift-debug-preview-session";
-            observe(sid, &["core prompt"], true);
-            observe(sid, &["core prompt", "PRIVATE-STABLE-PREVIEW"], true);
-            log_diverted(sid, &["PRIVATE-DYNAMIC-PREVIEW"]);
+            let d = &mut DriftDiag::default();
+            observe(d, sid, &["core prompt"], true);
+            observe(d, sid, &["core prompt", "PRIVATE-STABLE-PREVIEW"], true);
+            log_diverted(d, sid, &["PRIVATE-DYNAMIC-PREVIEW"]);
         });
         let info: Vec<&str> = out.lines().filter(|line| line.contains(" INFO ")).collect();
         let debug: Vec<&str> = out

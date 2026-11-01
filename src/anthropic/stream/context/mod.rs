@@ -6,7 +6,6 @@ use std::time::Instant;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::cache::PromptCacheUsage;
 use crate::kiro::model::events::{Event, UpstreamStop};
 use crate::model::usage::{UsageError, UsageTracker};
 
@@ -81,23 +80,14 @@ pub struct StreamContext {
     client_ip: Option<String>,
     /// 客户端 User-Agent（用于用量记录）
     user_agent: Option<String>,
-    /// 模拟出的 prompt cache usage
-    prompt_cache_usage: PromptCacheUsage,
     /// 从 meteringEvent 获取的真实 credits 消耗
     pub metering_usage: Option<f64>,
     /// 从 meteringEvent 获取的 cache read tokens（Kiro 透传时有值）
     metering_cache_read_tokens: Option<i32>,
-    /// 从 meteringEvent 获取的 cache creation tokens（Kiro 透传时有值）
-    metering_cache_creation_tokens: Option<i32>,
     /// 从 contextUsageEvent 获取的上下文使用百分比（0-100）
     context_usage_percentage: Option<f64>,
-    /// 缓存前缀估算 token 数：system + tools + history[0..n-1] 的本地字符估算。
-    /// cache_read 派生主路径 —— 优先级高于 PromptCacheUsage 模拟兜底。
-    /// `Some(0)` 表示"已估算且无前缀"（首条请求且无 system/tools），cache_read=0；
-    /// `None` 表示"未注入估算"，降级到模拟值。
-    prefix_estimated_tokens: Option<i32>,
-    /// 断点缓存记账（promptCacheAccounting 开启时注入）—— 优先级高于前缀估算
-    cache_accounting: Option<crate::cache::breakpoint::CacheAccounting>,
+    /// 前缀命中观测（收尾时结算一次，见 `crate::cache`）
+    prefix_probe: Option<crate::cache::PrefixProbe>,
     /// 实际发往上游的 effort，随 usage 记录入库
     effort: Option<String>,
     /// 实际生效的 thinking 文本标签预算，随 usage 记录入库
@@ -116,8 +106,6 @@ pub struct StreamContext {
     pub(crate) request_started_at: Option<Instant>,
     /// 首个上游业务事件时刻（keepalive 不计；None = 尚未收到或未注入起点）
     pub(crate) first_token_at: Option<Instant>,
-    /// 会话 conversationId（cache-miss 诊断按会话计算结算间隔与凭据变化）
-    conversation_id: Option<String>,
     /// 上游异常终止判定（handler 逐个喂入事件，流结束时据此决定收尾方式）
     pub(crate) termination: super::UpstreamTermination,
     /// 上游结果回报（限流帧、拒答、异常结束、正常完成），由 handler 注入；None = 不回报（测试）
@@ -163,13 +151,10 @@ impl StreamContext {
             credential_id: None,
             client_ip: None,
             user_agent: None,
-            prompt_cache_usage: PromptCacheUsage::uncached(input_tokens),
             metering_usage: None,
             metering_cache_read_tokens: None,
-            metering_cache_creation_tokens: None,
             context_usage_percentage: None,
-            prefix_estimated_tokens: None,
-            cache_accounting: None,
+            prefix_probe: None,
             effort: None,
             thinking_budget_tokens: None,
             thinking_loss: None,
@@ -178,7 +163,6 @@ impl StreamContext {
             echo_guard: super::echo_guard::ResponseEchoGuard::new(),
             request_started_at: None,
             first_token_at: None,
-            conversation_id: None,
             upstream_feedback: None,
             throttle_reported: false,
             termination: Default::default(),
@@ -191,12 +175,6 @@ impl StreamContext {
         self
     }
 
-    /// 注入会话 conversationId（cache-miss 诊断按会话计算结算间隔与凭据变化）
-    pub fn with_conversation_id(mut self, conversation_id: Option<String>) -> Self {
-        self.conversation_id = conversation_id;
-        self
-    }
-
     /// 标记首个客户端可见 SSE 产出的时刻（幂等：仅首次调用生效；空输出帧与
     /// keepalive 不经过此路径，调用侧按「本帧是否产出非空 SSE 事件」判定）
     pub fn mark_first_token(&mut self) {
@@ -205,25 +183,9 @@ impl StreamContext {
         }
     }
 
-    /// 设置 prompt cache usage
-    pub fn with_prompt_cache_usage(mut self, usage: PromptCacheUsage) -> Self {
-        self.prompt_cache_usage = usage;
-        self
-    }
-
-    /// 设置缓存前缀估算 token 数（system + tools + history[0..n-1] 本地估算）。
-    /// 显式注入后，即使前缀 = 0 也会被选用（cache_read=0，全部计为 new_input）。
-    pub fn with_prefix_estimated_tokens(mut self, prefix: i32) -> Self {
-        self.prefix_estimated_tokens = Some(prefix);
-        self
-    }
-
-    /// 注入断点缓存记账（None 时维持前缀估算路径）
-    pub fn with_cache_accounting(
-        mut self,
-        accounting: Option<crate::cache::breakpoint::CacheAccounting>,
-    ) -> Self {
-        self.cache_accounting = accounting;
+    /// 注入前缀命中观测（None：本次不按前缀估算 cache_read）
+    pub fn with_prefix_probe(mut self, probe: Option<crate::cache::PrefixProbe>) -> Self {
+        self.prefix_probe = probe;
         self
     }
 
@@ -334,20 +296,19 @@ impl StreamContext {
 
     /// 请求以错误结束、未走正常收尾时的 usage 记录（上游未计费时不记，见 [`should_record_usage`]）
     pub(crate) fn record_failed_usage(&self, error: UsageError) {
+        if !should_record_usage(Some(error), self.metering_usage) {
+            return;
+        }
         let final_input_tokens =
             cap_input_tokens(self.input_tokens, self.input_tokens, &self.model);
         let billed_output_tokens = self.output_tokens();
         let billed_output = self.billed_output(billed_output_tokens);
-        // 与正常收尾同口径：creation 取静态口径，read 取 credits 校准值
-        let (_, cache_creation, _) =
-            self.derive_report_cache_usage(final_input_tokens, None, &billed_output);
-        let (_, _, cache_read) =
-            self.derive_report_cache_usage(final_input_tokens, self.metering_usage, &billed_output);
+        // 上游已计费即已处理过这段前缀：与正常收尾同口径结算
+        let cache_read = self.settle_cache_read(final_input_tokens, &billed_output);
         self.record_usage(
             final_input_tokens,
             billed_output_tokens,
-            cache_read,
-            cache_creation,
+            cache_read.tokens,
             Some(error),
         );
     }
@@ -369,67 +330,45 @@ impl StreamContext {
         self
     }
 
-    /// 派生对客户端上报的 (non_cached_input, cache_creation, cache_read)。
+    /// 结算本次请求的 cache_read（客户端 usage 与用量日志同一口径，见 `crate::cache`）。
     ///
-    /// message_start 与末尾 message_delta 必须共用此逻辑：早前两者分别取
-    /// `prompt_cache_usage` 随机模拟值与前缀估算，导致 message_start 报出
-    /// cache_creation > 0 而 message_delta 报 0。客户端按字段取 max 记账，
-    /// 于是每个请求都凭空多出一笔 cache write（实测 2.6k / 会话）。
-    ///
-    /// 优先级：
-    ///   1. Kiro metering 透传 cache_read/creation（实测当前版本不透传，保留兜底；
-    ///      message_start 阶段 metering 事件尚未到达，天然落到 2/3）
-    ///   2. 断点缓存记账 cache_accounting（promptCacheAccounting 开启时）
-    ///   3. 前缀估算混合校准 refine_prefix_cache_read（credits_used 仅传入落库路径）← 主路径
-    ///   4. PromptCacheUsage 模拟值（仅当前缀未注入）
-    ///
-    /// `billed_output` 由调用方传入（BPE 全文编码 O(n)，收尾路径算一次复用，
-    /// 避免重复编码；message_start 阶段传默认值 —— 彼时尚无输出）。
-    pub(crate) fn derive_report_cache_usage(
+    /// 前缀观测会把本次前缀登记到账号上，每个请求只能在收尾时调用一次。
+    fn settle_cache_read(
         &self,
         input_tokens: i32,
-        credits_used: Option<f64>,
         billed_output: &crate::model::usage::BilledOutput,
-    ) -> (i32, i32, i32) {
-        if let (Some(read), Some(creation)) = (
+    ) -> crate::cache::CacheRead {
+        let prefix_read = self
+            .prefix_probe
+            .as_ref()
+            .zip(self.credential_id)
+            .map(|(probe, account)| probe.settle(account, input_tokens));
+        let read = crate::cache::estimate_cache_read(
+            &self.model,
+            input_tokens,
             self.metering_cache_read_tokens,
-            self.metering_cache_creation_tokens,
-        ) {
-            let non_cached = input_tokens.saturating_sub(read).saturating_sub(creation);
-            (non_cached, creation, read)
-        } else if let Some(acc) = &self.cache_accounting {
-            let u = acc.usage_for(input_tokens);
-            (
-                u.input_tokens,
-                u.cache_creation_input_tokens,
-                u.cache_read_input_tokens,
-            )
-        } else if let Some(prefix) = self.prefix_estimated_tokens {
-            let read = crate::model::usage::refine_prefix_cache_read(
-                &self.model,
-                prefix,
-                input_tokens,
-                &self.replayed_reasoning,
-                billed_output,
-                credits_used,
-            );
-            (input_tokens.saturating_sub(read), 0, read)
-        } else {
-            let sim = self.prompt_cache_usage.scale_to(input_tokens);
-            (
-                sim.input_tokens,
-                sim.cache_creation_input_tokens,
-                sim.cache_read_input_tokens,
-            )
-        }
+            self.metering_usage,
+            &self.replayed_reasoning,
+            billed_output,
+            prefix_read,
+        );
+        tracing::info!(
+            model = %self.model,
+            input_tokens,
+            cache_read = read.tokens,
+            source = ?read.source,
+            prefix_read,
+            "[cache] 本次缓存命中估算"
+        );
+        read
     }
 
     /// 生成 message_start 事件
+    ///
+    /// 缓存命中要等 credits 到达后才能估算：这里报完整输入、缓存为 0，终值由 message_delta 给出
+    /// （Claude Code 用 message_delta 里大于 0 的字段覆盖 message_start）。
     pub fn create_message_start_event(&self) -> serde_json::Value {
-        // 与末尾 message_delta 共用派生逻辑，避免 cache_* 口径不一致
         let input = cap_input_tokens(self.input_tokens, self.input_tokens, &self.model);
-        let (non_cached, cache_creation, cache_read) =
-            self.derive_report_cache_usage(input, None, &Default::default());
         json!({
             "type": "message_start",
             "message": {
@@ -441,10 +380,10 @@ impl StreamContext {
                 "stop_reason": null,
                 "stop_sequence": null,
                 "usage": {
-                    "input_tokens": scale_for_client(non_cached, &self.model),
+                    "input_tokens": scale_for_client(input, &self.model),
                     "output_tokens": 1,
-                    "cache_creation_input_tokens": scale_for_client(cache_creation, &self.model),
-                    "cache_read_input_tokens": scale_for_client(cache_read, &self.model)
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
                 }
             }
         })
@@ -492,7 +431,6 @@ impl StreamContext {
                 let prev = self.metering_usage;
                 self.metering_usage = Some(metering.usage);
                 self.metering_cache_read_tokens = metering.cache_read_input_tokens;
-                self.metering_cache_creation_tokens = metering.cache_creation_input_tokens;
                 if let Some(prev_val) = prev {
                     tracing::warn!(
                         "[metering] 同一请求收到第2次 meteringEvent: new={} {} prev={} model={}",
@@ -1077,49 +1015,17 @@ impl StreamContext {
             self.visible_output_tokens()
         };
 
-        // message_delta 与 message_start 共用静态口径；UsageTracker 落库采用 creditsUsed 校准值
+        // 客户端 message_delta 与用量日志同一个 cache_read
         let billed_output = self.billed_output(billed_output_tokens);
-        let (report_input, cache_creation, cache_read) =
-            self.derive_report_cache_usage(final_input_tokens, None, &billed_output);
-        let (_, _, tracked_read) =
-            self.derive_report_cache_usage(final_input_tokens, self.metering_usage, &billed_output);
-        let (report_cache_creation, report_cache_read) = (Some(cache_creation), Some(cache_read));
-
-        // cache-miss 诊断：credits 反推实际生效（metering 真值未透传、无断点账本）
-        // 且命中率低于阈值时输出，量化本次结算并登记会话注册表
-        crate::cache::cache_miss_diag::maybe_log(
-            self.conversation_id.as_deref().unwrap_or(""),
-            &self.model,
-            self.prefix_estimated_tokens.unwrap_or(0),
-            final_input_tokens,
-            &self.replayed_reasoning,
-            &billed_output,
-            self.metering_usage,
-            // 与 derive_report_cache_usage 同口径：read+creation 双 Some 才算完整
-            // metering 真值（任一缺失则反推实际生效，诊断不应被关闭）
-            (self.metering_cache_read_tokens.is_none()
-                || self.metering_cache_creation_tokens.is_none())
-                && self.cache_accounting.is_none()
-                && self.prefix_estimated_tokens.is_some(),
-            self.credential_id.unwrap_or(0),
-            self.request_started_at.unwrap_or_else(Instant::now),
-        );
-
-        // 记录用量（内部记录使用真实值）
+        let cache_read = self
+            .settle_cache_read(final_input_tokens, &billed_output)
+            .tokens;
         self.record_usage(
             final_input_tokens,
             billed_output_tokens,
-            tracked_read,
-            cache_creation,
+            cache_read,
             outcome.usage_error(),
         );
-        // 断点记账：响应已完整产出，提交本请求的缓存写入；5m/1h 按断点 ttl 拆分。
-        // 未开启时 cache_creation 全部归到 5m（与非流式 metering Layer 1 一致）
-        // 本地写入的提交与上报口径解耦：即便本次用 metering 真值上报也要提交，
-        // 否则后续请求回落到本地模拟时（如换到不返回缓存字段的端点）读不到这次的前缀
-        if let Some(acc) = &self.cache_accounting {
-            acc.commit();
-        }
 
         if let Some(error_event) = outcome.error_event() {
             tracing::warn!(
@@ -1131,28 +1037,14 @@ impl StreamContext {
             return (events, outcome);
         }
 
-        let (report_creation_5m, report_creation_1h) = match &self.cache_accounting {
-            Some(acc)
-                if self.metering_cache_read_tokens.is_none()
-                    || self.metering_cache_creation_tokens.is_none() =>
-            {
-                let u = acc.usage_for(final_input_tokens);
-                (
-                    Some(u.cache_creation_5m_input_tokens),
-                    Some(u.cache_creation_1h_input_tokens),
-                )
-            }
-            _ => (report_cache_creation, Some(0)),
-        };
-
         events.extend(self.state_manager.generate_final_events(
-            report_input,
+            final_input_tokens - cache_read,
             reported_output_tokens,
-            report_cache_creation,
-            report_cache_read,
+            Some(0),
+            Some(cache_read),
             self.context_usage_percentage,
-            report_creation_5m,
-            report_creation_1h,
+            Some(0),
+            Some(0),
             &self.model,
         ));
 
@@ -1165,7 +1057,6 @@ impl StreamContext {
         final_input_tokens: i32,
         billed_output_tokens: i32,
         cache_read: i32,
-        cache_creation: i32,
         error: Option<UsageError>,
     ) {
         if !should_record_usage(error, self.metering_usage) {
@@ -1184,7 +1075,7 @@ impl StreamContext {
                 if denom > 0.0 { c / denom * 1000.0 } else { 0.0 }
             });
             tracing::info!(
-                "[usage] 入库: model={} input={} output={} metering_credits={:?} credits_per_ktok={:?} effective_rate={:?} cache_read={:?} cache_creation={:?} api_key={} credential={:?}",
+                "[usage] 入库: model={} input={} output={} metering_credits={:?} credits_per_ktok={:?} effective_rate={:?} cache_read={} api_key={} credential={:?}",
                 self.model,
                 final_input_tokens,
                 billed_output_tokens,
@@ -1192,7 +1083,6 @@ impl StreamContext {
                 credits_per_ktok,
                 effective_rate,
                 cache_read,
-                cache_creation,
                 key_id,
                 self.credential_id
             );
@@ -1219,7 +1109,7 @@ impl StreamContext {
                     client_ip: self.client_ip.clone(),
                     credits_used: self.metering_usage,
                     cache_read_input_tokens: Some(cache_read),
-                    cache_creation_input_tokens: Some(cache_creation),
+                    cache_creation_input_tokens: Some(0),
                     effort: self.effort.clone(),
                     thinking_budget_tokens: self.thinking_budget_tokens,
                     first_token_ms,
