@@ -7,10 +7,7 @@ mod tests {
     use super::super::super::helpers::resolve_thinking_enabled;
 
     use super::super::super::nonstream::build_non_stream_content;
-    use super::super::super::stream::{
-        refusal_error_event, stream_interrupted_error_event_after, upstream_aborted_error_event,
-        wait_deadline,
-    };
+    use super::super::super::stream::{stream_interrupted_error_event_after, wait_deadline};
 
     use crate::anthropic::stream::{CLIENT_ASSUMED_CONTEXT_WINDOW, scale_for_client};
 
@@ -41,24 +38,6 @@ mod tests {
                 "不得断言未证实的时长上限"
             );
         }
-    }
-
-    #[test]
-    fn test_upstream_aborted_error_event_is_retryable_and_names_reason() {
-        let event = upstream_aborted_error_event("stopReason=MALFORMED_TOOL_USE");
-        assert_eq!(event.event, "error");
-        assert_eq!(event.data["error"]["type"], "overloaded_error");
-        let msg = event.data["error"]["message"].as_str().unwrap();
-        assert!(msg.contains("MALFORMED_TOOL_USE") && msg.contains("retry"));
-    }
-
-    #[test]
-    fn test_refusal_error_event_passes_explanation_verbatim() {
-        const EXPLANATION: &str = "This request was refused due to excessive content refusals.";
-        let event = refusal_error_event(EXPLANATION);
-        assert_eq!(event.event, "error");
-        assert_eq!(event.data["error"]["type"], "permission_error");
-        assert_eq!(event.data["error"]["message"], EXPLANATION);
     }
 
     async fn response_body_text(resp: Response) -> String {

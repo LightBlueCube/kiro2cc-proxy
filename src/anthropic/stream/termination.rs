@@ -22,10 +22,19 @@ pub(crate) const CONTENT_LENGTH_EXCEEDED_EXCEPTION: &str = "ContentLengthExceede
 /// 流中途限流：响应头已是 200，限流只能以流内 exception / error 帧下发
 const THROTTLING_EXCEPTION: &str = "ThrottlingException";
 
+/// 异常终止的首个致命信号
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Abort {
+    /// 日志与错误文案用
+    pub(crate) reason: String,
+    /// 是否计入账号健康度：流内 error / exception 帧（限流帧另按限流计）与流截断计入；
+    /// MALFORMED_*、工具调用丢失等多半是模型输出的问题，不计
+    pub(crate) account_fault: bool,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct UpstreamTermination {
-    /// 首个致命信号（日志与错误文案用）
-    fatal: Option<String>,
+    fatal: Option<Abort>,
     /// 收到限流帧时的帧内文案（未收到为 None），供回报上游限流
     throttle_message: Option<String>,
     /// 最后一次带 stopReason 的 metadataEvent 是否为 TOOL_USE
@@ -49,7 +58,7 @@ impl UpstreamTermination {
                 tracing::debug!(stop_reason = raw, "[metadata] 上游 stopReason");
                 self.claimed_tool_use = stop == UpstreamStop::ToolUse;
                 if stop == UpstreamStop::Malformed {
-                    self.mark_fatal(format!("stopReason={raw}"));
+                    self.mark_fatal(format!("stopReason={raw}"), false);
                 }
                 if stop == UpstreamStop::ContentFiltered {
                     let details = metadata.refusal_details();
@@ -65,16 +74,12 @@ impl UpstreamTermination {
             Event::Error {
                 error_code,
                 error_message,
-            } => {
-                self.note_throttle(error_code, error_message);
-                self.mark_fatal(error_code.clone())
-            }
+            } => self.observe_error_frame(error_code, error_message),
             Event::Exception {
                 exception_type,
                 message,
             } if exception_type != CONTENT_LENGTH_EXCEEDED_EXCEPTION => {
-                self.note_throttle(exception_type, message);
-                self.mark_fatal(exception_type.clone())
+                self.observe_error_frame(exception_type, message)
             }
             _ => {}
         }
@@ -85,17 +90,20 @@ impl UpstreamTermination {
         self.throttle_message.as_deref()
     }
 
-    fn note_throttle(&mut self, kind: &str, message: &str) {
-        if kind == THROTTLING_EXCEPTION && self.throttle_message.is_none() {
+    /// 流内 error / exception 帧：限流帧按限流回报，不再计入异常（避免同一帧记两次）
+    fn observe_error_frame(&mut self, kind: &str, message: &str) {
+        let throttled = kind == THROTTLING_EXCEPTION;
+        if throttled && self.throttle_message.is_none() {
             self.throttle_message = Some(format!("{kind}: {message}"));
         }
+        self.mark_fatal(kind, !throttled);
     }
 
     /// 事件帧解析失败：toolUseEvent 丢失即工具调用被吞，按致命处理；其余仅记录
     pub(crate) fn observe_parse_failure(&mut self, tool_use_frame: bool, err: &ParseError) {
         tracing::warn!(tool_use_frame, "事件帧解析失败，帧内容被丢弃: {}", err);
         if tool_use_frame {
-            self.mark_fatal("malformed toolUseEvent");
+            self.mark_fatal("malformed toolUseEvent", false);
         }
     }
 
@@ -105,7 +113,7 @@ impl UpstreamTermination {
             err,
             ParseError::TooManyErrors { .. } | ParseError::BufferOverflow { .. }
         ) {
-            self.mark_fatal("event stream decoding failed");
+            self.mark_fatal("event stream decoding failed", true);
         }
     }
 
@@ -113,7 +121,7 @@ impl UpstreamTermination {
     pub(crate) fn observe_eof(&mut self, residual_bytes: usize) {
         if residual_bytes > 0 {
             tracing::warn!(residual_bytes, "上游流结束时残留未完成的帧");
-            self.mark_fatal("stream ended mid-frame");
+            self.mark_fatal("stream ended mid-frame", true);
         }
     }
 
@@ -122,36 +130,40 @@ impl UpstreamTermination {
         self.refusal.as_deref()
     }
 
-    /// 异常终止原因；None 表示可以正常收尾
-    pub(crate) fn failure(&self) -> Option<String> {
-        if let Some(reason) = &self.fatal {
-            return Some(reason.clone());
+    /// 异常终止；None 表示可以正常收尾
+    pub(crate) fn failure(&self) -> Option<Abort> {
+        if let Some(abort) = &self.fatal {
+            return Some(abort.clone());
         }
         let tool_use_lost = self.claimed_tool_use && !self.saw_tool_use;
-        tool_use_lost.then(|| "stopReason=TOOL_USE without toolUseEvent".to_string())
+        tool_use_lost.then(|| Abort {
+            reason: "stopReason=TOOL_USE without toolUseEvent".to_string(),
+            account_fault: false,
+        })
     }
 
-    fn mark_fatal(&mut self, reason: impl Into<String>) {
+    fn mark_fatal(&mut self, reason: impl Into<String>, account_fault: bool) {
         if self.fatal.is_none() {
-            self.fatal = Some(reason.into());
+            self.fatal = Some(Abort {
+                reason: reason.into(),
+                account_fault,
+            });
         }
     }
 }
-
-/// 异常终止时返回给客户端的错误文案（流式 error 事件与非流式响应共用）
-pub(crate) fn upstream_aborted_message(reason: &str) -> String {
-    format!("Upstream aborted the response before it finished ({reason}). Please retry.")
-}
-
-/// 上游在 thinking 之后无 stopReason 地结束、没有正文也没有工具调用时的错误文案
-/// （流式 error 事件与非流式响应共用）
-pub(crate) const THINKING_ONLY_TRUNCATED_MESSAGE: &str =
-    "Upstream stopped after the thinking block without producing a reply. Please retry.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kiro::model::events::{MetadataEvent, ToolUseEvent};
+
+    fn reason(t: &UpstreamTermination) -> Option<String> {
+        t.failure().map(|abort| abort.reason)
+    }
+
+    fn account_fault(t: &UpstreamTermination) -> bool {
+        t.failure().is_some_and(|abort| abort.account_fault)
+    }
 
     fn metadata(stop_reason: &str) -> Event {
         Event::Metadata(MetadataEvent {
@@ -187,33 +199,37 @@ mod tests {
     fn test_tool_use_claimed_without_event_is_failure() {
         let mut t = UpstreamTermination::default();
         t.observe_event(&metadata("TOOL_USE"));
-        assert!(t.failure().unwrap().contains("TOOL_USE"));
+        assert!(reason(&t).unwrap().contains("TOOL_USE"));
+        assert!(!account_fault(&t), "工具调用丢失不计入账号");
     }
 
     #[test]
     fn test_malformed_and_error_frames_are_failures() {
         let mut t = UpstreamTermination::default();
         t.observe_event(&metadata("MALFORMED_TOOL_USE"));
-        assert_eq!(
-            t.failure().as_deref(),
-            Some("stopReason=MALFORMED_TOOL_USE")
-        );
+        assert_eq!(reason(&t).as_deref(), Some("stopReason=MALFORMED_TOOL_USE"));
+        assert!(!account_fault(&t), "MALFORMED_* 不计入账号");
         // 致命信号只记首个
         t.observe_event(&Event::Error {
             error_code: "InternalServerError".to_string(),
             error_message: String::new(),
         });
-        assert_eq!(
-            t.failure().as_deref(),
-            Some("stopReason=MALFORMED_TOOL_USE")
-        );
+        assert_eq!(reason(&t).as_deref(), Some("stopReason=MALFORMED_TOOL_USE"));
+
+        let mut t = UpstreamTermination::default();
+        t.observe_event(&Event::Error {
+            error_code: "InternalServerError".to_string(),
+            error_message: String::new(),
+        });
+        assert!(account_fault(&t), "流内错误帧计入账号");
 
         let mut t = UpstreamTermination::default();
         t.observe_event(&Event::Exception {
             exception_type: "ThrottlingException".to_string(),
             message: "slow down".to_string(),
         });
-        assert_eq!(t.failure().as_deref(), Some("ThrottlingException"));
+        assert_eq!(reason(&t).as_deref(), Some("ThrottlingException"));
+        assert!(!account_fault(&t), "限流帧已按限流计，不再计入异常");
         assert_eq!(t.throttle_message(), Some("ThrottlingException: slow down"));
     }
 
@@ -231,7 +247,7 @@ mod tests {
             error_code: "ThrottlingException".to_string(),
             error_message: "rate".to_string(),
         });
-        assert_eq!(t.failure().as_deref(), Some("InternalServerError"));
+        assert_eq!(reason(&t).as_deref(), Some("InternalServerError"));
         assert_eq!(t.throttle_message(), Some("ThrottlingException: rate"));
     }
 
@@ -275,17 +291,19 @@ mod tests {
         assert_eq!(t.failure(), None, "可恢复的单帧错误不判为异常终止");
 
         t.observe_parse_failure(true, &parse_err());
-        assert_eq!(t.failure().as_deref(), Some("malformed toolUseEvent"));
+        assert_eq!(reason(&t).as_deref(), Some("malformed toolUseEvent"));
+        assert!(!account_fault(&t));
 
         let mut t = UpstreamTermination::default();
         t.observe_decode_error(&ParseError::TooManyErrors {
             count: 5,
             last_error: String::new(),
         });
-        assert!(t.failure().is_some());
+        assert!(account_fault(&t), "解码中断属于截断，计入账号");
 
         let mut t = UpstreamTermination::default();
         t.observe_eof(7);
-        assert_eq!(t.failure().as_deref(), Some("stream ended mid-frame"));
+        assert_eq!(reason(&t).as_deref(), Some("stream ended mid-frame"));
+        assert!(account_fault(&t), "半帧截断计入账号");
     }
 }

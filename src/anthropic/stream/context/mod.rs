@@ -8,7 +8,9 @@ use uuid::Uuid;
 
 use crate::cache::PromptCacheUsage;
 use crate::kiro::model::events::{Event, UpstreamStop};
-use crate::model::usage::UsageTracker;
+use crate::model::usage::{UsageError, UsageTracker};
+
+use super::outcome::{ResponseOutcome, should_record_usage};
 
 use super::calib::{cap_input_tokens, scale_for_client};
 use super::state::{SseEvent, SseStateManager};
@@ -20,20 +22,6 @@ use super::thinking::{
 mod metrics;
 mod native;
 mod tool_use;
-
-/// thinking 之后被截断时的 error 事件：overloaded_error 保持客户端可重试语义
-fn thinking_only_truncated_error_event() -> SseEvent {
-    SseEvent::new(
-        "error",
-        json!({
-            "type": "error",
-            "error": {
-                "type": "overloaded_error",
-                "message": super::THINKING_ONLY_TRUNCATED_MESSAGE
-            }
-        }),
-    )
-}
 
 /// 流处理上下文
 pub struct StreamContext {
@@ -132,7 +120,7 @@ pub struct StreamContext {
     conversation_id: Option<String>,
     /// 上游异常终止判定（handler 逐个喂入事件，流结束时据此决定收尾方式）
     pub(crate) termination: super::UpstreamTermination,
-    /// 上游结果回报（限流帧、空响应、正常完成），由 handler 注入；None = 不回报（测试）
+    /// 上游结果回报（限流帧、拒答、异常结束、正常完成），由 handler 注入；None = 不回报（测试）
     upstream_feedback: Option<crate::kiro::provider::UpstreamFeedback>,
     /// 限流帧已回报过
     throttle_reported: bool,
@@ -289,7 +277,7 @@ impl StreamContext {
         self
     }
 
-    /// 设置上游结果的回报对象（限流帧、空响应、正常完成）
+    /// 设置上游结果的回报对象（限流帧、拒答、异常结束、正常完成）
     pub fn with_upstream_feedback(
         mut self,
         feedback: crate::kiro::provider::UpstreamFeedback,
@@ -312,29 +300,56 @@ impl StreamContext {
         self.throttle_reported = true;
     }
 
-    /// 上游流读到 EOF 后回报结果（须在 `termination.observe_eof` 之后调用）
+    /// 上游流读到 EOF：判定结局、回报账号并产出收尾事件（须在 `termination.observe_eof` 之后调用）
     ///
-    /// 拒答回报给该账号的该模型；异常终止不回报（其中的限流帧已由
-    /// [`Self::report_upstream_throttle`] 回报）；空响应计入健康度，上下文过大导致的除外
-    /// （换账号也一样）；其余视为正常完成。
-    pub(crate) fn report_upstream_outcome_at_eof(&self) {
-        let Some(feedback) = &self.upstream_feedback else {
-            return;
+    /// 出错的结局只发 error 事件，不伪装成正常收尾；口径见 [`ResponseOutcome`]。
+    pub(crate) fn finish_at_eof(&mut self) -> Vec<SseEvent> {
+        let failed = ResponseOutcome::before_content(
+            &self.termination,
+            self.is_empty_response(),
+            self.empty_response_is_oversized_context(),
+        );
+        let (events, outcome) = match failed {
+            Some(outcome) => {
+                tracing::warn!(
+                    outcome = ?outcome,
+                    est_input_tokens = self.input_tokens,
+                    "上游响应以错误结束，补发 error 事件"
+                );
+                if let Some(error) = outcome.usage_error() {
+                    self.record_failed_usage(error);
+                }
+                (outcome.error_event().into_iter().collect(), outcome)
+            }
+            None => {
+                let (events, outcome) = self.generate_final_events_raw();
+                (self.render_outbound(events), outcome)
+            }
         };
-        if let Some(message) = self.termination.refusal() {
-            feedback.refused(message);
-            return;
+        if let Some(feedback) = &self.upstream_feedback {
+            outcome.report(feedback);
         }
-        if self.termination.failure().is_some() {
-            return;
-        }
-        if !self.is_empty_response() {
-            feedback.completed();
-            return;
-        }
-        if !self.empty_response_is_oversized_context() {
-            feedback.empty_response();
-        }
+        events
+    }
+
+    /// 请求以错误结束、未走正常收尾时的 usage 记录（上游未计费时不记，见 [`should_record_usage`]）
+    pub(crate) fn record_failed_usage(&self, error: UsageError) {
+        let final_input_tokens =
+            cap_input_tokens(self.input_tokens, self.input_tokens, &self.model);
+        let billed_output_tokens = self.output_tokens();
+        let billed_output = self.billed_output(billed_output_tokens);
+        // 与正常收尾同口径：creation 取静态口径，read 取 credits 校准值
+        let (_, cache_creation, _) =
+            self.derive_report_cache_usage(final_input_tokens, None, &billed_output);
+        let (_, _, cache_read) =
+            self.derive_report_cache_usage(final_input_tokens, self.metering_usage, &billed_output);
+        self.record_usage(
+            final_input_tokens,
+            billed_output_tokens,
+            cache_read,
+            cache_creation,
+            Some(error),
+        );
     }
 
     /// 设置用量追踪
@@ -941,12 +956,14 @@ impl StreamContext {
     }
 
     /// 生成最终事件序列
+    #[cfg(test)]
     pub fn generate_final_events(&mut self) -> Vec<SseEvent> {
-        let events = self.generate_final_events_raw();
+        let (events, _) = self.generate_final_events_raw();
         self.render_outbound(events)
     }
 
-    fn generate_final_events_raw(&mut self) -> Vec<SseEvent> {
+    /// 组装收尾事件并给出结局：Completed，或只有 thinking 就被截断（ThinkingOnlyTruncated）
+    fn generate_final_events_raw(&mut self) -> (Vec<SseEvent>, ResponseOutcome) {
         let mut events = self.finish_native_thinking();
 
         // Flush thinking_buffer 中的剩余内容
@@ -1026,6 +1043,11 @@ impl StreamContext {
         if thinking_only && !truncated_after_thinking {
             events.extend(self.create_text_delta_events(" "));
         }
+        let outcome = if truncated_after_thinking {
+            ResponseOutcome::ThinkingOnlyTruncated
+        } else {
+            ResponseOutcome::Completed
+        };
 
         // contextUsage 本地化：input_tokens 来源改为 metering 真值 → 本地估算（self.input_tokens）
         // self.context_input_tokens 已弃用（始终为 None），保留诊断字段
@@ -1062,7 +1084,6 @@ impl StreamContext {
         let (_, _, tracked_read) =
             self.derive_report_cache_usage(final_input_tokens, self.metering_usage, &billed_output);
         let (report_cache_creation, report_cache_read) = (Some(cache_creation), Some(cache_read));
-        let tracked_cache_read = Some(tracked_read);
 
         // cache-miss 诊断：credits 反推实际生效（metering 真值未透传、无断点账本）
         // 且命中率低于阈值时输出，量化本次结算并登记会话注册表
@@ -1085,67 +1106,13 @@ impl StreamContext {
         );
 
         // 记录用量（内部记录使用真实值）
-        if let (Some(tracker), Some(key_id)) = (&self.usage_tracker, self.api_key_id) {
-            let credits_per_ktok = self.metering_usage.map(|c| {
-                if final_input_tokens > 0 {
-                    c / (final_input_tokens as f64) * 1000.0
-                } else {
-                    0.0
-                }
-            });
-            let effective_rate = self.metering_usage.map(|c| {
-                let denom = final_input_tokens as f64 + 5.0 * billed_output_tokens as f64;
-                if denom > 0.0 { c / denom * 1000.0 } else { 0.0 }
-            });
-            tracing::info!(
-                "[usage] 入库: model={} input={} output={} metering_credits={:?} credits_per_ktok={:?} effective_rate={:?} cache_read={:?} cache_creation={:?} api_key={} credential={:?}",
-                self.model,
-                final_input_tokens,
-                billed_output_tokens,
-                self.metering_usage,
-                credits_per_ktok,
-                effective_rate,
-                tracked_cache_read,
-                report_cache_creation,
-                key_id,
-                self.credential_id
-            );
-            // 计时口径：first_token_ms = 起点 → 首个客户端可见 SSE 产出（空输出帧
-            // 与 keepalive 不计）；duration_ms = 起点 → 落库前。
-            // 起点未注入（None）时二者均不计（等价旧数据）
-            let (first_token_ms, duration_ms) = match self.request_started_at {
-                Some(started) => (
-                    self.first_token_at
-                        .map(|t| (t - started).as_millis() as u64),
-                    Some((Instant::now() - started).as_millis() as u64),
-                ),
-                None => (None, None),
-            };
-            // 无 thinking 时落 None，与「None = 未产生思考」语义统一（非流式同口径）
-            let thinking_tokens = self.thinking_token_count();
-            tracker.record(
-                key_id,
-                self.model.clone(),
-                final_input_tokens,
-                billed_output_tokens,
-                crate::model::usage::RecordOptions {
-                    credential_id: self.credential_id,
-                    client_ip: self.client_ip.clone(),
-                    credits_used: self.metering_usage,
-                    cache_read_input_tokens: tracked_cache_read,
-                    cache_creation_input_tokens: report_cache_creation,
-                    effort: self.effort.clone(),
-                    thinking_budget_tokens: self.thinking_budget_tokens,
-                    first_token_ms,
-                    duration_ms,
-                    thinking_token_count: (thinking_tokens > 0).then_some(thinking_tokens),
-                    is_stream: Some(true),
-                    user_agent: self.user_agent.clone(),
-                    thinking_loss: self.thinking_loss,
-                    api_format: self.api_format,
-                },
-            );
-        }
+        self.record_usage(
+            final_input_tokens,
+            billed_output_tokens,
+            tracked_read,
+            cache_creation,
+            outcome.usage_error(),
+        );
         // 断点记账：响应已完整产出，提交本请求的缓存写入；5m/1h 按断点 ttl 拆分。
         // 未开启时 cache_creation 全部归到 5m（与非流式 metering Layer 1 一致）
         // 本地写入的提交与上报口径解耦：即便本次用 metering 真值上报也要提交，
@@ -1154,17 +1121,14 @@ impl StreamContext {
             acc.commit();
         }
 
-        if truncated_after_thinking {
+        if let Some(error_event) = outcome.error_event() {
             tracing::warn!(
                 model = %self.model,
                 est_input_tokens = final_input_tokens,
                 "上游在 thinking 之后无理由结束（无正文、无工具调用），补发 error 事件"
             );
-            events.extend(
-                self.state_manager
-                    .generate_error_final_events(thinking_only_truncated_error_event()),
-            );
-            return events;
+            events.extend(self.state_manager.generate_error_final_events(error_event));
+            return (events, outcome);
         }
 
         let (report_creation_5m, report_creation_1h) = match &self.cache_accounting {
@@ -1192,6 +1156,82 @@ impl StreamContext {
             &self.model,
         ));
 
-        events
+        (events, outcome)
+    }
+
+    /// 写入 usage 记录（`error` 为 Some 时仅在上游计费后才记，见 [`should_record_usage`]）
+    fn record_usage(
+        &self,
+        final_input_tokens: i32,
+        billed_output_tokens: i32,
+        cache_read: i32,
+        cache_creation: i32,
+        error: Option<UsageError>,
+    ) {
+        if !should_record_usage(error, self.metering_usage) {
+            return;
+        }
+        if let (Some(tracker), Some(key_id)) = (&self.usage_tracker, self.api_key_id) {
+            let credits_per_ktok = self.metering_usage.map(|c| {
+                if final_input_tokens > 0 {
+                    c / (final_input_tokens as f64) * 1000.0
+                } else {
+                    0.0
+                }
+            });
+            let effective_rate = self.metering_usage.map(|c| {
+                let denom = final_input_tokens as f64 + 5.0 * billed_output_tokens as f64;
+                if denom > 0.0 { c / denom * 1000.0 } else { 0.0 }
+            });
+            tracing::info!(
+                "[usage] 入库: model={} input={} output={} metering_credits={:?} credits_per_ktok={:?} effective_rate={:?} cache_read={:?} cache_creation={:?} api_key={} credential={:?}",
+                self.model,
+                final_input_tokens,
+                billed_output_tokens,
+                self.metering_usage,
+                credits_per_ktok,
+                effective_rate,
+                cache_read,
+                cache_creation,
+                key_id,
+                self.credential_id
+            );
+            // 计时口径：first_token_ms = 起点 → 首个客户端可见 SSE 产出（空输出帧
+            // 与 keepalive 不计）；duration_ms = 起点 → 落库前。
+            // 起点未注入（None）时二者均不计（等价旧数据）
+            let (first_token_ms, duration_ms) = match self.request_started_at {
+                Some(started) => (
+                    self.first_token_at
+                        .map(|t| (t - started).as_millis() as u64),
+                    Some((Instant::now() - started).as_millis() as u64),
+                ),
+                None => (None, None),
+            };
+            // 无 thinking 时落 None，与「None = 未产生思考」语义统一（非流式同口径）
+            let thinking_tokens = self.thinking_token_count();
+            tracker.record(
+                key_id,
+                self.model.clone(),
+                final_input_tokens,
+                billed_output_tokens,
+                crate::model::usage::RecordOptions {
+                    credential_id: self.credential_id,
+                    client_ip: self.client_ip.clone(),
+                    credits_used: self.metering_usage,
+                    cache_read_input_tokens: Some(cache_read),
+                    cache_creation_input_tokens: Some(cache_creation),
+                    effort: self.effort.clone(),
+                    thinking_budget_tokens: self.thinking_budget_tokens,
+                    first_token_ms,
+                    duration_ms,
+                    thinking_token_count: (thinking_tokens > 0).then_some(thinking_tokens),
+                    is_stream: Some(true),
+                    user_agent: self.user_agent.clone(),
+                    thinking_loss: self.thinking_loss,
+                    api_format: self.api_format,
+                    error,
+                },
+            );
+        }
     }
 }

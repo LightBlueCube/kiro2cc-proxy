@@ -40,16 +40,20 @@ impl UpstreamFeedback {
         self.provider.report_stream_throttled(&self.route, message);
     }
 
-    /// 200 响应正常结束但没有任何内容（调用方已排除上下文过大导致的空响应）
-    pub fn empty_response(&self) {
+    /// 200 响应异常结束（空响应、流内错误帧或截断、thinking 后无正文结束；参数为面板展示的说明）
+    ///
+    /// 调用方已排除不怪账号的情形（上下文过大导致的空响应、模型输出问题导致的中止）
+    pub fn abnormal(&self, detail: &str) {
         tracing::warn!(
             credential_id = self.route.credential_id,
             endpoint = self.route.endpoint.as_str(),
-            "上游空响应，计入账号健康度"
+            detail,
+            "上游响应异常结束，计入账号健康度"
         );
-        self.provider
-            .token_manager
-            .report_empty_response(self.route.credential_id);
+        self.provider.token_manager.report_abnormal_response(
+            self.route.credential_id,
+            crate::kiro::token_manager::AccountError::new(None, detail),
+        );
     }
 
     /// 响应正常结束且有内容

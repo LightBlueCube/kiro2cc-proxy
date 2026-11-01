@@ -375,7 +375,7 @@ impl MultiTokenManager {
         let unhealthy = Self::compute_health_at(entry, now) == HealthStatus::Unhealthy;
         HealthDetail {
             recent_throttle_count: recent.throttled,
-            recent_empty_response_count: recent.empty_responses,
+            recent_abnormal_count: recent.abnormal,
             consecutive_failures: failures.consecutive(now),
             cooldown_remaining_secs: unhealthy
                 .then(|| failures.cooldown_remaining(now))

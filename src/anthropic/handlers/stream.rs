@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 //! 流式请求处理：handle_stream_request 建立 SSE 通道并驱动 Kiro 事件到客户端的转发，wait_deadline 处理全局超时。
 
-use crate::anthropic::stream::{SseEvent, StreamContext, upstream_aborted_message};
+use crate::anthropic::stream::{SseEvent, StreamContext};
+use crate::model::usage::UsageError;
 
 use std::convert::Infallible;
 
@@ -298,35 +299,7 @@ pub(crate) fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
 
-/// 小输入空响应的错误文案（流式 SSE error 事件与非流式错误响应共用）
-pub(super) const EMPTY_RESPONSE_RETRY_MESSAGE: &str =
-    "Upstream returned an empty response. Please retry.";
-
-/// 为上游空响应构造合适的 SSE error 事件。
-///
-/// - 大输入（疑似上下文过大）：返回 invalid_request_error，提示压缩上下文，
-///   不鼓励原样重试（重试还是同样的大请求，仍会空）。
-/// - 小输入（疑似偶发）：返回 overloaded_error，客户端可重试。
-fn empty_response_error_event(oversized_context: bool) -> SseEvent {
-    let (err_type, message) = if oversized_context {
-        (
-            "invalid_request_error",
-            "Upstream returned an empty response, likely because the context is too large. \
-             Reduce conversation history (e.g. /compact), system prompt, or tools, then retry.",
-        )
-    } else {
-        ("overloaded_error", EMPTY_RESPONSE_RETRY_MESSAGE)
-    };
-    SseEvent::new(
-        "error",
-        serde_json::json!({
-            "type": "error",
-            "error": { "type": err_type, "message": message }
-        }),
-    )
-}
-
-/// 上游读流出现传输层错误（解码失败/连接中断/超时）且已产生部分内容时的 error 事件。
+/// 上游读流出现传输层错误（解码失败/连接中断/超时）时的 error 事件。
 ///
 /// `Err` 只可能来自传输层异常——正常完成只通过 `None`（EOF）传达，见
 /// `StreamContext::is_empty_response` 文档。因此哪怕此前已经产生了部分内容（thinking/text/
@@ -353,37 +326,6 @@ pub(crate) fn stream_interrupted_error_event_after(elapsed: Duration) -> SseEven
                     "Upstream connection was interrupted before the response finished \
                      (after {secs}s). Please retry."
                 )
-            }
-        }),
-    )
-}
-
-/// 上游拒答时的 error 事件：说明原文直接作为 message
-///
-/// 用 permission_error（不可重试）：拒答多与内容有关，客户端自动重试会把同一请求轮番发到
-/// 其它账号，可能连累它们也被上游限制。
-pub(crate) fn refusal_error_event(message: &str) -> SseEvent {
-    SseEvent::new(
-        "error",
-        serde_json::json!({
-            "type": "error",
-            "error": { "type": REFUSAL_ERROR_TYPE, "message": message }
-        }),
-    )
-}
-
-/// 上游拒答返回给客户端的错误类型（流式与非流式共用）
-pub(super) const REFUSAL_ERROR_TYPE: &str = "permission_error";
-
-/// 上游异常终止（见 `UpstreamTermination`）时的 error 事件：overloaded_error 保持可重试语义
-pub(crate) fn upstream_aborted_error_event(reason: &str) -> SseEvent {
-    SseEvent::new(
-        "error",
-        serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": "overloaded_error",
-                "message": upstream_aborted_message(reason)
             }
         }),
     )
@@ -497,61 +439,22 @@ fn create_sse_stream(
                                 stream_elapsed_secs = stream_started_at.elapsed().as_secs(),
                                 "读取响应流失败"
                             );
-                            let final_events = if ctx.is_empty_response() {
-                                let oversized = ctx.empty_response_is_oversized_context();
-                                tracing::warn!(
-                                    oversized_context = oversized,
-                                    est_input_tokens = ctx.input_tokens,
-                                    "流解码错误且无内容，补发 error 事件"
-                                );
-                                if oversized {
-                                    ctx.generate_final_events()
-                                } else {
-                                    vec![empty_response_error_event(false)]
-                                }
-                            } else {
-                                let elapsed = stream_started_at.elapsed();
-                                tracing::warn!(
-                                    est_input_tokens = ctx.input_tokens,
-                                    stream_elapsed_secs = elapsed.as_secs(),
-                                    "流读取错误但已产生部分内容，补发 error 事件防止伪装成正常完成"
-                                );
-                                vec![stream_interrupted_error_event_after(elapsed)]
-                            };
-                            let bytes: Vec<Result<Bytes, Infallible>> = final_events
-                                .into_iter()
-                                .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                .collect();
+                            // 不论是否已有内容都按连接中断报错：传输层异常不计入账号健康度
+                            let elapsed = stream_started_at.elapsed();
+                            tracing::warn!(
+                                est_input_tokens = ctx.input_tokens,
+                                stream_elapsed_secs = elapsed.as_secs(),
+                                "流读取错误，补发 error 事件防止伪装成正常完成"
+                            );
+                            ctx.record_failed_usage(UsageError::Interrupted);
+                            let event = stream_interrupted_error_event_after(elapsed);
+                            let bytes: Vec<Result<Bytes, Infallible>> =
+                                vec![Ok(Bytes::from(event.to_sse_string()))];
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, deadline)))
                         }
                         None => {
                             ctx.termination.observe_eof(decoder.buffer_len());
-                            ctx.report_upstream_outcome_at_eof();
-                            let mut out_events = Vec::new();
-                            if let Some(message) = ctx.termination.refusal() {
-                                out_events.push(refusal_error_event(message));
-                            } else if let Some(reason) = ctx.termination.failure() {
-                                tracing::warn!(
-                                    reason = %reason,
-                                    est_input_tokens = ctx.input_tokens,
-                                    "上游异常终止，补发 error 事件防止伪装成正常完成"
-                                );
-                                out_events.push(upstream_aborted_error_event(&reason));
-                            } else if ctx.is_empty_response() {
-                                let oversized = ctx.empty_response_is_oversized_context();
-                                tracing::warn!(
-                                    oversized_context = oversized,
-                                    est_input_tokens = ctx.input_tokens,
-                                    "上游返回空响应（无任何内容事件），补发 error 事件"
-                                );
-                                if oversized {
-                                    out_events = ctx.generate_final_events();
-                                } else {
-                                    out_events.push(empty_response_error_event(false));
-                                }
-                            } else {
-                                out_events = ctx.generate_final_events();
-                            }
+                            let out_events = ctx.finish_at_eof();
                             let bytes: Vec<Result<Bytes, Infallible>> = out_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))

@@ -612,6 +612,7 @@ mod tests {
             user_agent: user_agent.map(str::to_string),
             thinking_loss: None,
             api_format: None,
+            error: None,
         });
     }
 

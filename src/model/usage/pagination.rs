@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::{ApiFormat, ThinkingLoss, UsageRecord, UsageTracker, get_k_ref};
+use super::{ApiFormat, ThinkingLoss, UsageError, UsageRecord, UsageTracker, get_k_ref};
 
 impl UsageTracker {
     /// 分页查询指定 API Key 的原始请求记录（按 created_at 降序）
@@ -154,6 +154,9 @@ pub struct UsageRecordItem {
     /// 客户端请求所用的 API 格式（None 表示旧数据）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_format: Option<ApiFormat>,
+    /// 请求以错误结束（None 表示正常完成或旧数据）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<UsageError>,
 }
 
 impl UsageTracker {
@@ -253,6 +256,7 @@ impl UsageRecordItem {
             user_agent: r.user_agent,
             thinking_loss: r.thinking_loss,
             api_format: r.api_format,
+            error: r.error,
         }
     }
 }

@@ -1,4 +1,4 @@
-//! 账号近期的上游失败（限流、空响应）：最近 10 分钟的分钟级计数与连续失败次数，健康度据此判定。
+//! 账号近期的上游失败（限流、异常结束）：最近 10 分钟的分钟级计数与连续失败次数，健康度据此判定。
 //!
 //! 只记上游失败，不看成功次数：长期成功的历史不应稀释眼前的限流。连续失败由一次完整的
 //! 正常响应中断（[`UpstreamFailures::end_streak`]）。仅存内存，重启后清空。
@@ -12,11 +12,11 @@ const SECS_PER_MINUTE: u64 = 60;
 /// 连续失败达到此数（且在冷却期内）判为不健康
 pub(crate) const UNHEALTHY_CONSECUTIVE: u32 = 3;
 /// 窗口内失败达到此数（且在冷却期内）判为不健康
-pub(crate) const UNHEALTHY_RECENT: u32 = 10;
+pub(crate) const UNHEALTHY_RECENT: u32 = 20;
 /// 连续失败达到此数判为降级
 pub(crate) const DEGRADED_CONSECUTIVE: u32 = 2;
 /// 窗口内失败达到此数判为降级
-pub(crate) const DEGRADED_RECENT: u32 = 5;
+pub(crate) const DEGRADED_RECENT: u32 = 10;
 /// 窗口内失败达到此数判为警告
 pub(crate) const WARNING_RECENT: u32 = 2;
 
@@ -29,20 +29,20 @@ const MAX_COOLDOWN: Duration = Duration::from_secs(WINDOW_MINUTES * SECS_PER_MIN
 pub(crate) enum UpstreamFailure {
     /// HTTP 429 或流内限流帧
     Throttled,
-    /// 200 响应正常结束但没有任何内容（上下文过大导致的不算）
-    EmptyResponse,
+    /// 200 响应异常结束：空响应（上下文过大导致的不算）、流内错误帧或截断、thinking 后无正文结束
+    Abnormal,
 }
 
 /// 最近 10 分钟按种类计的失败次数
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RecentFailures {
     pub(crate) throttled: u32,
-    pub(crate) empty_responses: u32,
+    pub(crate) abnormal: u32,
 }
 
 impl RecentFailures {
     pub(crate) fn total(&self) -> u32 {
-        self.throttled + self.empty_responses
+        self.throttled + self.abnormal
     }
 }
 
@@ -83,7 +83,7 @@ impl UpstreamFailures {
         }
         match kind {
             UpstreamFailure::Throttled => bucket.failures.throttled += 1,
-            UpstreamFailure::EmptyResponse => bucket.failures.empty_responses += 1,
+            UpstreamFailure::Abnormal => bucket.failures.abnormal += 1,
         }
         self.consecutive = self.consecutive.saturating_add(1);
         self.last_at = Some(now);
@@ -102,7 +102,7 @@ impl UpstreamFailures {
             .filter(|b| now_minute.saturating_sub(b.minute) < WINDOW_MINUTES)
             .fold(RecentFailures::default(), |sum, b| RecentFailures {
                 throttled: sum.throttled + b.failures.throttled,
-                empty_responses: sum.empty_responses + b.failures.empty_responses,
+                abnormal: sum.abnormal + b.failures.abnormal,
             })
     }
 
@@ -150,14 +150,14 @@ mod tests {
         let mut f = UpstreamFailures::new(t0);
         f.record(UpstreamFailure::Throttled, t0);
         f.record(UpstreamFailure::Throttled, t0 + Duration::from_secs(30));
-        f.record(UpstreamFailure::EmptyResponse, t0 + minutes(3));
+        f.record(UpstreamFailure::Abnormal, t0 + minutes(3));
 
         let at_5 = f.recent(t0 + minutes(5));
         assert_eq!(
             at_5,
             RecentFailures {
                 throttled: 2,
-                empty_responses: 1
+                abnormal: 1
             }
         );
         // 第 0 分钟的桶在第 10 分钟滑出窗口，第 3 分钟的仍在
@@ -171,12 +171,12 @@ mod tests {
         let mut f = UpstreamFailures::new(t0);
         f.record(UpstreamFailure::Throttled, t0);
         // 第 10 分钟与第 0 分钟同一个桶：先清掉旧计数再累加
-        f.record(UpstreamFailure::EmptyResponse, t0 + minutes(10));
+        f.record(UpstreamFailure::Abnormal, t0 + minutes(10));
         assert_eq!(
             f.recent(t0 + minutes(10)),
             RecentFailures {
                 throttled: 0,
-                empty_responses: 1
+                abnormal: 1
             }
         );
     }
@@ -198,8 +198,8 @@ mod tests {
     fn streak_expires_with_window() {
         let t0 = Instant::now();
         let mut f = UpstreamFailures::new(t0);
-        f.record(UpstreamFailure::EmptyResponse, t0);
-        f.record(UpstreamFailure::EmptyResponse, t0);
+        f.record(UpstreamFailure::Abnormal, t0);
+        f.record(UpstreamFailure::Abnormal, t0);
         assert_eq!(f.consecutive(t0 + minutes(9)), 2);
         assert_eq!(f.consecutive(t0 + minutes(10)), 0);
     }

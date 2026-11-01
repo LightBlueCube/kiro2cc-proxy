@@ -2,7 +2,7 @@
 import { Brain, DatabaseZap } from 'lucide-react'
 import { CELL, TH_BASE } from '@/components/table-kit'
 import type { GeoInfo } from '@/hooks/use-ip-geo'
-import type { ApiFormat, ThinkingLoss, UsageRecordItem } from '@/types/api'
+import type { ApiFormat, ThinkingLoss, UsageError, UsageRecordItem } from '@/types/api'
 
 /**
  * 请求日志表：与 admin-ui `usage-log-table.tsx` 同构（user-ui 为独立 app，不跨包共享）。
@@ -170,6 +170,27 @@ function DurationCell({ record }: { record: UsageRecordItem }) {
   )
 }
 
+const USAGE_ERROR_LABELS: Record<UsageError, string> = {
+  refused: '上游拒答',
+  aborted: '上游中止',
+  thinking_only_truncated: 'thinking 后无正文结束',
+  empty: '空响应',
+  empty_oversized_context: '空响应（上下文过大）',
+  interrupted: '连接中断',
+}
+
+/** 请求以错误结束（上游已计费）时的红色小字说明（与 admin-ui 同款文案） */
+function UsageErrorNote({ error }: { error: UsageError }) {
+  return (
+    <span
+      className="block text-[10px] leading-tight text-danger"
+      title="请求以错误结束，客户端没有拿到正常回复；上游已计费，因此记录在此"
+    >
+      {USAGE_ERROR_LABELS[error]}
+    </span>
+  )
+}
+
 /** 历史推理未能回传上游时的红色小字说明（与 admin-ui 同款文案） */
 function ThinkingLossNote({ loss }: { loss: ThinkingLoss }) {
   const lines: string[] = []
@@ -292,6 +313,7 @@ export function UsageLogTable({
                       )}
                     </div>
                   )}
+                  {record.error && <UsageErrorNote error={record.error} />}
                   {record.thinkingLoss && <ThinkingLossNote loss={record.thinkingLoss} />}
                 </div>
               </td>

@@ -83,6 +83,27 @@ pub struct UsageRecord {
     /// 客户端请求所用的 API 格式（None 表示旧数据）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_format: Option<ApiFormat>,
+    /// 请求以错误结束（None 表示正常完成或旧数据）；出错的请求只在上游计费时才记录
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<UsageError>,
+}
+
+/// 出错但上游已计费（收到 meteringEvent）的请求的错误种类
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageError {
+    /// 模型拒答（stopReason=content_filtered）
+    Refused,
+    /// 上游异常终止（流内错误帧、异常 stopReason、流截断等）
+    Aborted,
+    /// thinking 之后无收尾理由结束，没有正文也没有工具调用
+    ThinkingOnlyTruncated,
+    /// 200 正常结束但没有任何内容
+    Empty,
+    /// 上下文过大导致的空响应
+    EmptyOversizedContext,
+    /// 读取上游响应流时连接中断
+    Interrupted,
 }
 
 /// 客户端请求所用的 API 格式（按入口端点区分）
@@ -163,6 +184,7 @@ pub struct RecordOptions {
     pub user_agent: Option<String>,
     pub thinking_loss: Option<ThinkingLoss>,
     pub api_format: Option<ApiFormat>,
+    pub error: Option<UsageError>,
 }
 
 /// 单个 API Key 的用量汇总
@@ -478,6 +500,7 @@ impl UsageTracker {
             user_agent,
             thinking_loss,
             api_format,
+            error,
         } = options;
         let cost = calculate_cost(&model, input_tokens, output_tokens);
         let record = UsageRecord {
@@ -503,6 +526,7 @@ impl UsageTracker {
             user_agent,
             thinking_loss,
             api_format,
+            error,
         };
         {
             let mut records = self.records.write();

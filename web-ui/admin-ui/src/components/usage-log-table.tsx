@@ -4,7 +4,7 @@ import { Brain, DatabaseZap, Loader2, SearchX } from 'lucide-react'
 import { CELL, TH_BASE } from '@/components/table-kit'
 import { formatDateTime, formatTokenCount } from '@/lib/locale'
 import type { GeoInfo } from '@/hooks/use-ip-geo'
-import type { ApiFormat, ThinkingLoss, UsageRecord } from '@/types/api'
+import type { ApiFormat, ThinkingLoss, UsageError, UsageRecord } from '@/types/api'
 
 /**
  * 请求日志表（API Key 详情页 / 每日明细页共用）。
@@ -220,6 +220,25 @@ function ThinkingLossNote({ loss }: { loss: ThinkingLoss }) {
   )
 }
 
+const USAGE_ERROR_KEYS: Record<UsageError, string> = {
+  refused: 'common.usageErrorRefused',
+  aborted: 'common.usageErrorAborted',
+  thinking_only_truncated: 'common.usageErrorThinkingOnlyTruncated',
+  empty: 'common.usageErrorEmpty',
+  empty_oversized_context: 'common.usageErrorEmptyOversizedContext',
+  interrupted: 'common.usageErrorInterrupted',
+}
+
+/** 请求以错误结束（上游已计费）时的红色小字说明 */
+function UsageErrorNote({ error }: { error: UsageError }) {
+  const { t } = useTranslation()
+  return (
+    <span className="block text-[10px] leading-tight text-danger" title={t('common.usageErrorHint')}>
+      {t(USAGE_ERROR_KEYS[error])}
+    </span>
+  )
+}
+
 const LOG_COLS: { labelKey: string; num?: boolean }[] = [
   { labelKey: 'common.colTime' },
   { labelKey: 'common.colIp' },
@@ -352,6 +371,7 @@ export function UsageLogTable({
                         )}
                       </div>
                     )}
+                    {record.error && <UsageErrorNote error={record.error} />}
                     {record.thinkingLoss && <ThinkingLossNote loss={record.thinkingLoss} />}
                   </div>
                 </td>

@@ -212,6 +212,7 @@ mod tests {
             user_agent: None,
             thinking_loss: None,
             api_format: None,
+            error: None,
         };
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["firstTokenMs"], 1234);
@@ -264,6 +265,7 @@ mod tests {
             user_agent: Some("claude-cli/2.1.5 (external, cli)".to_string()),
             thinking_loss: None,
             api_format: None,
+            error: None,
         };
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["thinkingTokenCount"], 1034);
@@ -431,6 +433,7 @@ mod tests {
             user_agent: None,
             thinking_loss: None,
             api_format: None,
+            error: None,
         };
         tracker.records.write().push(record);
     }
@@ -474,6 +477,7 @@ mod tests {
             user_agent: None,
             thinking_loss: None,
             api_format: None,
+            error: None,
         };
         tracker.records.write().push(record);
     }

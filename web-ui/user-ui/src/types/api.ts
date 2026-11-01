@@ -64,7 +64,17 @@ export interface UsageRecordItem {
   firstTokenMs?: number
   durationMs?: number
   apiFormat?: ApiFormat
+  /** 请求以错误结束（出错的请求只在上游计费时才记录）；正常完成与旧记录缺省 */
+  error?: UsageError
 }
+
+export type UsageError =
+  | 'refused'
+  | 'aborted'
+  | 'thinking_only_truncated'
+  | 'empty'
+  | 'empty_oversized_context'
+  | 'interrupted'
 
 /** 客户端请求所用的 API 格式（按入口端点区分；旧记录缺省） */
 export type ApiFormat = 'anthropic-messages' | 'cc-messages' | 'openai-chat' | 'openai-responses'

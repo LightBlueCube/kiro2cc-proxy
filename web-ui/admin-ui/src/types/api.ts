@@ -37,9 +37,9 @@ export interface CredentialStatusItem {
   hasProxy: boolean
   proxyUrl?: string
   healthStatus: 'healthy' | 'warning' | 'degraded' | 'unhealthy' | 'disabled'
-  /** 健康度判定依据：最近 10 分钟上游限流 / 空响应次数、连续上游失败次数 */
+  /** 健康度判定依据：最近 10 分钟上游限流 / 异常结束（空响应、上游中止、thinking 后截断）次数、连续上游失败次数 */
   recentThrottleCount: number
-  recentEmptyResponseCount: number
+  recentAbnormalCount: number
   consecutiveFailures: number
   /** 不健康时冷却期剩余秒数（冷却期内选号排除），其它状态缺省 */
   cooldownRemainingSecs?: number
@@ -313,7 +313,17 @@ export interface UsageRecord {
   userAgent?: string
   thinkingLoss?: ThinkingLoss
   apiFormat?: ApiFormat
+  /** 请求以错误结束（出错的请求只在上游计费时才记录）；正常完成与旧记录缺省 */
+  error?: UsageError
 }
+
+export type UsageError =
+  | 'refused'
+  | 'aborted'
+  | 'thinking_only_truncated'
+  | 'empty'
+  | 'empty_oversized_context'
+  | 'interrupted'
 
 // 客户端请求所用的 API 格式（按入口端点区分；旧记录缺省）
 export type ApiFormat = 'anthropic-messages' | 'cc-messages' | 'openai-chat' | 'openai-responses'

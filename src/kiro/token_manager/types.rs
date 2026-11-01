@@ -22,8 +22,8 @@ use std::time::{Duration as StdDuration, Instant};
 pub struct HealthDetail {
     /// 最近 10 分钟上游限流次数
     pub recent_throttle_count: u32,
-    /// 最近 10 分钟上游空响应次数
-    pub recent_empty_response_count: u32,
+    /// 最近 10 分钟上游响应异常结束次数（空响应、流内错误帧或截断、thinking 后无正文结束）
+    pub recent_abnormal_count: u32,
     /// 连续上游失败次数（一次正常完成的响应即清零）
     pub consecutive_failures: u32,
     /// 不健康时冷却期剩余秒数；其它状态为 None

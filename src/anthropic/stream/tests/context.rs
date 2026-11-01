@@ -242,6 +242,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn metering(credits: f64) -> crate::kiro::model::events::Event {
+        crate::kiro::model::events::Event::Metering(crate::kiro::model::events::MeteringEvent {
+            usage: credits,
+            unit_plural: "credits".to_string(),
+            unit: String::new(),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_eof_empty_response_errors_and_records_usage_only_when_billed() {
+        use crate::model::usage::{RecordLabels, UsageError, UsageTracker};
+
+        let cases = [
+            (1, "overloaded_error", UsageError::Empty),
+            (
+                300_000,
+                "invalid_request_error",
+                UsageError::EmptyOversizedContext,
+            ),
+        ];
+        for (input_tokens, error_type, usage_error) in cases {
+            for billed in [false, true] {
+                let dir =
+                    std::env::temp_dir().join(format!("kiro2cc_ctx_eof_{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let tracker =
+                    std::sync::Arc::new(UsageTracker::load(&dir.join("usage.json")).unwrap());
+                let mut ctx = StreamContext::new_with_thinking("test-model", input_tokens, false)
+                    .with_usage_tracking(
+                        Some(std::sync::Arc::clone(&tracker)),
+                        Some(1),
+                        Some(7),
+                        None,
+                        None,
+                    );
+                let _ = ctx.generate_initial_events();
+                if billed {
+                    let _ = ctx.process_kiro_event(&metering(0.3));
+                }
+
+                let events = ctx.finish_at_eof();
+                assert_eq!(events.len(), 1, "只发 error 事件，不伪装成正常收尾");
+                assert_eq!(events[0].event, "error");
+                assert_eq!(events[0].data["error"]["type"], error_type);
+
+                let page = tracker.get_records_paged(1, 1, 10, &RecordLabels::default());
+                if billed {
+                    assert_eq!(page.records.len(), 1);
+                    assert_eq!(page.records[0].error, Some(usage_error));
+                } else {
+                    assert!(page.records.is_empty(), "上游未计费不记录");
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_eof_completed_records_usage_without_error() {
+        use crate::model::usage::{RecordLabels, UsageTracker};
+
+        let dir = std::env::temp_dir().join(format!("kiro2cc_ctx_ok_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tracker = std::sync::Arc::new(UsageTracker::load(&dir.join("usage.json")).unwrap());
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false).with_usage_tracking(
+            Some(std::sync::Arc::clone(&tracker)),
+            Some(1),
+            Some(7),
+            None,
+            None,
+        );
+        let _ = ctx.generate_initial_events();
+        ctx.process_assistant_response("hello");
+
+        let events = ctx.finish_at_eof();
+        assert_eq!(events.last().unwrap().event, "message_stop");
+        let page = tracker.get_records_paged(1, 1, 10, &RecordLabels::default());
+        assert_eq!(page.records.len(), 1, "正常完成未计费也照常记录");
+        assert_eq!(page.records[0].error, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn test_stream_context_refines_cache_read_from_metering_credits() {
         let dir = std::env::temp_dir().join(format!("kiro2cc_ctx_refine_{}", uuid::Uuid::new_v4()));

@@ -60,17 +60,21 @@ mod tests {
         assert_eq!(health(&m, 1), HealthStatus::Healthy, "1 次不报警");
         scattered_failures(&m, 1, 1);
         assert_eq!(health(&m, 1), HealthStatus::Warning, "F=2");
-        scattered_failures(&m, 1, 3);
-        assert_eq!(health(&m, 1), HealthStatus::Degraded, "F=5");
-        scattered_failures(&m, 1, 5);
-        assert_eq!(health(&m, 1), HealthStatus::Unhealthy, "F=10");
+        scattered_failures(&m, 1, 7);
+        assert_eq!(health(&m, 1), HealthStatus::Warning, "F=9");
+        scattered_failures(&m, 1, 1);
+        assert_eq!(health(&m, 1), HealthStatus::Degraded, "F=10");
+        scattered_failures(&m, 1, 9);
+        assert_eq!(health(&m, 1), HealthStatus::Degraded, "F=19");
+        scattered_failures(&m, 1, 1);
+        assert_eq!(health(&m, 1), HealthStatus::Unhealthy, "F=20");
     }
 
     #[test]
     fn consecutive_failures_have_lower_thresholds() {
         let m = manager(&[0]);
         m.report_throttled(1);
-        m.report_empty_response(1);
+        m.report_abnormal_response(1, test_error());
         assert_eq!(health(&m, 1), HealthStatus::Degraded, "C=2");
         m.report_throttled(1);
         assert_eq!(health(&m, 1), HealthStatus::Unhealthy, "C=3");
@@ -119,18 +123,25 @@ mod tests {
         );
     }
 
-    /// 200 响应头到达时的 report_success 不中断连续失败：空响应要到读完才知道
+    /// 200 响应头到达时的 report_success 不中断连续失败：异常结束要到读完才知道
     #[test]
-    fn empty_responses_after_header_success_still_accumulate() {
+    fn abnormal_responses_after_header_success_still_accumulate() {
         let m = manager(&[0]);
         for _ in 0..2 {
             m.report_success(1);
-            m.report_empty_response(1);
+            m.report_abnormal_response(1, test_error());
         }
         assert_eq!(health(&m, 1), HealthStatus::Degraded);
         let snapshot = m.snapshot();
+        assert_eq!(
+            snapshot.entries[0]
+                .last_error
+                .as_ref()
+                .map(|e| e.message.as_str()),
+            Some("test failure")
+        );
         let detail = snapshot.entries[0].health_detail;
-        assert_eq!(detail.recent_empty_response_count, 2);
+        assert_eq!(detail.recent_abnormal_count, 2);
         assert_eq!(detail.consecutive_failures, 2);
         assert_eq!(detail.cooldown_remaining_secs, None, "降级不显示冷却");
     }

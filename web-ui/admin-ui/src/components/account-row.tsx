@@ -56,7 +56,7 @@ function healthTitle(credential: CredentialStatusItem, t: TFunction): string {
   const parts = [
     t('credentials.healthDetail', {
       throttled: credential.recentThrottleCount,
-      empty: credential.recentEmptyResponseCount,
+      abnormal: credential.recentAbnormalCount,
       consecutive: credential.consecutiveFailures,
     }),
   ]

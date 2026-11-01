@@ -26,14 +26,17 @@ impl MultiTokenManager {
         self.stats_dirty.store(true, Ordering::Relaxed);
     }
 
-    /// 报告指定账号返回了空响应（200 正常结束但无任何内容），计入健康度
-    pub fn report_empty_response(&self, id: u64) {
+    /// 报告指定账号的 200 响应异常结束（空响应、流内错误帧或截断、thinking 后无正文结束）：
+    /// 计入健康度，并记为最近报错供面板展示
+    pub fn report_abnormal_response(&self, id: u64, error: AccountError) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             entry
                 .upstream_failures
-                .record(UpstreamFailure::EmptyResponse, Instant::now());
+                .record(UpstreamFailure::Abnormal, Instant::now());
+            entry.last_error = Some(error);
         }
+        self.stats_dirty.store(true, Ordering::Relaxed);
     }
 
     /// 报告指定账号完整返回了一次正常响应：中断健康度的连续失败计数

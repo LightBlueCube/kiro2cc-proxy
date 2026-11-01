@@ -91,7 +91,7 @@ const ACCOUNT_ERROR_REASONS: ReadonlySet<CredentialStatusItem['disabledReason']>
  *   1. 因账号问题自动禁用          → error（需人工处理）
  *   2. 其余禁用                    → disabled
  *   3. 请求发送连续失败的冷却       → error（到期自动重试）
- *   4. healthStatus 不健康        → cooling（限流 / 空响应后的临时冷却，选号排除）
+ *   4. healthStatus 不健康        → cooling（限流 / 异常结束后的临时冷却，选号排除）
  *   5. healthStatus 降级          → degraded（同优先级内最后被选中，仍可服务）
  *   6. healthStatus 警告          → warning（仅提示，不影响选号）
  *   7. 健康 + 零成功调用 + 未查额度 → pending

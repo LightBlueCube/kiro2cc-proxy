@@ -2,8 +2,8 @@
 //! 非流式响应构建：将 Kiro 事件聚合为完整 Anthropic message 响应（含 thinking 块 flush），用于非流式请求。
 
 use crate::anthropic::stream::{
-    CONTENT_LENGTH_EXCEEDED_EXCEPTION, UpstreamTermination, empty_response_oversized_threshold,
-    upstream_aborted_message,
+    CONTENT_LENGTH_EXCEEDED_EXCEPTION, ResponseOutcome, UpstreamTermination,
+    empty_response_oversized_threshold, should_record_usage,
 };
 use crate::anthropic::types::ErrorResponse;
 use std::sync::Arc;
@@ -20,8 +20,6 @@ use uuid::Uuid;
 
 use super::error::map_provider_error_with_context;
 use super::helpers::strip_json_fences;
-use super::stream::{EMPTY_RESPONSE_RETRY_MESSAGE, REFUSAL_ERROR_TYPE};
-use crate::anthropic::stream::THINKING_ONLY_TRUNCATED_MESSAGE;
 
 /// 组装非流式响应的 content 数组
 ///
@@ -367,43 +365,11 @@ pub(crate) async fn handle_non_stream_request(
 
     flush_native_reasoning(&mut native_reasoning, &mut native_thinking_blocks);
 
-    // 上游拒答：说明原文原样返回（与流式同口径，不按空响应处理）
-    if let Some(message) = termination.refusal() {
-        feedback.refused(message);
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(REFUSAL_ERROR_TYPE, message)),
-        )
-            .into_response();
-    }
-
-    // 空响应 = 无正文、无工具调用、无推理（与流式 `is_empty_response` 同口径）。
-    // 上下文过大导致的空响应换账号重试也一样：不计入健康度，原样返回
+    // 拒答、异常终止、空响应（无正文、无工具调用、无推理）不得组装成正常响应：客户端会当成
+    // 任务完成。照常算出用量（上游计费时入库），收尾返回错误；口径见 `ResponseOutcome`
     let empty = text_content.is_empty() && !has_tool_use && native_thinking_blocks.is_empty();
     let oversized_context = input_tokens >= empty_response_oversized_threshold(model);
-    let retryable_empty = empty && !oversized_context;
-
-    // 健康度记账：与流式 `report_upstream_outcome_at_eof` 同口径
-    if termination.failure().is_none() {
-        if !empty {
-            feedback.completed();
-        } else if retryable_empty {
-            feedback.empty_response();
-        }
-    }
-
-    // 异常终止不得组装成正常响应（客户端会当成任务完成），返回可重试错误
-    if let Some(reason) = termination.failure() {
-        tracing::warn!(reason = %reason, "上游异常终止，返回错误防止伪装成正常完成");
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(
-                "overloaded_error",
-                upstream_aborted_message(&reason),
-            )),
-        )
-            .into_response();
-    }
+    let failed = ResponseOutcome::before_content(&termination, empty, oversized_context);
 
     // 确定 stop_reason：tool_use 优先级最高，存在工具调用时无条件覆盖
     // max_tokens / model_context_window_exceeded（这些是下一轮才该报告的状态，
@@ -466,6 +432,12 @@ pub(crate) async fn handle_non_stream_request(
     // 上游报过 max_tokens / 上下文超限时按该理由正常返回（与流式路径同口径）；
     // tool_use 已在上方覆盖 stop_reason，不会走到截断判定。
     let truncated_after_thinking = thinking_only && stop_reason == "end_turn";
+    let produced_content = failed.is_none();
+    let outcome = failed.unwrap_or(if truncated_after_thinking {
+        ResponseOutcome::ThinkingOnlyTruncated
+    } else {
+        ResponseOutcome::Completed
+    });
 
     // contextUsage 本地化后 input_tokens 来源优先级：metering 真值 → 本地 count_all_tokens 估算
     // `context_input_tokens` 已弃用（始终为 None），保留参数仅供 cap_input_tokens 签名兼容
@@ -532,8 +504,9 @@ pub(crate) async fn handle_non_stream_request(
         _ => None,
     };
     // 本地写入的提交与上报口径解耦：即便本次用 metering 真值上报也要提交，
-    // 否则后续请求回落到本地模拟时（如换到不返回缓存字段的端点）读不到这次的前缀
-    if let Some(acc) = &cache_accounting {
+    // 否则后续请求回落到本地模拟时（如换到不返回缓存字段的端点）读不到这次的前缀。
+    // 没有产出内容的请求不提交（与流式同口径）
+    if produced_content && let Some(acc) = &cache_accounting {
         acc.commit();
     }
     let final_usage = match (&cache_accounting, metering_pair) {
@@ -548,8 +521,10 @@ pub(crate) async fn handle_non_stream_request(
         ),
     };
 
-    // 流结束后写入指纹表（仅当 credential_id 确定）
-    if let (Some(tracker), Some(profile)) = (fp_tracker.as_ref(), fp_profile.clone()) {
+    // 流结束后写入指纹表（仅当 credential_id 确定；没有产出内容的请求不写）
+    if produced_content
+        && let (Some(tracker), Some(profile)) = (fp_tracker.as_ref(), fp_profile.clone())
+    {
         let account_id = credential_id.to_string();
         tracker.update(&account_id, profile);
     }
@@ -560,8 +535,11 @@ pub(crate) async fn handle_non_stream_request(
     let report_creation_5m = final_usage.cache_creation_5m_input_tokens;
     let report_creation_1h = final_usage.cache_creation_1h_input_tokens;
 
-    // 记录用量（内部使用真实值）
-    if let (Some(tracker), Some(key_id)) = (&usage_tracker, api_key_id) {
+    // 记录用量（内部使用真实值；出错的请求只在上游计费时记）
+    let usage_error = outcome.usage_error();
+    if should_record_usage(usage_error, metering_usage)
+        && let (Some(tracker), Some(key_id)) = (&usage_tracker, api_key_id)
+    {
         tracing::info!(
             "[usage] 入库: model={} input={} output={} metering_credits={:?} cache_read={} cache_creation={} api_key={} credential=Some({})",
             model,
@@ -596,37 +574,21 @@ pub(crate) async fn handle_non_stream_request(
                     &signature_repair,
                 ),
                 api_format: Some(api_format),
+                error: usage_error,
             },
         );
     }
 
-    // 空响应与流式一致返回可重试错误（用量已照常入库），不把空内容当成正常完成
-    if retryable_empty {
+    outcome.report(&feedback);
+    if let Some(error) = outcome.client_error() {
         tracing::warn!(
+            outcome = ?outcome,
             est_input_tokens = input_tokens,
-            "上游返回空响应（无任何内容事件），返回可重试错误"
+            "上游响应以错误结束，返回错误防止伪装成正常完成"
         );
         return (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(
-                "overloaded_error",
-                EMPTY_RESPONSE_RETRY_MESSAGE,
-            )),
-        )
-            .into_response();
-    }
-
-    if truncated_after_thinking {
-        tracing::warn!(
-            est_input_tokens = input_tokens,
-            "上游在 thinking 之后无理由结束（无正文、无工具调用），返回可重试错误"
-        );
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(
-                "overloaded_error",
-                THINKING_ONLY_TRUNCATED_MESSAGE,
-            )),
+            error.status,
+            Json(ErrorResponse::new(error.error_type, error.message)),
         )
             .into_response();
     }

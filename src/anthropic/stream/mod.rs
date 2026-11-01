@@ -6,6 +6,7 @@ mod calib;
 mod context;
 mod echo_guard;
 mod helpers;
+mod outcome;
 mod state;
 mod termination;
 mod tests;
@@ -25,11 +26,11 @@ pub use calib::{
 pub use context::StreamContext;
 pub(crate) use echo_guard::ResponseEchoGuard;
 pub(crate) use helpers::{generate_fake_signature, is_fake_signature};
+#[cfg(test)]
+pub(crate) use outcome::THINKING_ONLY_TRUNCATED_MESSAGE;
+pub(crate) use outcome::{ResponseOutcome, should_record_usage};
 pub use state::SseEvent;
-pub(crate) use termination::{
-    CONTENT_LENGTH_EXCEEDED_EXCEPTION, THINKING_ONLY_TRUNCATED_MESSAGE, UpstreamTermination,
-    upstream_aborted_message,
-};
+pub(crate) use termination::{CONTENT_LENGTH_EXCEEDED_EXCEPTION, UpstreamTermination};
 pub(crate) use thinking::split_thinking_and_visible;
 pub use thinking_text::{
     ThinkingTextRewriter, ThinkingTextStyle, set_thinking_as_text, thinking_as_text_enabled,
