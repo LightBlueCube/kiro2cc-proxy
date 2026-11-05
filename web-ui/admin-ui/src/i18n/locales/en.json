@@ -233,6 +233,8 @@
     "disabledReasonTooManyFailures": "Auto-disabled after 3 consecutive 401/403 responses",
     "unreachableCooldown": "Requests kept failing to send (proxy error, connection failure or timeout): cooling down for {{minutes}} more min, retried automatically afterwards",
     "modelRestricted": "{{count}} model(s) restricted",
+    "probeWait": "Probe in {{secs}}s",
+    "probeWaitNote": "All usable accounts are cooling down, so only probe requests are let through at intervals: this account will be probed again in {{secs}}s. Each failed probe doubles the interval (from 15s, up to 5 min); one successful response restores it. Meanwhile new requests queue for up to 10 seconds, then get a 429.",
     "modelRestrictedNote": "Upstream refused repeatedly; requests for these models use other accounts for now:",
     "modelRestrictedItem": "{{model}} ({{minutes}} min left): {{message}}",
     "disabledReasonQuotaExceeded": "Monthly request quota exhausted; re-enabled next month",

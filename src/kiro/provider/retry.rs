@@ -1,11 +1,11 @@
 //! 重试与故障转移：端点选择（select_endpoint）与 call_api_with_retry 多账号多轮重试。
 use std::time::Duration;
 
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::kiro::endpoint::{BUCKET_THROTTLE_DURATION, Endpoint, EndpointName};
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::AccountError;
+use crate::kiro::token_manager::{AccountError, AccountsCoolingDown};
 use crate::model::throttle_log::ThrottleContext;
 
 use super::SignatureRepair;
@@ -291,6 +291,19 @@ impl KiroProvider {
                     ctx
                 }
                 Err(e) => {
+                    // 候选账号全部冷却：与本地限额共用排队截止时刻，等到最早一个账号可以试探再选号；
+                    // 截止前等不到就直接返回，由 handler 按剩余等待时长回 429。等待不占重试次数
+                    if let Some(cooling) = e.downcast_ref::<AccountsCoolingDown>() {
+                        let deadline = *queue_deadline
+                            .get_or_insert_with(|| Instant::now() + LOCAL_LIMIT_QUEUE);
+                        let probe_at = Instant::now() + cooling.retry_after();
+                        if probe_at > deadline {
+                            return Err(e);
+                        }
+                        sleep_until(probe_at).await;
+                        attempt_limit += 1;
+                        continue;
+                    }
                     last_error = Some(e);
                     continue;
                 }

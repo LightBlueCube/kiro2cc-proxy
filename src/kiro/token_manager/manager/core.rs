@@ -1,5 +1,6 @@
 //! MultiTokenManager 核心：构造初始化、配置读取、每凭据 RPM 上限等基础能力。
 use super::super::entry::{CredentialEntry, DisabledReason, HealthStatus};
+use super::super::probe::AccountsCoolingDown;
 use super::super::refresh::{is_token_expired, is_token_expiring_soon, refresh_token};
 use super::super::types::{CallContext, MultiTokenManager, Placement, TOKEN_REFRESH_COOLDOWN};
 use super::super::upstream_failures::UpstreamFailures;
@@ -91,6 +92,7 @@ impl MultiTokenManager {
                     throttle_count: 0,
                     upstream_failures: UpstreamFailures::new(Instant::now()),
                     unreachable: Default::default(),
+                    probe: Default::default(),
                     model_refusals: Default::default(),
                     last_throttled_wall: None,
                     last_refreshed_at: None,
@@ -266,15 +268,16 @@ impl MultiTokenManager {
     /// 本次可选的账号集合（负载均衡在其中挑选）
     ///
     /// 先按禁用、白名单、订阅等级、模型可用性硬性过滤，再优先取健康状态不为 Unhealthy、
-    /// 且该模型未在拒答冷却期的账号；全部不满足时退回硬性过滤后的全集，避免完全不可用
-    /// （拒答冷却的账号会把上游说明原文返回给客户端）。
+    /// 且该模型未在拒答冷却期的账号。全部不满足时退回硬性过滤后的全集，但其中冷却中的
+    /// 账号只放行试探时间已到的（见 `probe` 模块）；一个都没到时返回 [`AccountsCoolingDown`]。
+    /// 只因拒答冷却的账号照常放行，把上游说明原文返回给客户端。
     fn candidate_pool<'a>(
         &self,
         entries: &'a [CredentialEntry],
         model: Option<&str>,
         allowed_ids: &[u64],
         now: Instant,
-    ) -> Vec<&'a CredentialEntry> {
+    ) -> Result<Vec<&'a CredentialEntry>, AccountsCoolingDown> {
         let is_opus = model
             .map(|m| m.to_lowercase().contains("opus"))
             .unwrap_or(false);
@@ -308,10 +311,35 @@ impl MultiTokenManager {
             })
             .copied()
             .collect();
-        if preferred.is_empty() {
-            available
-        } else {
-            preferred
+        if !preferred.is_empty() {
+            return Ok(preferred);
+        }
+
+        let probe_wait = |e: &CredentialEntry| {
+            let cooling = Self::compute_health_at(e, now) == HealthStatus::Unhealthy;
+            cooling.then(|| e.probe.wait_remaining(now)).flatten()
+        };
+        let ready: Vec<_> = available
+            .iter()
+            .filter(|e| probe_wait(e).is_none())
+            .copied()
+            .collect();
+        if !ready.is_empty() {
+            return Ok(ready);
+        }
+        match available.iter().filter_map(|e| probe_wait(e)).min() {
+            Some(retry_after) => Err(AccountsCoolingDown::new(retry_after)),
+            // 硬性过滤后一个账号都没有，由调用方说明原因
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// 选中的账号若在冷却中（候选账号全部冷却时的试探），占住它的试探名额
+    fn claim_probe(entries: &mut [CredentialEntry], id: u64, now: Instant) {
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id)
+            && Self::compute_health_at(entry, now) == HealthStatus::Unhealthy
+        {
+            entry.probe.claim(now);
         }
     }
 
@@ -326,14 +354,28 @@ impl MultiTokenManager {
         &self,
         model: Option<&str>,
         allowed_ids: &[u64],
-    ) -> Option<(u64, KiroCredentials)> {
-        let entries = self.entries.lock();
+    ) -> Result<Option<(u64, KiroCredentials)>, AccountsCoolingDown> {
+        let mut entries = self.entries.lock();
         let now = Instant::now();
-        let pool = self.candidate_pool(&entries, model, allowed_ids, now);
+        let selected = {
+            let pool = self.candidate_pool(&entries, model, allowed_ids, now)?;
+            self.pick_from_pool(&pool, now)
+        };
+        if let Some((id, _)) = &selected {
+            Self::claim_probe(&mut entries, *id, now);
+        }
+        Ok(selected)
+    }
+
+    /// 按负载均衡模式在候选集里挑一个账号
+    fn pick_from_pool(
+        &self,
+        pool: &[&CredentialEntry],
+        now: Instant,
+    ) -> Option<(u64, KiroCredentials)> {
         if pool.is_empty() {
             return None;
         }
-        let pool = pool.as_slice();
         // 降级账号相当于优先级 +0.5：同优先级内最后被选中，仍先于下一优先级
         let degraded =
             |e: &CredentialEntry| Self::compute_health_at(e, now) == HealthStatus::Degraded;
@@ -428,7 +470,7 @@ impl MultiTokenManager {
                     .filter(|id| !failed_ids.contains(id))
                     .collect()
             };
-            let Some((id, credentials)) = self.select_next_credential(model, &remaining) else {
+            let Some((id, credentials)) = self.select_next_credential(model, &remaining)? else {
                 // describe_unavailable 内部会获取 entries 锁，
                 // 因此必须在任何 entries 锁作用域之外调用，否则死锁
                 anyhow::bail!("{}", self.describe_unavailable(model, &[]));
@@ -477,7 +519,7 @@ impl MultiTokenManager {
                 .collect();
 
             let (id, credentials) = {
-                match self.select_next_credential(model, &effective_ids) {
+                match self.select_next_credential(model, &effective_ids)? {
                     Some((new_id, new_creds)) => (new_id, new_creds),
                     None => {
                         anyhow::bail!("{}", self.describe_unavailable(model, allowed_ids));
@@ -548,11 +590,19 @@ impl MultiTokenManager {
         let usable = |id: &u64| !avoid_ids.contains(id) && !soft_avoid.contains(id);
         if let Some(id) = preferred.filter(usable) {
             let credentials = {
-                let entries = self.entries.lock();
-                self.candidate_pool(&entries, model, allowed_ids, Instant::now())
+                let mut entries = self.entries.lock();
+                let now = Instant::now();
+                // 全部冷却且没到试探时间：交给下方负载均衡返回 AccountsCoolingDown
+                let credentials = self
+                    .candidate_pool(&entries, model, allowed_ids, now)
+                    .unwrap_or_default()
                     .into_iter()
                     .find(|e| e.id == id)
-                    .map(|e| e.credentials.clone())
+                    .map(|e| e.credentials.clone());
+                if credentials.is_some() {
+                    Self::claim_probe(&mut entries, id, now);
+                }
+                credentials
             };
             if let Some(credentials) = credentials {
                 match self.try_ensure_token(id, &credentials).await {
@@ -603,6 +653,7 @@ impl MultiTokenManager {
         let entries = self.entries.lock();
         let pool: Vec<&CredentialEntry> = self
             .candidate_pool(&entries, model, allowed_ids, Instant::now())
+            .unwrap_or_default()
             .into_iter()
             .filter(|e| !avoid_ids.contains(&e.id))
             .collect();

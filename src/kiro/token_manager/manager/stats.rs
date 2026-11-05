@@ -385,6 +385,10 @@ impl MultiTokenManager {
                 .then(|| entry.unreachable.cooldown_remaining(now))
                 .flatten()
                 .map(|d| d.as_secs().max(1)),
+            probe_wait_secs: (unhealthy && entry.probe.is_active())
+                .then(|| entry.probe.wait_remaining(now))
+                .flatten()
+                .map(|d| d.as_secs().max(1)),
         }
     }
 }

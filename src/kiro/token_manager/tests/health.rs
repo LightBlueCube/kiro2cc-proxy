@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::super::entry::HealthStatus;
+    use super::super::super::probe::AccountsCoolingDown;
     use super::super::super::types::MultiTokenManager;
     use super::super::affinity::tests::make_valid_cred;
     use super::super::multi::tests::test_error;
@@ -171,6 +172,125 @@ mod tests {
         m.report_throttled(2);
         for _ in 0..4 {
             assert_ne!(m.acquire_context(None).await.unwrap().id, 3);
+        }
+    }
+
+    /// 账号连续限流进入冷却，且冷却中又失败一次（开始按间隔试探）
+    fn cool_down_and_fail_once_more(m: &MultiTokenManager, ids: &[u64]) {
+        for &id in ids {
+            for _ in 0..3 {
+                m.report_throttled(id);
+            }
+            assert_eq!(health(m, id), HealthStatus::Unhealthy);
+            m.report_throttled(id);
+        }
+    }
+
+    /// 让账号的试探间隔已经过去（冷却仍在）
+    fn make_probe_due(m: &MultiTokenManager, id: u64) {
+        let mut entries = m.entries.lock();
+        let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
+        entry.probe.reset();
+        entry
+            .probe
+            .record_failure(Instant::now() - Duration::from_secs(20));
+    }
+
+    async fn cooling_wait(m: &MultiTokenManager) -> Duration {
+        let Some(err) = m.acquire_context(None).await.err() else {
+            panic!("应为全部冷却，实际选到了账号");
+        };
+        err.downcast_ref::<AccountsCoolingDown>()
+            .unwrap_or_else(|| panic!("应为全部冷却，实际: {err:#}"))
+            .retry_after()
+    }
+
+    #[tokio::test]
+    async fn all_cooling_accounts_wait_for_probe_interval() {
+        let m = manager(&[0, 0]);
+        cool_down_and_fail_once_more(&m, &[1, 2]);
+        let wait = cooling_wait(&m).await;
+        assert!(
+            wait > Duration::from_secs(14) && wait <= Duration::from_secs(15),
+            "首个试探间隔 15 秒，实际 {wait:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooling_without_extra_failure_is_still_released() {
+        // 刚进入冷却、冷却中还没再失败过：与原来一样放行
+        let m = manager(&[0, 0]);
+        for id in [1, 2] {
+            for _ in 0..3 {
+                m.report_throttled(id);
+            }
+        }
+        assert!(m.acquire_context(None).await.is_ok());
+        assert_eq!(m.snapshot().entries[0].health_detail.probe_wait_secs, None);
+    }
+
+    #[tokio::test]
+    async fn due_probe_releases_one_request_per_account() {
+        let m = manager(&[0, 0]);
+        cool_down_and_fail_once_more(&m, &[1, 2]);
+        make_probe_due(&m, 1);
+        make_probe_due(&m, 2);
+
+        let mut picked = vec![
+            m.acquire_context(None).await.unwrap().id,
+            m.acquire_context(None).await.unwrap().id,
+        ];
+        picked.sort();
+        assert_eq!(picked, [1, 2], "每个账号各放一个试探");
+        let wait = cooling_wait(&m).await;
+        assert!(
+            wait > Duration::from_secs(29),
+            "试探结果回来前占住名额: {wait:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_probe_doubles_and_completion_resets() {
+        let m = manager(&[0]);
+        cool_down_and_fail_once_more(&m, &[1]);
+        make_probe_due(&m, 1);
+        assert_eq!(m.acquire_context(None).await.unwrap().id, 1);
+
+        m.report_throttled(1);
+        let wait = cooling_wait(&m).await;
+        assert!(
+            wait > Duration::from_secs(29) && wait <= Duration::from_secs(30),
+            "试探失败后间隔翻倍到 30 秒，实际 {wait:?}"
+        );
+        let shown = m.snapshot().entries[0].health_detail.probe_wait_secs;
+        assert!(
+            matches!(shown, Some(29..=30)),
+            "面板显示试探等待: {shown:?}"
+        );
+
+        m.report_response_completed(1, None);
+        assert_ne!(health(&m, 1), HealthStatus::Unhealthy);
+        assert_eq!(m.acquire_context(None).await.unwrap().id, 1);
+        assert_eq!(m.snapshot().entries[0].health_detail.probe_wait_secs, None);
+    }
+
+    #[tokio::test]
+    async fn unreachable_accounts_are_probed_too() {
+        let m = manager(&[0]);
+        for _ in 0..3 {
+            m.report_unreachable(1, test_error());
+        }
+        assert!(m.acquire_context(None).await.is_ok(), "冷却中还没再失败过");
+        m.report_unreachable(1, test_error());
+        cooling_wait(&m).await;
+    }
+
+    #[tokio::test]
+    async fn healthy_account_is_used_while_others_wait() {
+        let m = manager(&[0, 0, 1]);
+        cool_down_and_fail_once_more(&m, &[1, 2]);
+        for _ in 0..4 {
+            assert_eq!(m.acquire_context(None).await.unwrap().id, 3);
         }
     }
 

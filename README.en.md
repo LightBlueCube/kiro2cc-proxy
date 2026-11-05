@@ -465,6 +465,8 @@ See the format reference below. Restart the service after saving.
 
 Lower `priority` value = higher priority. Up to 3 retries per account, 9 per request, with automatic failover.
 
+Accounts that keep getting throttled or cannot be reached cool down and are skipped during selection. When every usable account is cooling down, requests are no longer sent upstream as usual: each account lets through one probe request per interval, each failed probe doubles the interval (from 15 seconds, up to 5 minutes), and one successful response restores it. Meanwhile new requests queue for up to 10 seconds; if no probe slot opens in time they get a 429 whose `Retry-After` is the seconds until the earliest probe. The admin panel shows "Probe in Ns" next to the account status.
+
 ---
 
 ## ⚙️ Configuration Reference

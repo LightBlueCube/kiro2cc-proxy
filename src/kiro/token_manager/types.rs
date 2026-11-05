@@ -32,6 +32,9 @@ pub struct HealthDetail {
     /// 请求发送连续失败导致的冷却剩余秒数（面板显示为异常，区别于限流冷却）；不在此冷却时为 None
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreachable_cooldown_secs: Option<u64>,
+    /// 候选账号全部冷却、已开始按间隔试探时，距下一次试探的剩余秒数；其它情况为 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_wait_secs: Option<u64>,
 }
 
 /// 账号条目快照（用于 Admin API 读取）

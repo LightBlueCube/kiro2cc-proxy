@@ -45,6 +45,8 @@ export interface CredentialStatusItem {
   cooldownRemainingSecs?: number
   /** 请求发送连续失败（代理错误、连接失败、超时）的冷却剩余秒数；显示为异常，到期自动重试 */
   unreachableCooldownSecs?: number
+  /** 候选账号全部冷却、已开始按间隔试探时，距下一次试探的剩余秒数；其它情况缺省 */
+  probeWaitSecs?: number
   throttleCount: number
   /**
    * 禁用原因；与 `disabled` 配套使用。

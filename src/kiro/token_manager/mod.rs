@@ -22,12 +22,14 @@ pub(crate) fn is_token_expiring_within(
 
 mod entry;
 mod manager;
+mod probe;
 mod refresh;
 mod types;
 mod unreachable;
 mod upstream_failures;
 
 pub use entry::{AccountError, DisabledReason, HealthStatus};
+pub use probe::AccountsCoolingDown;
 pub(crate) use refresh::UsageLimitsUnsupportedError;
 #[cfg(test)]
 pub(crate) use refresh::{is_token_expired, is_token_expiring_soon, refresh_token};

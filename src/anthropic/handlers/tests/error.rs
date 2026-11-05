@@ -13,6 +13,7 @@ mod tests {
 
     use crate::anthropic::types::Thinking;
     use crate::kiro::provider::UpstreamRejected;
+    use crate::kiro::token_manager::AccountsCoolingDown;
 
     use axum::http::StatusCode;
     use axum::response::Response;
@@ -146,6 +147,21 @@ mod tests {
         let err = anyhow::anyhow!("上游限流：429 Too Many Requests");
         let resp = map_provider_error_with_context(err, "claude-sonnet-4-6", 100);
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "5");
+    }
+
+    #[tokio::test]
+    async fn test_map_provider_error_accounts_cooling_down_sets_retry_after() {
+        let err = anyhow::Error::from(AccountsCoolingDown::new(std::time::Duration::from_millis(
+            41_300,
+        )));
+        let resp = map_provider_error_with_context(err, "claude-sonnet-4-6", 100);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "42");
+        let text = response_body_text(resp).await;
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["error"]["type"], "rate_limit_error");
+        assert!(text.contains("42 seconds"), "{text}");
     }
 
     #[tokio::test]

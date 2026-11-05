@@ -5,7 +5,7 @@ use crate::anthropic::stream::{CLIENT_ASSUMED_CONTEXT_WINDOW, SseEvent, scale_fo
 use crate::anthropic::types::{ErrorResponse, MessagesRequest};
 
 use crate::kiro::provider::UpstreamRejected;
-use crate::kiro::token_manager::QUOTA_EXHAUSTED_ALL_MARKER;
+use crate::kiro::token_manager::{AccountsCoolingDown, QUOTA_EXHAUSTED_ALL_MARKER};
 use anyhow::Error;
 use axum::{
     http::{StatusCode, header},
@@ -26,6 +26,9 @@ pub(crate) fn format_prompt_too_long(estimated_input_tokens: i32, model: &str) -
     )
 }
 
+/// 上游限流 429 建议客户端等待的秒数
+const RATE_LIMIT_RETRY_AFTER_SECS: u64 = 5;
+
 /// Provider 错误分类结果：HTTP 错误响应与流内 error 事件共用，保证两条路径口径一致
 struct ProviderErrorClass {
     status: StatusCode,
@@ -41,9 +44,18 @@ pub(crate) fn map_provider_error_with_context(
     let class = classify_provider_error(&err, model, estimated_input_tokens);
     let body = Json(ErrorResponse::new(class.error_type, class.message));
 
-    // 429 带 Retry-After，交由客户端内置退避接管
+    // 429 带 Retry-After，交由客户端内置退避接管；账号全部冷却时告知最早可以试探的时间
     if class.status == StatusCode::TOO_MANY_REQUESTS {
-        return (class.status, [(header::RETRY_AFTER, "5")], body).into_response();
+        let retry_after = err.downcast_ref::<AccountsCoolingDown>().map_or(
+            RATE_LIMIT_RETRY_AFTER_SECS,
+            AccountsCoolingDown::retry_after_secs,
+        );
+        return (
+            class.status,
+            [(header::RETRY_AFTER, retry_after.to_string())],
+            body,
+        )
+            .into_response();
     }
     (class.status, body).into_response()
 }
@@ -126,6 +138,20 @@ fn classify_provider_error(
                       Quota resets at the start of next month, or add/enable another account \
                       in the admin panel."
                 .to_string(),
+        };
+    }
+
+    // 候选账号全部冷却、都没到试探时间：本次没有发往上游，按 429 让客户端等到可以试探再来
+    if let Some(cooling) = err.downcast_ref::<AccountsCoolingDown>() {
+        tracing::warn!(error = %err, "账号全部冷却：返回 429，Retry-After 为最早可试探时间");
+        return ProviderErrorClass {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error_type: "rate_limit_error",
+            message: format!(
+                "All Kiro accounts are cooling down after repeated upstream failures. \
+                 Please retry in {} seconds.",
+                cooling.retry_after_secs()
+            ),
         };
     }
 

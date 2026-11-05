@@ -233,6 +233,8 @@
     "disabledReasonTooManyFailures": "连续 3 次 401/403，已自动禁用",
     "unreachableCooldown": "请求连续发送失败（代理错误、连接失败或超时）：冷却剩余 {{minutes}} 分钟，到期自动重试",
     "modelRestricted": "模型受限 {{count}}",
+    "probeWait": "试探 {{secs}}s",
+    "probeWaitNote": "可用账号全部在冷却中，只按间隔放出试探请求：{{secs}} 秒后再试探这个账号。试探失败间隔翻倍（15 秒起，最长 5 分钟），一次正常完成即恢复。期间新请求最多排队 10 秒，等不到则返回 429。",
     "modelRestrictedNote": "上游连续拒答，以下模型的请求暂时换用其它账号：",
     "modelRestrictedItem": "{{model}}（剩余 {{minutes}} 分钟）：{{message}}",
     "disabledReasonQuotaExceeded": "本月请求额度已用尽，下月自动恢复",

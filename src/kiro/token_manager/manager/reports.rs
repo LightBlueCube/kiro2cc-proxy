@@ -1,5 +1,5 @@
 //! 凭据状态上报：限流（throttled）、成功（success）等运行时状态回报与轮转联动。
-use super::super::entry::{AccountError, CredentialEntry, DisabledReason};
+use super::super::entry::{AccountError, CredentialEntry, DisabledReason, HealthStatus};
 use super::super::refresh::RefreshTokenInvalidError;
 use super::super::types::{
     MAX_FAILURES_PER_CREDENTIAL, MultiTokenManager, QUOTA_EXHAUSTED_ALL_MARKER,
@@ -16,9 +16,9 @@ impl MultiTokenManager {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             entry.throttle_count += 1;
-            entry
-                .upstream_failures
-                .record(UpstreamFailure::Throttled, Instant::now());
+            record_failure(entry, |e, now| {
+                e.upstream_failures.record(UpstreamFailure::Throttled, now)
+            });
             entry.last_throttled_wall = Some(Utc::now());
             tracing::debug!("账号 #{} 被限流（累计 {} 次）", id, entry.throttle_count);
         }
@@ -31,9 +31,9 @@ impl MultiTokenManager {
     pub fn report_abnormal_response(&self, id: u64, error: AccountError) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry
-                .upstream_failures
-                .record(UpstreamFailure::Abnormal, Instant::now());
+            record_failure(entry, |e, now| {
+                e.upstream_failures.record(UpstreamFailure::Abnormal, now)
+            });
             entry.last_error = Some(error);
         }
         self.stats_dirty.store(true, Ordering::Relaxed);
@@ -50,6 +50,7 @@ impl MultiTokenManager {
             entry.upstream_failures.end_streak();
             entry.failure_count = 0;
             entry.unreachable.reset();
+            entry.probe.reset();
             if let Some(model) = model {
                 entry.model_refusals.remove(&model.to_ascii_lowercase());
             }
@@ -178,7 +179,7 @@ impl MultiTokenManager {
         };
 
         tracing::warn!("账号 #{} 请求发送失败: {}", id, error.message);
-        if let Some(cooldown) = entry.unreachable.record(Instant::now()) {
+        if let Some(cooldown) = record_failure(entry, |e, now| e.unreachable.record(now)) {
             tracing::error!(
                 "账号 #{} 连续请求发送失败，冷却 {} 分钟",
                 id,
@@ -585,6 +586,20 @@ impl MultiTokenManager {
             )
         }
     }
+}
+
+/// 记一次账号失败；账号此前已在冷却中（候选账号全部冷却时放出的试探），同时递增试探间隔
+fn record_failure<T>(
+    entry: &mut CredentialEntry,
+    record: impl FnOnce(&mut CredentialEntry, Instant) -> T,
+) -> T {
+    let now = Instant::now();
+    let cooling = MultiTokenManager::compute_health_at(entry, now) == HealthStatus::Unhealthy;
+    let recorded = record(entry, now);
+    if cooling {
+        entry.probe.record_failure(now);
+    }
+    recorded
 }
 
 /// 没拿到 HTTP 响应的失败（连接失败、超时、发送中断），区别于上游返回的错误状态与解码失败

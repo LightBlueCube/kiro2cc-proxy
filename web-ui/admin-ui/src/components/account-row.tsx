@@ -304,6 +304,14 @@ export function AccountRow({
             {t('credentials.modelRestricted', { count: restrictions.length })}
           </span>
         )}
+        {credential.probeWaitSecs !== undefined && (
+          <span
+            className="ml-1 inline-flex h-5 items-center whitespace-nowrap rounded-[6px] border border-warn-line bg-warn-soft px-[7px] text-[11px] font-semibold text-warn"
+            title={t('credentials.probeWaitNote', { secs: credential.probeWaitSecs })}
+          >
+            {t('credentials.probeWait', { secs: credential.probeWaitSecs })}
+          </span>
+        )}
       </td>
       {/* 套餐（设计稿 .plan）：外形取设计稿中性徽标，文字色沿用既有 getSubscriptionColor 分级 */}
       <td className={CELL}>

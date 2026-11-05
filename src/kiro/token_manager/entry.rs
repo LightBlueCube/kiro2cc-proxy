@@ -1,4 +1,5 @@
 //! 单凭据条目：健康状态（HealthStatus）、禁用原因（DisabledReason）与统计计数。
+use super::probe::ProbeBackoff;
 use super::unreachable::FailureCooldown;
 use super::upstream_failures::UpstreamFailures;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -34,6 +35,8 @@ pub(crate) struct CredentialEntry {
     pub(crate) upstream_failures: UpstreamFailures,
     /// 请求发送失败（代理错误、连接失败、超时）的连续计数与冷却；仅内存
     pub(crate) unreachable: FailureCooldown,
+    /// 候选账号全部冷却时的试探间隔；仅内存
+    pub(crate) probe: ProbeBackoff,
     /// 按模型（小写）的连续拒答与冷却；仅内存
     pub(crate) model_refusals: HashMap<String, ModelRefusals>,
     /// 最后一次被限流时间（UTC，随统计持久化；健康度不使用）
