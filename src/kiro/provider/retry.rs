@@ -10,7 +10,7 @@ use crate::model::throttle_log::ThrottleContext;
 
 use super::SignatureRepair;
 use super::core::{KiroProvider, MAX_RETRIES_PER_CREDENTIAL, MAX_TOTAL_RETRIES};
-use super::errors::LOCAL_LIMIT_QUEUE;
+use super::errors::{LOCAL_LIMIT_QUEUE, UpstreamRejected};
 
 /// 一次请求内逐个删除坏签名的上限；仍被拒则删除全部历史推理
 ///
@@ -552,7 +552,7 @@ impl KiroProvider {
                     ));
                     continue;
                 }
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+                return Err(UpstreamRejected::new(api_type, status, body).into());
             }
 
             // 401/403 - 更可能是账号/权限问题：计入失败并允许故障转移
@@ -640,7 +640,7 @@ impl KiroProvider {
 
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入账号失败
             if status.is_client_error() {
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+                return Err(UpstreamRejected::new(api_type, status, body).into());
             }
 
             // 兜底：当作可重试的瞬态错误处理（不切换账号）

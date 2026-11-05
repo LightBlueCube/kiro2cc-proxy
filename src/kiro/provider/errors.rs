@@ -16,6 +16,59 @@ const RETRY_BACKOFF_MAX_EXPONENT: usize = 6;
 pub(crate) const LOCAL_LIMIT_QUEUE: Duration = Duration::from_secs(10);
 const THINKING_SIGNATURE_INVALID_REASON: &str = "THINKING_SIGNATURE_INVALID";
 
+/// 上游以 4xx 拒绝了请求内容本身（与账号无关，换号重试结果不变）
+///
+/// 保留上游状态码与报错原文，handler 据此原样告知客户端，而不是笼统的 502。
+/// Display 与此前的错误串一致，日志和按文案识别的分类不受影响。
+#[derive(Debug)]
+pub struct UpstreamRejected {
+    api_type: &'static str,
+    status: http::StatusCode,
+    body: String,
+}
+
+impl UpstreamRejected {
+    pub(crate) fn new(api_type: &'static str, status: http::StatusCode, body: String) -> Self {
+        Self {
+            api_type,
+            status,
+            body,
+        }
+    }
+
+    pub fn status(&self) -> http::StatusCode {
+        self.status
+    }
+
+    /// 给客户端看的报错：取上游 JSON 的 `message`，没有则用原文，原文为空时说明状态码
+    pub fn client_message(&self) -> String {
+        let message = serde_json::from_str::<serde_json::Value>(&self.body)
+            .ok()
+            .and_then(|v| v.get("message")?.as_str().map(str::to_string));
+        if let Some(message) = message {
+            return message;
+        }
+
+        let body = self.body.trim();
+        if body.is_empty() {
+            return format!("Upstream rejected the request with status {}.", self.status);
+        }
+        body.to_string()
+    }
+}
+
+impl std::fmt::Display for UpstreamRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} API 请求失败: {} {}",
+            self.api_type, self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for UpstreamRejected {}
+
 impl KiroProvider {
     pub(crate) fn retry_delay(attempt: usize) -> Duration {
         // 指数退避 + 少量抖动，避免上游抖动时放大故障

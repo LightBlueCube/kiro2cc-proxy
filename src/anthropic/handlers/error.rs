@@ -4,6 +4,7 @@
 use crate::anthropic::stream::{CLIENT_ASSUMED_CONTEXT_WINDOW, SseEvent, scale_for_client};
 use crate::anthropic::types::{ErrorResponse, MessagesRequest};
 
+use crate::kiro::provider::UpstreamRejected;
 use crate::kiro::token_manager::QUOTA_EXHAUSTED_ALL_MARKER;
 use anyhow::Error;
 use axum::{
@@ -99,6 +100,17 @@ fn classify_provider_error(
             message: "Input is too long. Reduce the size of your messages.".to_string(),
         };
     }
+
+    // 上游拒绝请求内容（图片 MIME 不符等）：原样透传状态码与上游报错，
+    // 客户端才知道是自己的请求有问题，502 会让它误以为上游故障而反复重试
+    if let Some(rejected) = err.downcast_ref::<UpstreamRejected>() {
+        tracing::warn!(error = %err, "上游拒绝请求内容（不应重试）：透传状态码与报错");
+        return ProviderErrorClass {
+            status: rejected.status(),
+            error_type: rejected_error_type(rejected.status()),
+            message: rejected.client_message(),
+        };
+    }
     // 额度耗尽（402）：range 内所有（模型过滤后）账号本月额度均已用尽。
     // 必须优先于 429 判断，且只信任 describe_unavailable 产出的机器可识别标记——
     // 该标记只在"scope 内 100% 账号确认为 QuotaExceeded"时才会写入，裸匹配
@@ -138,6 +150,15 @@ fn classify_provider_error(
         status: StatusCode::BAD_GATEWAY,
         error_type: "api_error",
         message: "Upstream API call failed. Please retry shortly.".to_string(),
+    }
+}
+
+/// 上游 4xx 对应的 Anthropic 错误类型（401/403/429 在 provider 内另行处理，不会到这里）
+fn rejected_error_type(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::NOT_FOUND => "not_found_error",
+        StatusCode::PAYLOAD_TOO_LARGE => "request_too_large",
+        _ => "invalid_request_error",
     }
 }
 

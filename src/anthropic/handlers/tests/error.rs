@@ -12,6 +12,7 @@ mod tests {
     use crate::anthropic::stream::{CLIENT_ASSUMED_CONTEXT_WINDOW, scale_for_client};
 
     use crate::anthropic::types::Thinking;
+    use crate::kiro::provider::UpstreamRejected;
 
     use axum::http::StatusCode;
     use axum::response::Response;
@@ -187,6 +188,56 @@ mod tests {
             "超窗文案未对齐官方格式: {}",
             text
         );
+    }
+
+    fn rejected(status: StatusCode, body: &str) -> anyhow::Error {
+        UpstreamRejected::new("流式", status, body.to_string()).into()
+    }
+
+    #[tokio::test]
+    async fn test_map_provider_error_upstream_rejection_passes_status_and_message_through() {
+        let upstream_message = "messages.12.content.6.image.source.base64: The image was specified using the image/jpeg media type, but the image appears to be a image/png image";
+        let body = json!({"message": upstream_message, "reason": "IMAGE_MIME_MISMATCH"});
+        let resp = map_provider_error_with_context(
+            rejected(StatusCode::BAD_REQUEST, &body.to_string()),
+            "claude-opus-5",
+            100,
+        );
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&response_body_text(resp).await).unwrap();
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+        assert_eq!(value["error"]["message"], upstream_message);
+    }
+
+    #[tokio::test]
+    async fn test_map_provider_error_upstream_rejection_without_json_uses_raw_body() {
+        let resp = map_provider_error_with_context(
+            rejected(StatusCode::NOT_FOUND, " no such route \n"),
+            "claude-opus-5",
+            100,
+        );
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&response_body_text(resp).await).unwrap();
+        assert_eq!(value["error"]["type"], "not_found_error");
+        assert_eq!(value["error"]["message"], "no such route");
+    }
+
+    #[tokio::test]
+    async fn test_map_provider_error_rejected_context_length_keeps_too_long_format() {
+        // 超窗也是上游 400 拒绝，但必须继续改写成官方超窗文案，客户端才会压缩后重试
+        let body = r#"{"message":"Input content length exceeds threshold.","reason":"CONTENT_LENGTH_EXCEEDS_THRESHOLD"}"#;
+        let resp = map_provider_error_with_context(
+            rejected(StatusCode::BAD_REQUEST, body),
+            "claude-opus-5",
+            754_234,
+        );
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let text = response_body_text(resp).await;
+        assert!(text.contains(&format_prompt_too_long(754_234, "claude-opus-5")));
     }
 
     #[tokio::test]

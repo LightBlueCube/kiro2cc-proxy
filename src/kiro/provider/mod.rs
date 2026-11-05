@@ -19,3 +19,4 @@ mod tests;
 
 pub use api::{ApiResponse, SignatureRepair, UpstreamFeedback, UpstreamRoute};
 pub use core::KiroProvider;
+pub use errors::UpstreamRejected;
