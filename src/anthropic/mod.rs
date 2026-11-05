@@ -26,6 +26,7 @@
 pub(crate) mod converter;
 pub(crate) mod handlers;
 pub mod middleware;
+pub(crate) mod request_body;
 mod router;
 mod stream;
 pub mod types;

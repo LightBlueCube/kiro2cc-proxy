@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 
 use crate::anthropic::handlers::post_messages_as;
 use crate::anthropic::middleware::{ApiKeyContext, AppState};
+use crate::anthropic::request_body::RequestBody;
 use crate::model::usage::ApiFormat;
 
 use super::chat_request;
@@ -64,7 +65,7 @@ pub(crate) async fn post_chat_completions(
     identity: Option<Extension<ApiKeyContext>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    body: Bytes,
+    RequestBody(body): RequestBody,
 ) -> Response {
     let incoming = match parse_json_body(&body) {
         Ok(v) => v,
@@ -113,7 +114,7 @@ pub(crate) async fn post_responses(
     identity: Option<Extension<ApiKeyContext>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    body: Bytes,
+    RequestBody(body): RequestBody,
 ) -> Response {
     let incoming = match parse_json_body(&body) {
         Ok(v) => v,

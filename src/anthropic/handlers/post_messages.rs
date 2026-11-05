@@ -6,6 +6,7 @@ use crate::anthropic::converter::{
     is_luna_model,
 };
 use crate::anthropic::middleware::{ApiKeyContext, AppState};
+use crate::anthropic::request_body::RequestBody;
 use crate::anthropic::types::ErrorResponse;
 
 use crate::kiro::model::requests::kiro::KiroRequest;
@@ -36,7 +37,7 @@ pub async fn post_messages(
     identity: Option<Extension<ApiKeyContext>>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
-    body: Bytes,
+    RequestBody(body): RequestBody,
 ) -> Response {
     post_messages_as(
         state,

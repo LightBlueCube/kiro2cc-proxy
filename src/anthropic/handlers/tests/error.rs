@@ -52,6 +52,7 @@ mod tests {
     async fn test_invalid_inline_system_and_roles_return_400_on_both_endpoints() {
         use crate::anthropic::handlers::{post_messages, post_messages_cc};
         use crate::anthropic::middleware::AppState;
+        use crate::anthropic::request_body::RequestBody;
         use crate::kiro::model::credentials::KiroCredentials;
         use crate::kiro::provider::KiroProvider;
         use crate::kiro::token_manager::MultiTokenManager;
@@ -93,7 +94,7 @@ mod tests {
                     None,
                     ConnectInfo(address),
                     Default::default(),
-                    body.clone(),
+                    RequestBody(body.clone()),
                 )
                 .await,
                 post_messages_cc(
@@ -101,7 +102,7 @@ mod tests {
                     None,
                     ConnectInfo(address),
                     Default::default(),
-                    body,
+                    RequestBody(body),
                 )
                 .await,
             ];

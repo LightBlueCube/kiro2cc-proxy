@@ -9,11 +9,11 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
-use bytes::Bytes;
 use std::time::Duration;
 
 use crate::anthropic::converter::{ConversionError, Tenant, convert_request};
 use crate::anthropic::middleware::{ApiKeyContext, AppState};
+use crate::anthropic::request_body::RequestBody;
 use crate::anthropic::types::ErrorResponse;
 
 use super::error::parse_messages_request;
@@ -41,7 +41,7 @@ pub async fn post_messages_cc(
     identity: Option<Extension<ApiKeyContext>>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
-    body: Bytes,
+    RequestBody(body): RequestBody,
 ) -> Response {
     let mut payload = match parse_messages_request(&body) {
         Ok(p) => p,
