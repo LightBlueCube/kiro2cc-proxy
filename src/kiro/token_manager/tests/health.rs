@@ -5,6 +5,7 @@ mod tests {
     use super::super::super::entry::HealthStatus;
     use super::super::super::probe::AccountsCoolingDown;
     use super::super::super::types::MultiTokenManager;
+    use super::super::super::upstream_failures::UpstreamFailure;
     use super::super::affinity::tests::make_valid_cred;
     use super::super::multi::tests::test_error;
     use crate::model::config::Config;
@@ -89,16 +90,18 @@ mod tests {
         }
         let now = Instant::now();
         assert_eq!(health_at(&m, 1, now), HealthStatus::Unhealthy);
-        // 冷却 2 分钟后放回选号（仍是降级），再失败一次冷却翻倍到 4 分钟
+        // 冷却 2 分钟后放回选号（仍是降级），离开冷却后再失败一次冷却翻倍到 4 分钟
+        let after_cooldown = now + 2 * MINUTE + Duration::from_secs(1);
+        assert_eq!(health_at(&m, 1, after_cooldown), HealthStatus::Degraded);
+        m.entries.lock()[0]
+            .upstream_failures
+            .record(UpstreamFailure::Throttled, after_cooldown);
         assert_eq!(
-            health_at(&m, 1, now + 2 * MINUTE + Duration::from_secs(1)),
-            HealthStatus::Degraded
+            health_at(&m, 1, after_cooldown + 3 * MINUTE),
+            HealthStatus::Unhealthy
         );
-        m.report_throttled(1);
-        let now = Instant::now();
-        assert_eq!(health_at(&m, 1, now + 3 * MINUTE), HealthStatus::Unhealthy);
         assert_eq!(
-            health_at(&m, 1, now + 4 * MINUTE + Duration::from_secs(1)),
+            health_at(&m, 1, after_cooldown + 4 * MINUTE + Duration::from_secs(1)),
             HealthStatus::Degraded
         );
     }
@@ -272,6 +275,101 @@ mod tests {
         assert_ne!(health(&m, 1), HealthStatus::Unhealthy);
         assert_eq!(m.acquire_context(None).await.unwrap().id, 1);
         assert_eq!(m.snapshot().entries[0].health_detail.probe_wait_secs, None);
+    }
+
+    #[test]
+    fn failures_flooding_in_during_cooldown_do_not_escalate_it() {
+        let m = manager(&[0]);
+        for _ in 0..3 {
+            m.report_throttled(1);
+        }
+        for _ in 0..10 {
+            m.report_throttled(1);
+        }
+
+        let detail = &m.snapshot().entries[0].health_detail;
+        assert_eq!(detail.consecutive_failures, 3);
+        assert!(
+            matches!(detail.cooldown_remaining_secs, Some(119..=120)),
+            "冷却仍是 2 分钟: {:?}",
+            detail.cooldown_remaining_secs
+        );
+    }
+
+    #[test]
+    fn failure_after_leaving_cooldown_escalates_it() {
+        let m = manager(&[0]);
+        {
+            let mut entries = m.entries.lock();
+            let earlier = Instant::now() - 3 * MINUTE;
+            for _ in 0..3 {
+                entries[0]
+                    .upstream_failures
+                    .record(UpstreamFailure::Throttled, earlier);
+            }
+        }
+        assert_ne!(health(&m, 1), HealthStatus::Unhealthy, "2 分钟冷却已过");
+
+        m.report_throttled(1);
+
+        assert_eq!(health(&m, 1), HealthStatus::Unhealthy);
+        let detail = &m.snapshot().entries[0].health_detail;
+        assert_eq!(detail.consecutive_failures, 4);
+        assert!(
+            matches!(detail.cooldown_remaining_secs, Some(239..=240)),
+            "第 4 次连续失败冷却 4 分钟: {:?}",
+            detail.cooldown_remaining_secs
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_response_resets_cooldown_and_probe_accumulation() {
+        let m = manager(&[0]);
+        {
+            let mut entries = m.entries.lock();
+            // 第一轮 2 分钟冷却已过，离开冷却后再失败：第 4 次连续失败，冷却 4 分钟
+            let earlier = Instant::now() - 3 * MINUTE;
+            for _ in 0..3 {
+                entries[0]
+                    .upstream_failures
+                    .record(UpstreamFailure::Throttled, earlier);
+            }
+            let now = Instant::now();
+            entries[0]
+                .upstream_failures
+                .record(UpstreamFailure::Throttled, now);
+            for _ in 0..7 {
+                entries[0].probe.claim(now);
+                entries[0].probe.record_failure(now);
+            }
+        }
+        let escalated = cooling_wait(&m).await;
+        assert!(
+            escalated > Duration::from_secs(290),
+            "试探间隔已封顶: {escalated:?}"
+        );
+        let detail = &m.snapshot().entries[0].health_detail;
+        assert!(matches!(detail.cooldown_remaining_secs, Some(239..=240)));
+
+        m.report_response_completed(1, None);
+
+        assert_ne!(health(&m, 1), HealthStatus::Unhealthy);
+        assert_eq!(m.snapshot().entries[0].health_detail.probe_wait_secs, None);
+        for _ in 0..3 {
+            m.report_throttled(1);
+        }
+        let detail = &m.snapshot().entries[0].health_detail;
+        assert!(
+            matches!(detail.cooldown_remaining_secs, Some(119..=120)),
+            "冷却从 2 分钟重新算: {:?}",
+            detail.cooldown_remaining_secs
+        );
+        m.report_throttled(1);
+        let wait = cooling_wait(&m).await;
+        assert!(
+            wait > Duration::from_secs(14) && wait <= Duration::from_secs(15),
+            "试探间隔从 15 秒重新算: {wait:?}"
+        );
     }
 
     #[tokio::test]

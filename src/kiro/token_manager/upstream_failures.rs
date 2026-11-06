@@ -1,7 +1,8 @@
 //! 账号近期的上游失败（限流、异常结束）：最近 10 分钟的分钟级计数与连续失败次数，健康度据此判定。
 //!
 //! 只记上游失败，不看成功次数：长期成功的历史不应稀释眼前的限流。连续失败由一次完整的
-//! 正常响应中断（[`UpstreamFailures::end_streak`]）。仅存内存，重启后清空。
+//! 正常响应中断（[`UpstreamFailures::end_streak`]）。冷却期内的失败不计，离开冷却后再失败才升级
+//! 冷却。仅存内存，重启后清空。
 
 use std::time::{Duration, Instant};
 
@@ -10,9 +11,9 @@ const WINDOW_MINUTES: u64 = 10;
 const SECS_PER_MINUTE: u64 = 60;
 
 /// 连续失败达到此数（且在冷却期内）判为不健康
-pub(crate) const UNHEALTHY_CONSECUTIVE: u32 = 3;
+const UNHEALTHY_CONSECUTIVE: u32 = 3;
 /// 窗口内失败达到此数（且在冷却期内）判为不健康
-pub(crate) const UNHEALTHY_RECENT: u32 = 20;
+const UNHEALTHY_RECENT: u32 = 20;
 /// 连续失败达到此数判为降级
 pub(crate) const DEGRADED_CONSECUTIVE: u32 = 2;
 /// 窗口内失败达到此数判为降级
@@ -72,7 +73,15 @@ impl UpstreamFailures {
         }
     }
 
+    /// 记一次失败
+    ///
+    /// 冷却期内的失败不计：所有账号都在冷却时冷却中的账号仍可能被选中，冷却前发出的在途请求
+    /// 和同一请求的后续重试也会陆续失败。只有离开冷却后的再次失败才升级冷却。
     pub(crate) fn record(&mut self, kind: UpstreamFailure, now: Instant) {
+        if self.is_cooling(now) {
+            return;
+        }
+
         let minute = self.minute_of(now);
         let bucket = &mut self.buckets[(minute % WINDOW_MINUTES) as usize];
         if bucket.minute != minute {
@@ -129,6 +138,13 @@ impl UpstreamFailures {
         let cooldown = (BASE_COOLDOWN * 2u32.pow(doublings)).min(MAX_COOLDOWN);
         let elapsed = now.saturating_duration_since(self.last_at?);
         cooldown.checked_sub(elapsed).filter(|d| !d.is_zero())
+    }
+
+    /// 处于不健康冷却期内：连续失败或窗口内失败达到阈值，且冷却期未满
+    pub(crate) fn is_cooling(&self, now: Instant) -> bool {
+        let failing_hard = self.consecutive(now) >= UNHEALTHY_CONSECUTIVE
+            || self.recent(now).total() >= UNHEALTHY_RECENT;
+        failing_hard && self.cooldown_remaining(now).is_some()
     }
 
     fn minute_of(&self, now: Instant) -> u64 {
@@ -205,24 +221,45 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_doubles_with_streak_and_caps_at_window() {
+    fn failures_during_cooldown_are_not_accumulated() {
         let t0 = Instant::now();
         let mut f = UpstreamFailures::new(t0);
-        assert_eq!(f.cooldown_remaining(t0), None);
+        for _ in 0..3 {
+            f.record(UpstreamFailure::Throttled, t0);
+        }
 
-        let expected = [(1, 2), (2, 2), (3, 2), (4, 4), (5, 8), (6, 10), (9, 10)];
-        let mut recorded = 0;
-        for (streak, cooldown_minutes) in expected {
-            while recorded < streak {
-                f.record(UpstreamFailure::Throttled, t0);
-                recorded += 1;
-            }
+        let during = t0 + minutes(1);
+        for _ in 0..5 {
+            f.record(UpstreamFailure::Throttled, during);
+        }
+        assert_eq!(f.consecutive(during), 3);
+        assert_eq!(f.recent(during).total(), 3);
+        assert_eq!(
+            f.cooldown_remaining(during),
+            Some(minutes(1)),
+            "冷却中的失败不延长冷却"
+        );
+    }
+
+    #[test]
+    fn cooldown_escalates_only_by_failures_after_leaving_it() {
+        let t0 = Instant::now();
+        let mut f = UpstreamFailures::new(t0);
+        f.record(UpstreamFailure::Throttled, t0);
+        f.record(UpstreamFailure::Throttled, t0);
+
+        let mut now = t0;
+        for (streak, cooldown_minutes) in [(3, 2), (4, 4), (5, 8), (6, 10), (7, 10)] {
+            f.record(UpstreamFailure::Throttled, now);
+            assert_eq!(f.consecutive(now), streak);
             assert_eq!(
-                f.cooldown_remaining(t0),
+                f.cooldown_remaining(now),
                 Some(minutes(cooldown_minutes)),
                 "连续 {streak} 次"
             );
+
+            now += minutes(cooldown_minutes);
+            assert_eq!(f.cooldown_remaining(now), None, "到期自动解除");
         }
-        assert_eq!(f.cooldown_remaining(t0 + minutes(10)), None);
     }
 }

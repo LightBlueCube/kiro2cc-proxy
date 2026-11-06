@@ -289,29 +289,32 @@ export function AccountRow({
       </td>
       <td className={CELL}>
         {/* .tag：20px 高 + 5px pip（pip 的 2.5px 外发光已在 ACCOUNT_STATE_VISUAL 里定义） */}
-        <span
-          className={`inline-flex h-5 items-center gap-[5px] whitespace-nowrap rounded-[6px] border px-[7px] text-[11px] font-semibold ${visual.tagClass}`}
-          title={stateTitle(credential, t) || undefined}
-        >
-          <span aria-hidden="true" className={`size-[5px] flex-none rounded-full ${visual.pipClass}`} />
-          {t(visual.labelKey)}
-        </span>
-        {restrictions.length > 0 && (
+        {/* 标签与徽标用 gap 排布：列宽不够换行时，各行仍左对齐 */}
+        <div className="flex flex-wrap items-center gap-1">
           <span
-            className="ml-1 inline-flex h-5 items-center whitespace-nowrap rounded-[6px] border border-warn-line bg-warn-soft px-[7px] text-[11px] font-semibold text-warn"
-            title={restrictionsTitle(restrictions, t)}
+            className={`inline-flex h-5 items-center gap-[5px] whitespace-nowrap rounded-[6px] border px-[7px] text-[11px] font-semibold ${visual.tagClass}`}
+            title={stateTitle(credential, t) || undefined}
           >
-            {t('credentials.modelRestricted', { count: restrictions.length })}
+            <span aria-hidden="true" className={`size-[5px] flex-none rounded-full ${visual.pipClass}`} />
+            {t(visual.labelKey)}
           </span>
-        )}
-        {credential.probeWaitSecs !== undefined && (
-          <span
-            className="ml-1 inline-flex h-5 items-center whitespace-nowrap rounded-[6px] border border-warn-line bg-warn-soft px-[7px] text-[11px] font-semibold text-warn"
-            title={t('credentials.probeWaitNote', { secs: credential.probeWaitSecs })}
-          >
-            {t('credentials.probeWait', { secs: credential.probeWaitSecs })}
-          </span>
-        )}
+          {restrictions.length > 0 && (
+            <span
+              className="inline-flex h-5 items-center whitespace-nowrap rounded-[6px] border border-warn-line bg-warn-soft px-[7px] text-[11px] font-semibold text-warn"
+              title={restrictionsTitle(restrictions, t)}
+            >
+              {t('credentials.modelRestricted', { count: restrictions.length })}
+            </span>
+          )}
+          {credential.probeWaitSecs !== undefined && (
+            <span
+              className="inline-flex h-5 items-center whitespace-nowrap rounded-[6px] border border-warn-line bg-warn-soft px-[7px] text-[11px] font-semibold text-warn"
+              title={t('credentials.probeWaitNote', { secs: credential.probeWaitSecs })}
+            >
+              {t('credentials.probeWait', { secs: credential.probeWaitSecs })}
+            </span>
+          )}
+        </div>
       </td>
       {/* 套餐（设计稿 .plan）：外形取设计稿中性徽标，文字色沿用既有 getSubscriptionColor 分级 */}
       <td className={CELL}>

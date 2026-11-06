@@ -1,9 +1,7 @@
 //! 凭据统计持久化：stats.json 防抖写入、缓存目录与统计文件路径管理。
 use super::super::entry::{CredentialEntry, DisabledReason, HealthStatus, StatsEntry};
 use super::super::types::{HealthDetail, ModelRestriction, MultiTokenManager, STATS_SAVE_DEBOUNCE};
-use super::super::upstream_failures::{
-    DEGRADED_CONSECUTIVE, DEGRADED_RECENT, UNHEALTHY_CONSECUTIVE, UNHEALTHY_RECENT, WARNING_RECENT,
-};
+use super::super::upstream_failures::{DEGRADED_CONSECUTIVE, DEGRADED_RECENT, WARNING_RECENT};
 use crate::common::fs::atomic_write;
 use crate::kiro::model::credentials::KiroCredentials;
 use chrono::{DateTime, Utc};
@@ -316,13 +314,12 @@ impl MultiTokenManager {
         }
 
         let failures = &entry.upstream_failures;
-        let consecutive = failures.consecutive(now);
-        let recent = failures.recent(now).total();
-
-        let failing_hard = consecutive >= UNHEALTHY_CONSECUTIVE || recent >= UNHEALTHY_RECENT;
-        if failing_hard && failures.cooldown_remaining(now).is_some() {
+        if failures.is_cooling(now) {
             return HealthStatus::Unhealthy;
         }
+
+        let consecutive = failures.consecutive(now);
+        let recent = failures.recent(now).total();
         let account_failures = entry.failure_count + entry.unreachable.streak();
         let degraded = consecutive >= DEGRADED_CONSECUTIVE
             || recent >= DEGRADED_RECENT
