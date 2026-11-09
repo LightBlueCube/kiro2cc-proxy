@@ -2,7 +2,7 @@
 // 健康度判定（近期上游失败）、冷却中的试探、冷却后的待验证与降级账号的选号顺位
 #[cfg(test)]
 mod tests {
-    use super::super::super::entry::HealthStatus;
+    use super::super::super::entry::{DisabledReason, HealthStatus};
     use super::super::super::probe::AccountsCoolingDown;
     use super::super::super::types::MultiTokenManager;
     use super::super::super::upstream_failures::UpstreamFailure;
@@ -509,5 +509,151 @@ mod tests {
             picked.contains(&1) && picked.contains(&2),
             "全部降级时照常轮询: {picked:?}"
         );
+    }
+
+    #[test]
+    fn reset_state_clears_cooling_and_degradation() {
+        let m = manager(&[0, 0]);
+        cool_down(&m, &[1]);
+        m.report_throttled(2);
+        m.report_throttled(2);
+        assert_eq!(health(&m, 2), HealthStatus::Degraded);
+
+        m.reset_state(1).unwrap();
+        m.reset_state(2).unwrap();
+
+        assert_eq!(health(&m, 1), HealthStatus::Healthy);
+        assert_eq!(health(&m, 2), HealthStatus::Healthy);
+        assert_eq!(m.snapshot().entries[0].health_detail.probe_wait_secs, None);
+    }
+
+    #[test]
+    fn reset_state_clears_pending_verification() {
+        let m = manager(&[0]);
+        cooled_down_ago(&m, 1, secs(200));
+        assert_eq!(health(&m, 1), HealthStatus::PendingVerification);
+
+        m.reset_state(1).unwrap();
+
+        assert_eq!(health(&m, 1), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn reset_state_keeps_disabled_accounts_disabled() {
+        let m = manager(&[0]);
+        {
+            let mut entries = m.entries.lock();
+            entries[0].disabled = true;
+            entries[0].disabled_reason = Some(DisabledReason::Manual);
+        }
+
+        m.reset_state(1).unwrap();
+
+        let entries = m.entries.lock();
+        assert!(entries[0].disabled);
+        assert_eq!(entries[0].disabled_reason, Some(DisabledReason::Manual));
+    }
+
+    #[test]
+    fn reset_state_rejects_unknown_account() {
+        let m = manager(&[0]);
+        let error = m.reset_state(99).unwrap_err();
+        assert!(error.to_string().contains("不存在"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn reset_and_enable_also_clears_throttle_cooling() {
+        let m = manager(&[0]);
+        // 已知订阅等级时启用不需要联网查询
+        m.entries.lock()[0].credentials.subscription_title = Some("KIRO FREE".to_string());
+        cool_down(&m, &[1]);
+
+        m.reset_and_enable(1).await.unwrap();
+
+        assert_eq!(health(&m, 1), HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn ignore_health_selects_cooling_accounts_without_waiting() {
+        let m = manager(&[0, 0]);
+        cool_down(&m, &[1, 2]);
+        cooling_wait(&m).await;
+
+        m.set_ignore_health(true);
+        let mut picked = Vec::new();
+        for _ in 0..4 {
+            picked.push(m.acquire_context(None).await.unwrap().id);
+        }
+        assert!(
+            picked.contains(&1) && picked.contains(&2),
+            "冷却中的账号照常轮询: {picked:?}"
+        );
+        assert_eq!(health(&m, 1), HealthStatus::Unhealthy, "面板仍显示真实状态");
+        assert!(
+            matches!(
+                m.snapshot().entries[0].health_detail.probe_wait_secs,
+                Some(29..=30)
+            ),
+            "不占试探名额，试探间隔不翻倍"
+        );
+
+        m.set_ignore_health(false);
+        let wait = cooling_wait(&m).await;
+        assert!(
+            wait > secs(29) && wait <= secs(30),
+            "关闭后恢复遵守冷却: {wait:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ignore_health_does_not_limit_pending_verification_to_one_request() {
+        let m = manager(&[0]);
+        cooled_down_ago(&m, 1, secs(200));
+        m.set_ignore_health(true);
+
+        let first = m.acquire_context(None).await.unwrap();
+        let second = m.acquire_context(None).await.unwrap();
+
+        assert!(first.trial.is_none() && second.trial.is_none());
+    }
+
+    #[tokio::test]
+    async fn ignore_health_does_not_rank_degraded_last() {
+        let m = manager(&[0, 0]);
+        m.report_throttled(1);
+        m.report_throttled(1);
+        assert_eq!(health(&m, 1), HealthStatus::Degraded);
+
+        m.set_ignore_health(true);
+        let mut picked = Vec::new();
+        for _ in 0..4 {
+            picked.push(m.acquire_context(None).await.unwrap().id);
+        }
+
+        assert!(picked.contains(&1), "降级账号不再排末位: {picked:?}");
+    }
+
+    #[tokio::test]
+    async fn ignore_health_still_skips_disabled_accounts() {
+        let m = manager(&[0, 0]);
+        cool_down(&m, &[1]);
+        {
+            let mut entries = m.entries.lock();
+            entries[1].disabled = true;
+            entries[1].disabled_reason = Some(DisabledReason::Manual);
+        }
+        m.set_ignore_health(true);
+
+        for _ in 0..4 {
+            assert_eq!(m.acquire_context(None).await.unwrap().id, 1);
+        }
+    }
+
+    #[test]
+    fn ignore_health_is_off_by_default() {
+        let m = manager(&[0]);
+        assert!(!m.ignore_health());
+        m.set_ignore_health(true);
+        assert!(m.ignore_health());
     }
 }

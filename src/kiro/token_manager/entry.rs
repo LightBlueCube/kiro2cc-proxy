@@ -66,6 +66,23 @@ pub(crate) struct ModelRefusals {
     pub(crate) message: String,
 }
 
+impl CredentialEntry {
+    /// 清空运行时健康状态（失败计数、冷却、试探、待验证、模型拒答、最近报错）
+    ///
+    /// 不碰禁用状态、额度耗尽标记与累计计数：启用账号是另一个操作。
+    pub(crate) fn reset_health(&mut self) {
+        self.failure_count = 0;
+        self.refresh_failure_count = 0;
+        self.upstream_failures.reset();
+        self.unreachable.reset();
+        self.probe.reset();
+        self.awaiting_verification = false;
+        self.model_refusals.clear();
+        self.rotation_bias = 0;
+        self.last_error = None;
+    }
+}
+
 /// 账号报错原文（Admin 面板展示用）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 import { useTranslation } from 'react-i18next'
-import { SearchBox, Segmented, Toolbar, UpdatedAgo, type SegmentedOption } from '@/components/toolbar'
+import { SearchBox, Segmented, Toggle, Toolbar, UpdatedAgo, type SegmentedOption } from '@/components/toolbar'
 import type { AccountStateGroup } from '@/lib/account-state'
 
 /** 分段筛选口径：按 accountStateGroup 归组（与指标条 abnormalCount 同源） */
@@ -25,9 +25,12 @@ export interface AccountToolbarProps {
   counts: Record<AccountStatusFilter, number>
   /** TanStack Query 的 dataUpdatedAt；0 = 尚未取到数据，不渲染「更新于」 */
   dataUpdatedAt: number
+  /** 选号是否无视账号冷却与降级（仅后端本次运行有效） */
+  ignoreHealth: boolean
+  onIgnoreHealthChange: (enabled: boolean) => void
 }
 
-/** 工具栏（设计稿 .toolbar）：搜索 + 状态分段筛选 + 更新时间 */
+/** 工具栏（设计稿 .toolbar）：搜索 + 状态分段筛选 + 无视冷却开关 + 更新时间 */
 export function AccountToolbar({
   searchQuery,
   onSearchChange,
@@ -35,6 +38,8 @@ export function AccountToolbar({
   onStatusFilterChange,
   counts,
   dataUpdatedAt,
+  ignoreHealth,
+  onIgnoreHealthChange,
 }: AccountToolbarProps) {
   const { t } = useTranslation()
   const options: SegmentedOption<AccountStatusFilter>[] = SEGMENTS.map((seg) => ({
@@ -58,6 +63,20 @@ export function AccountToolbar({
         groupLabel={t('credentials.filterGroupLabel')}
         options={options}
       />
+      {/* 开启后选号会持续请求冷却中的账号：开关周围换警示底色 */}
+      <div
+        title={t('credentials.ignoreHealthHint')}
+        className={`flex h-[31px] shrink-0 items-center rounded-[7px] border px-2.5 transition-colors ${
+          ignoreHealth ? 'border-warn-line bg-warn-soft text-warn' : 'border-transparent'
+        }`}
+      >
+        <Toggle
+          checked={ignoreHealth}
+          onChange={onIgnoreHealthChange}
+          label={t('credentials.ignoreHealth')}
+          tone="warn"
+        />
+      </div>
       <UpdatedAgo dataUpdatedAt={dataUpdatedAt} />
     </Toolbar>
   )

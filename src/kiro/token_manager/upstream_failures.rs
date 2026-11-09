@@ -94,6 +94,13 @@ impl UpstreamFailures {
         self.consecutive = 0;
     }
 
+    /// 手动重置：窗口计数与连续失败一并清空
+    pub(crate) fn reset(&mut self) {
+        self.buckets = [MinuteBucket::default(); WINDOW_MINUTES as usize];
+        self.consecutive = 0;
+        self.last_at = None;
+    }
+
     pub(crate) fn recent(&self, now: Instant) -> RecentFailures {
         let now_minute = self.minute_of(now);
         self.buckets
@@ -199,6 +206,23 @@ mod tests {
         f.end_streak();
         assert_eq!(f.consecutive(t0), 0);
         assert_eq!(f.recent(t0).total(), 2);
+    }
+
+    #[test]
+    fn reset_clears_streak_window_and_cooldown() {
+        let t0 = Instant::now();
+        let mut f = UpstreamFailures::new(t0);
+        for _ in 0..UNHEALTHY_CONSECUTIVE {
+            f.record(UpstreamFailure::Throttled, t0);
+        }
+        assert!(f.is_cooling(t0));
+
+        f.reset();
+
+        assert!(!f.is_cooling(t0));
+        assert_eq!(f.consecutive(t0), 0);
+        assert_eq!(f.recent(t0).total(), 0);
+        assert!(f.cooldown_remaining(t0).is_none());
     }
 
     #[test]

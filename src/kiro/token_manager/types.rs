@@ -175,6 +175,8 @@ pub struct MultiTokenManager {
     pub(crate) soft_rpm_per_credential: AtomicU32,
     /// 优先级模式下最高一档全部达到软上限时，新会话是否落到下一档（运行时可热切换）
     pub(crate) soft_rpm_spill_to_lower_priority: AtomicBool,
+    /// 选号是否无视账号冷却与降级（Admin API 开关）；仅运行时，不持久化，重启后关闭
+    pub(crate) ignore_health: AtomicBool,
     /// 每账号并发上限（运行时可经 Admin API 热切换；0 = 不限）
     pub(crate) max_concurrency_per_credential: AtomicU32,
     /// 每账号实际可用模型缓存（账号 ID → 上游 ListAvailableModels 结果），

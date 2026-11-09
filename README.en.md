@@ -471,6 +471,8 @@ When every usable account is cooling down, requests are no longer sent upstream 
 
 An account whose cooldown has ended becomes "Recovering" until one complete successful response returns it to healthy: only one request is let through at a time (released once the response headers arrive, with a 30-second lease as a safety net), and its selection order is not lowered, so it takes part in normal rotation. A failed trial counts as a failure after leaving the cooldown and escalates the cooldown as usual.
 
+The admin panel offers "Reset state" in the account menu and the bulk-action footer: it clears cooldown, degradation, recovering state, failure counts and model refusals without changing the disabled state (use "Restore Selected" to enable). When the "Ignore cooldown" switch in the account toolbar is on, routing no longer skips cooling, recovering or degraded accounts (disabled, quota-exhausted, model-restricted accounts and the local RPM/concurrency limits still apply), and the area around the switch turns a warning color. The switch lives only in the current run and turns off on restart.
+
 ---
 
 ## ⚙️ Configuration Reference

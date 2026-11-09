@@ -3,7 +3,7 @@ import { useState } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Boxes, FileText, MoreHorizontal, Pencil, Power, RefreshCw, Trash2, Wallet } from 'lucide-react'
+import { Boxes, FileText, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw, Trash2, Wallet } from 'lucide-react'
 import { EditCredentialDialog } from '@/components/edit-credential-dialog'
 import { CELL, DataCheckbox, ICON_BTN } from '@/components/table-kit'
 import { Button } from '@/components/ui/button'
@@ -26,6 +26,7 @@ import {
 import {
   useDeleteCredential,
   useResetFailure,
+  useResetState,
   useSetDisabled,
 } from '@/hooks/use-credentials'
 import { ACCOUNT_STATE_VISUAL, accountLabel, deriveAccountState, maskEmail } from '@/lib/account-state'
@@ -195,6 +196,7 @@ export function AccountRow({
   const [showEditDialog, setShowEditDialog] = useState(false)
   const setDisabled = useSetDisabled()
   const resetFailure = useResetFailure()
+  const resetState = useResetState()
   const deleteCredential = useDeleteCredential()
 
   const opFailed = (err: Error) =>
@@ -209,6 +211,10 @@ export function AccountRow({
 
   const handleReset = () => {
     resetFailure.mutate(credential.id, { onSuccess: res => toast.success(res.message), onError: opFailed })
+  }
+
+  const handleResetState = () => {
+    resetState.mutate(credential.id, { onSuccess: res => toast.success(res.message), onError: opFailed })
   }
 
   const handleDelete = () => {
@@ -539,6 +545,20 @@ export function AccountRow({
               >
                 <RefreshCw className="size-[13px]" strokeWidth={1.7} />
                 {t('credentials.resetFailureCount')}
+              </DropdownMenuItem>
+              {/* 健康、无失败计数、无冷却、无模型限制时无状态可重置 */}
+              <DropdownMenuItem
+                onSelect={handleResetState}
+                disabled={
+                  resetState.isPending ||
+                  (credential.healthStatus === 'healthy' &&
+                    credential.failureCount === 0 &&
+                    credential.unreachableCooldownSecs === undefined &&
+                    restrictions.length === 0)
+                }
+              >
+                <RotateCcw className="size-[13px]" strokeWidth={1.7} />
+                {t('credentials.resetState')}
               </DropdownMenuItem>
               <DropdownMenuItem danger onSelect={() => setShowDeleteDialog(true)}>
                 <Trash2 className="size-[13px]" strokeWidth={1.7} />

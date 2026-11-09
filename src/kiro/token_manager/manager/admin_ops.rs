@@ -335,21 +335,50 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
-            entry.failure_count = 0;
-            entry.refresh_failure_count = 0;
+            entry.reset_health();
             entry.disabled = false;
             entry.disabled_reason = None;
             entry.quota_exhausted_at = None;
-            entry.last_error = None;
-            entry.unreachable.reset();
-            entry.probe.reset();
-            entry.awaiting_verification = false;
-            entry.model_refusals.clear();
         }
         // 持久化更改（stats 承载自动禁用原因，必须同步落盘避免重启后复活）
         self.persist_credentials()?;
         self.save_stats();
         Ok(())
+    }
+
+    /// 重置账号的运行时健康状态（Admin API）：冷却、降级、待验证、失败计数等一并清空，
+    /// 不改变禁用状态
+    pub fn reset_state(&self, id: u64) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
+            entry.reset_health();
+        }
+        // last_error 随统计落盘
+        self.save_stats();
+        Ok(())
+    }
+
+    /// 是否无视账号冷却与降级（仅运行时，重启后关闭）
+    pub fn ignore_health(&self) -> bool {
+        self.ignore_health.load(Ordering::Relaxed)
+    }
+
+    /// 开关无视账号冷却与降级：开启后选号不再排除冷却中、待验证、降级的账号。
+    /// 仅影响内存，不持久化
+    pub fn set_ignore_health(&self, enabled: bool) {
+        let previous = self.ignore_health.swap(enabled, Ordering::Relaxed);
+        if previous != enabled {
+            let action = if enabled {
+                "开始无视"
+            } else {
+                "恢复遵守"
+            };
+            tracing::warn!("选号{}账号冷却与降级", action);
+        }
     }
 
     /// 按账号 id 取最新 credentials 与有效 access_token

@@ -176,6 +176,7 @@ impl AdminService {
             total: snapshot.total,
             available: snapshot.available,
             current_id: snapshot.current_id,
+            ignore_health: self.token_manager.ignore_health(),
             credentials,
         }
     }
@@ -217,6 +218,18 @@ impl AdminService {
             .reset_and_enable(id)
             .await
             .map_err(|e| self.classify_enable_error(e, id))
+    }
+
+    /// 重置账号的运行时健康状态（不改变禁用状态）
+    pub fn reset_state(&self, id: u64) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .reset_state(id)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 开关选号无视账号冷却与降级（仅运行时）
+    pub fn set_ignore_health(&self, enabled: bool) {
+        self.token_manager.set_ignore_health(enabled);
     }
 
     /// 获取账号余额（带缓存）

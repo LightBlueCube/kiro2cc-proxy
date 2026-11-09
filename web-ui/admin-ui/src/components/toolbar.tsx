@@ -163,6 +163,8 @@ export interface ToggleProps {
   onChange: (checked: boolean) => void
   /** 同时作为按钮可访问名，故不另设 aria-label */
   label: string
+  /** 开启态的轨道颜色：默认品牌色，风险开关用 warn */
+  tone?: 'brand' | 'warn'
 }
 
 /**
@@ -170,7 +172,8 @@ export interface ToggleProps {
  * 若用 <label> 包 <button>，点击标签会被浏览器转发给按钮而触发两次。
  * 未复用 ui/switch.tsx：其 h-6 w-11 与设计稿尺寸不符且配色未适配设计令牌，且全站无调用点。
  */
-export function Toggle({ checked, onChange, label }: ToggleProps) {
+export function Toggle({ checked, onChange, label, tone = 'brand' }: ToggleProps) {
+  const checkedTrack = tone === 'warn' ? 'bg-warn' : 'bg-brand'
   return (
     <button
       type="button"
@@ -183,7 +186,7 @@ export function Toggle({ checked, onChange, label }: ToggleProps) {
       <span
         aria-hidden="true"
         className={`relative h-[19px] w-[34px] shrink-0 rounded-full transition-colors ${
-          checked ? 'bg-brand' : 'bg-hairline-2'
+          checked ? checkedTrack : 'bg-hairline-2'
         }`}
       >
         <span

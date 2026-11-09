@@ -12,8 +12,8 @@ use crate::model::config::UpstreamApi;
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SuccessResponse, UpdateCredentialRequest,
+        AddCredentialRequest, SetDisabledRequest, SetIgnoreHealthRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse, UpdateCredentialRequest,
     },
 };
 
@@ -71,6 +71,32 @@ pub async fn reset_failure_count(
         .into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// POST /api/admin/credentials/:id/reset-state
+/// 重置账号的运行时健康状态（冷却、降级、待验证、失败计数），不改变禁用状态
+pub async fn reset_credential_state(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.reset_state(id) {
+        Ok(_) => Json(SuccessResponse::new(format!("账号 #{} 状态已重置", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// PUT /api/admin/routing/ignore-health
+/// 开关选号无视账号冷却与降级（仅运行时，重启后关闭）
+pub async fn set_ignore_health(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetIgnoreHealthRequest>,
+) -> impl IntoResponse {
+    state.service.set_ignore_health(payload.enabled);
+    let action = if payload.enabled { "开启" } else { "关闭" };
+    Json(SuccessResponse::new(format!(
+        "已{}无视账号冷却与降级",
+        action
+    )))
 }
 
 /// GET /api/admin/credentials/:id/balance

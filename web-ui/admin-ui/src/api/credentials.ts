@@ -81,6 +81,22 @@ export async function resetCredentialFailure(
   return data
 }
 
+// 重置运行时健康状态（冷却、降级、待验证、失败计数），不改变禁用状态
+export async function resetCredentialState(
+  id: number
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/reset-state`)
+  return data
+}
+
+// 选号是否无视账号冷却与降级（仅运行时，后端重启后关闭）
+export async function setIgnoreHealth(
+  enabled: boolean
+): Promise<SuccessResponse> {
+  const { data } = await api.put<SuccessResponse>('/routing/ignore-health', { enabled })
+  return data
+}
+
 // 获取凭据余额
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)

@@ -4,6 +4,8 @@ export interface CredentialsStatusResponse {
   total: number
   available: number
   currentId: number
+  /** 选号是否无视账号冷却与降级（仅运行时，后端重启后关闭） */
+  ignoreHealth: boolean
   credentials: CredentialStatusItem[]
 }
 

@@ -5,6 +5,8 @@ import {
   setCredentialDisabled,
   setCredentialPriority,
   resetCredentialFailure,
+  resetCredentialState,
+  setIgnoreHealth,
   getCredentialBalance,
   addCredential,
   deleteCredential,
@@ -113,6 +115,28 @@ export function useResetFailure() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: number) => resetCredentialFailure(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 重置运行时健康状态
+export function useResetState() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => resetCredentialState(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 开关选号无视账号冷却与降级
+export function useSetIgnoreHealth() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (enabled: boolean) => setIgnoreHealth(enabled),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

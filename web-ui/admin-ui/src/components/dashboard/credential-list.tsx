@@ -43,6 +43,9 @@ interface CredentialListProps {
   selectedIds: Set<number>
   handleBatchVerify: () => void
   handleBatchRestore: () => void
+  handleBatchResetState: () => void
+  ignoreHealth: boolean
+  onIgnoreHealthChange: (enabled: boolean) => void
   handleBatchDisable: () => void
   handleBatchDelete: () => void
   deselectAll: () => void
@@ -93,6 +96,9 @@ export function CredentialList({
   selectedIds,
   handleBatchVerify,
   handleBatchRestore,
+  handleBatchResetState,
+  ignoreHealth,
+  onIgnoreHealthChange,
   handleBatchDisable,
   handleBatchDelete,
   deselectAll,
@@ -138,6 +144,8 @@ export function CredentialList({
             onStatusFilterChange={onStatusFilterChange}
             counts={counts}
             dataUpdatedAt={dataUpdatedAt}
+            ignoreHealth={ignoreHealth}
+            onIgnoreHealthChange={onIgnoreHealthChange}
           />
 
           {allCredentials.length === 0 ? (
@@ -162,6 +170,7 @@ export function CredentialList({
                   selectedCount={selectedIds.size}
                   onBatchVerify={handleBatchVerify}
                   onBatchRestore={handleBatchRestore}
+                  onBatchResetState={handleBatchResetState}
                   onBatchDisable={handleBatchDisable}
                   onBatchDelete={handleBatchDelete}
                   onDeselectAll={deselectAll}

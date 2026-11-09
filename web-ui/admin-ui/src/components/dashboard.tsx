@@ -16,7 +16,7 @@ import { FailureLogPage } from '@/components/failure-log-page'
 import { SettingsPanel } from '@/components/settings-panel'
 import { LogViewerPage } from '@/components/log-viewer-page'
 import { DocsPage } from '@/components/docs-page'
-import { useCredentials, useApiKeys, useDeleteCredential, useResetFailure, useSetDisabled, useRpm, useDailyUsage, useServerInfo } from '@/hooks/use-credentials'
+import { useCredentials, useApiKeys, useDeleteCredential, useResetFailure, useResetState, useSetDisabled, useSetIgnoreHealth, useRpm, useDailyUsage, useServerInfo } from '@/hooks/use-credentials'
 import { useTheme } from '@/hooks/use-theme'
 import type { CustomRange } from '@/components/daily-shared'
 import { DailyStatsPage, type RangeKey } from '@/components/daily-stats-page'
@@ -117,6 +117,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
         }
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutateAsync: resetFailure } = useResetFailure()
+  const { mutateAsync: resetState } = useResetState()
+  const { mutate: setIgnoreHealth } = useSetIgnoreHealth()
   const { mutateAsync: setDisabled } = useSetDisabled()
   const { data: dailyUsageData } = useDailyUsage()
   // 余额拉取逻辑群（缓存清理 / 首次拉取 / 返回刷新 / 切 tab 刷新 / 新增账号拉取 / 积分重算）
@@ -461,6 +463,22 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     toastBatchResult('dashboard.toastRestoreSuccess', await runBatch(ids, resetFailure))
     deselectAll()
+  }
+
+  // 批量重置状态：清空冷却、降级、待验证与失败计数，不改变禁用状态
+  const handleBatchResetState = async () => {
+    const ids = selectedCredentials().map(c => c.id)
+    toastBatchResult('dashboard.toastResetStateSuccess', await runBatch(ids, resetState))
+    deselectAll()
+  }
+
+  // 选号无视账号冷却与降级（仅后端本次运行有效）
+  const handleIgnoreHealthChange = (enabled: boolean) => {
+    setIgnoreHealth(enabled, {
+      onSuccess: res => toast.success(res.message),
+      onError: err =>
+        toast.error(t('credentials.toastOpFailed', { message: extractErrorMessage(err) })),
+    })
   }
 
   // 批量禁用（已启用的账号）
@@ -856,6 +874,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
           selectedIds={selectedIds}
           handleBatchVerify={handleBatchVerify}
           handleBatchRestore={handleBatchRestore}
+          handleBatchResetState={handleBatchResetState}
+          ignoreHealth={data?.ignoreHealth ?? false}
+          onIgnoreHealthChange={handleIgnoreHealthChange}
           handleBatchDisable={handleBatchDisable}
           handleBatchDelete={handleBatchDelete}
           deselectAll={deselectAll}

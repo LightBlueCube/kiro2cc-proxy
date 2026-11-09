@@ -20,10 +20,10 @@ use super::{
         add_credential, delete_credential, get_all_credentials, get_auth_keys,
         get_client_token_passthrough, get_credential_balance, get_debug_logs, get_dump_kiro_body,
         get_geo_batch, get_load_balancing_mode, get_runtime_config, get_suggestion_mode,
-        get_thinking_as_text, reset_failure_count, set_auth_keys, set_client_token_passthrough,
-        set_credential_disabled, set_credential_priority, set_debug_logs, set_dump_kiro_body,
-        set_load_balancing_mode, set_runtime_config, set_suggestion_mode, set_thinking_as_text,
-        update_credential,
+        get_thinking_as_text, reset_credential_state, reset_failure_count, set_auth_keys,
+        set_client_token_passthrough, set_credential_disabled, set_credential_priority,
+        set_debug_logs, set_dump_kiro_body, set_ignore_health, set_load_balancing_mode,
+        set_runtime_config, set_suggestion_mode, set_thinking_as_text, update_credential,
     },
     log_handler::{download_logs, snapshot_logs, stream_logs},
     middleware::{AdminState, admin_auth_middleware},
@@ -44,6 +44,11 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/disabled", post(set_credential_disabled))
         .route("/credentials/{id}/priority", post(set_credential_priority))
         .route("/credentials/{id}/reset", post(reset_failure_count))
+        .route(
+            "/credentials/{id}/reset-state",
+            post(reset_credential_state),
+        )
+        .route("/routing/ignore-health", put(set_ignore_health))
         .route("/credentials/{id}/balance", get(get_credential_balance))
         .route("/credentials/{id}/models", get(get_credential_models))
         .route(

@@ -15,6 +15,8 @@ pub struct CredentialsStatusResponse {
     pub available: usize,
     /// 当前活跃账号 ID
     pub current_id: u64,
+    /// 选号是否无视账号冷却与降级（仅运行时，重启后关闭）
+    pub ignore_health: bool,
     /// 各账号状态列表
     pub credentials: Vec<CredentialStatusItem>,
 }
@@ -379,6 +381,13 @@ pub struct LoadBalancingModeResponse {
 pub struct SetLoadBalancingModeRequest {
     /// 模式（"priority" 或 "balanced"）
     pub mode: String,
+}
+
+/// 设置选号是否无视账号冷却与降级的请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetIgnoreHealthRequest {
+    pub enabled: bool,
 }
 
 /// Suggestion Mode 放行开关查询响应

@@ -8,6 +8,7 @@ export interface AccountPanelFootProps {
   selectedCount: number
   onBatchVerify: () => void
   onBatchRestore: () => void
+  onBatchResetState: () => void
   onBatchDisable: () => void
   onBatchDelete: () => void
   onDeselectAll: () => void
@@ -26,6 +27,7 @@ export function AccountPanelFoot({
   selectedCount,
   onBatchVerify,
   onBatchRestore,
+  onBatchResetState,
   onBatchDisable,
   onBatchDelete,
   onDeselectAll,
@@ -48,6 +50,9 @@ export function AccountPanelFoot({
           </button>
           <button type="button" className={FOOT_BTN} onClick={onBatchRestore}>
             {t('dashboard.batchRestore')}
+          </button>
+          <button type="button" className={FOOT_BTN} onClick={onBatchResetState}>
+            {t('dashboard.batchResetState')}
           </button>
           <button type="button" className={FOOT_BTN} onClick={onBatchDisable}>
             {t('dashboard.batchDisable')}
