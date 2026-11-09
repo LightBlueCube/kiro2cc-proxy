@@ -53,6 +53,7 @@ mod tests {
             id: 1,
             credentials,
             token: "test_token".to_string(),
+            trial: None,
         };
         let endpoint = Endpoint::by_name(EndpointName::Ide, "us-east-1");
         let headers = provider.build_headers(&ctx, "{}", 0, &endpoint).unwrap();
@@ -255,6 +256,7 @@ mod tests {
             id: 1,
             credentials,
             token: "test_token".to_string(),
+            trial: None,
         };
         let spectask_body = r#"{"conversationState":{"agentTaskType":"spectask"}}"#;
         let endpoint = Endpoint::by_name(EndpointName::Ide, "us-east-1");
@@ -533,6 +535,7 @@ mod tests {
             id: 5,
             credentials: creds,
             token: "tok".to_string(),
+            trial: None,
         };
         let endpoint = Endpoint::by_name(EndpointName::Codewhisperer, "us-east-1");
         let headers = provider.build_headers(&ctx, "{}", 0, &endpoint).unwrap();
@@ -560,6 +563,7 @@ mod tests {
             id: 6,
             credentials: creds,
             token: "tok".to_string(),
+            trial: None,
         };
         let endpoint = Endpoint::by_name(EndpointName::Ide, "us-east-1");
         let headers = provider.build_headers(&ctx, "{}", 0, &endpoint).unwrap();
@@ -661,6 +665,7 @@ mod tests {
             id: 1,
             credentials: creds,
             token: "test_token".to_string(),
+            trial: None,
         };
         let endpoint = Endpoint::by_name(EndpointName::Runtime, "us-east-1");
         let request = crate::kiro::create_response::CreateResponseRequest {

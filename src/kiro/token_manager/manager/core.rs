@@ -2,6 +2,7 @@
 use super::super::entry::{CredentialEntry, DisabledReason, HealthStatus};
 use super::super::probe::AccountsCoolingDown;
 use super::super::refresh::{is_token_expired, is_token_expiring_soon, refresh_token};
+use super::super::trial::{self, TrialLease};
 use super::super::types::{CallContext, MultiTokenManager, Placement, TOKEN_REFRESH_COOLDOWN};
 use super::super::upstream_failures::UpstreamFailures;
 
@@ -93,6 +94,8 @@ impl MultiTokenManager {
                     upstream_failures: UpstreamFailures::new(Instant::now()),
                     unreachable: Default::default(),
                     probe: Default::default(),
+                    awaiting_verification: false,
+                    trial: Default::default(),
                     model_refusals: Default::default(),
                     last_throttled_wall: None,
                     last_refreshed_at: None,
@@ -268,8 +271,9 @@ impl MultiTokenManager {
     /// 本次可选的账号集合（负载均衡在其中挑选）
     ///
     /// 先按禁用、白名单、订阅等级、模型可用性硬性过滤，再优先取健康状态不为 Unhealthy、
-    /// 且该模型未在拒答冷却期的账号。全部不满足时退回硬性过滤后的全集，但其中冷却中的
-    /// 账号只放行试探时间已到的（见 `probe` 模块）；一个都没到时返回 [`AccountsCoolingDown`]。
+    /// 该模型未在拒答冷却期、且（待验证时）试验名额空闲的账号。全部不满足时退回硬性过滤后的
+    /// 全集，但其中冷却中的账号只放行试探时间已到的（见 `probe` 模块），名额被占的待验证账号
+    /// 暂不放行；一个都放不出时返回 [`AccountsCoolingDown`]。
     /// 只因拒答冷却的账号照常放行，把上游说明原文返回给客户端。
     fn candidate_pool<'a>(
         &self,
@@ -303,11 +307,13 @@ impl MultiTokenManager {
         // 按账号实际可用模型过滤（探测结果未知时不排除，详见 prefer_model_supporters）
         let available = self.prefer_model_supporters(available, model);
 
+        let trial_busy = |e: &CredentialEntry| e.awaiting_verification && e.trial.is_busy(now);
         let preferred: Vec<_> = available
             .iter()
             .filter(|e| {
                 Self::compute_health_at(e, now) != HealthStatus::Unhealthy
                     && !Self::model_restricted_at(e, model, now)
+                    && !trial_busy(e)
             })
             .copied()
             .collect();
@@ -315,31 +321,46 @@ impl MultiTokenManager {
             return Ok(preferred);
         }
 
-        let probe_wait = |e: &CredentialEntry| {
-            let cooling = Self::compute_health_at(e, now) == HealthStatus::Unhealthy;
-            cooling.then(|| e.probe.wait_remaining(now)).flatten()
+        // 暂时放不出的账号还要等多久：冷却中等试探时间，名额被占的等一个短间隔再重选
+        let wait = |e: &CredentialEntry| {
+            if Self::compute_health_at(e, now) == HealthStatus::Unhealthy {
+                e.probe.wait_remaining(now)
+            } else {
+                trial_busy(e).then_some(trial::RECHECK)
+            }
         };
         let ready: Vec<_> = available
             .iter()
-            .filter(|e| probe_wait(e).is_none())
+            .filter(|e| wait(e).is_none())
             .copied()
             .collect();
         if !ready.is_empty() {
             return Ok(ready);
         }
-        match available.iter().filter_map(|e| probe_wait(e)).min() {
+        match available.iter().filter_map(|e| wait(e)).min() {
             Some(retry_after) => Err(AccountsCoolingDown::new(retry_after)),
             // 硬性过滤后一个账号都没有，由调用方说明原因
             None => Ok(Vec::new()),
         }
     }
 
-    /// 选中的账号若在冷却中（候选账号全部冷却时的试探），占住它的试探名额
-    fn claim_probe(entries: &mut [CredentialEntry], id: u64, now: Instant) {
-        if let Some(entry) = entries.iter_mut().find(|e| e.id == id)
-            && Self::compute_health_at(entry, now) == HealthStatus::Unhealthy
-        {
-            entry.probe.claim(now);
+    /// 选号后占住名额，须与选号在同一次持锁内完成，并发选号才不会同时选中同一个名额
+    ///
+    /// 冷却中的账号（候选账号全部冷却时的试探）占试探名额；待验证的账号占试验名额，
+    /// 返回的租约随调用上下文释放。
+    fn claim_admission(
+        entries: &mut [CredentialEntry],
+        id: u64,
+        now: Instant,
+    ) -> Option<TrialLease> {
+        let entry = entries.iter_mut().find(|e| e.id == id)?;
+        match Self::compute_health_at(entry, now) {
+            HealthStatus::Unhealthy => {
+                entry.probe.claim(now);
+                None
+            }
+            HealthStatus::PendingVerification => Some(entry.trial.claim(now)),
+            _ => None,
         }
     }
 
@@ -354,17 +375,17 @@ impl MultiTokenManager {
         &self,
         model: Option<&str>,
         allowed_ids: &[u64],
-    ) -> Result<Option<(u64, KiroCredentials)>, AccountsCoolingDown> {
+    ) -> Result<Option<(u64, KiroCredentials, Option<TrialLease>)>, AccountsCoolingDown> {
         let mut entries = self.entries.lock();
         let now = Instant::now();
         let selected = {
             let pool = self.candidate_pool(&entries, model, allowed_ids, now)?;
             self.pick_from_pool(&pool, now)
         };
-        if let Some((id, _)) = &selected {
-            Self::claim_probe(&mut entries, *id, now);
-        }
-        Ok(selected)
+        Ok(selected.map(|(id, credentials)| {
+            let trial = Self::claim_admission(&mut entries, id, now);
+            (id, credentials, trial)
+        }))
     }
 
     /// 按负载均衡模式在候选集里挑一个账号
@@ -377,6 +398,7 @@ impl MultiTokenManager {
             return None;
         }
         // 降级账号相当于优先级 +0.5：同优先级内最后被选中，仍先于下一优先级
+        // （待验证账号不降档：否则总有别的账号排在前面，永远等不到验证）
         let degraded =
             |e: &CredentialEntry| Self::compute_health_at(e, now) == HealthStatus::Degraded;
 
@@ -470,7 +492,8 @@ impl MultiTokenManager {
                     .filter(|id| !failed_ids.contains(id))
                     .collect()
             };
-            let Some((id, credentials)) = self.select_next_credential(model, &remaining)? else {
+            let Some((id, credentials, trial)) = self.select_next_credential(model, &remaining)?
+            else {
                 // describe_unavailable 内部会获取 entries 锁，
                 // 因此必须在任何 entries 锁作用域之外调用，否则死锁
                 anyhow::bail!("{}", self.describe_unavailable(model, &[]));
@@ -478,7 +501,7 @@ impl MultiTokenManager {
             *self.current_id.lock() = id;
 
             match self.try_ensure_token(id, &credentials).await {
-                Ok(ctx) => return Ok(ctx),
+                Ok(ctx) => return Ok(CallContext { trial, ..ctx }),
                 Err(e) => {
                     tracing::warn!("账号 #{} Token 刷新失败，尝试下一个账号: {}", id, e);
                     self.report_refresh_error(id, &e);
@@ -518,9 +541,9 @@ impl MultiTokenManager {
                 .copied()
                 .collect();
 
-            let (id, credentials) = {
+            let (id, credentials, trial) = {
                 match self.select_next_credential(model, &effective_ids)? {
-                    Some((new_id, new_creds)) => (new_id, new_creds),
+                    Some(selected) => selected,
                     None => {
                         anyhow::bail!("{}", self.describe_unavailable(model, allowed_ids));
                     }
@@ -528,7 +551,7 @@ impl MultiTokenManager {
             };
 
             match self.try_ensure_token(id, &credentials).await {
-                Ok(ctx) => return Ok(ctx),
+                Ok(ctx) => return Ok(CallContext { trial, ..ctx }),
                 Err(e) => {
                     tracing::warn!("绑定账号 #{} Token 刷新失败，尝试下一个: {}", id, e);
 
@@ -589,7 +612,7 @@ impl MultiTokenManager {
         let soft_avoid = self.soft_avoid_ids(model, allowed_ids, avoid_ids, soft_full_ids);
         let usable = |id: &u64| !avoid_ids.contains(id) && !soft_avoid.contains(id);
         if let Some(id) = preferred.filter(usable) {
-            let credentials = {
+            let claimed = {
                 let mut entries = self.entries.lock();
                 let now = Instant::now();
                 // 全部冷却且没到试探时间：交给下方负载均衡返回 AccountsCoolingDown
@@ -599,14 +622,12 @@ impl MultiTokenManager {
                     .into_iter()
                     .find(|e| e.id == id)
                     .map(|e| e.credentials.clone());
-                if credentials.is_some() {
-                    Self::claim_probe(&mut entries, id, now);
-                }
                 credentials
+                    .map(|credentials| (credentials, Self::claim_admission(&mut entries, id, now)))
             };
-            if let Some(credentials) = credentials {
+            if let Some((credentials, trial)) = claimed {
                 match self.try_ensure_token(id, &credentials).await {
-                    Ok(ctx) => return Ok((ctx, Placement::Preferred)),
+                    Ok(ctx) => return Ok((CallContext { trial, ..ctx }, Placement::Preferred)),
                     Err(e) => {
                         tracing::warn!("亲和账号 #{} Token 刷新失败，改选其它账号: {}", id, e);
                         self.report_refresh_error(id, &e);
@@ -784,6 +805,7 @@ impl MultiTokenManager {
             id,
             credentials: creds,
             token,
+            trial: None,
         })
     }
 }

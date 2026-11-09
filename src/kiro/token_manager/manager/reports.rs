@@ -39,7 +39,7 @@ impl MultiTokenManager {
         self.stats_dirty.store(true, Ordering::Relaxed);
     }
 
-    /// 报告指定账号完整返回了一次正常响应：中断健康度的连续失败计数
+    /// 报告指定账号完整返回了一次正常响应：中断健康度的连续失败计数，待验证的账号回到健康
     ///
     /// 与 [`Self::report_success`] 分开：后者在拿到 200 响应头时调用，那时还不知道响应体是否为空。
     /// 账号失败计数（[`Self::report_failure`]）同样在此清零：拿到 200 响应头不代表账号正常。
@@ -51,6 +51,7 @@ impl MultiTokenManager {
             entry.failure_count = 0;
             entry.unreachable.reset();
             entry.probe.reset();
+            entry.awaiting_verification = false;
             if let Some(model) = model {
                 entry.model_refusals.remove(&model.to_ascii_lowercase());
             }
@@ -179,7 +180,8 @@ impl MultiTokenManager {
         };
 
         tracing::warn!("账号 #{} 请求发送失败: {}", id, error.message);
-        if let Some(cooldown) = record_failure(entry, |e, now| e.unreachable.record(now)) {
+        if let Some(cooldown) = record_failure(entry, |e, now| e.unreachable.record(now)).flatten()
+        {
             tracing::error!(
                 "账号 #{} 连续请求发送失败，冷却 {} 分钟",
                 id,
@@ -588,18 +590,29 @@ impl MultiTokenManager {
     }
 }
 
-/// 记一次账号失败；账号此前已在冷却中（候选账号全部冷却时放出的试探），同时递增试探间隔
+/// 记一次账号失败，并在账号由此进入冷却时开始试探计时、标记待验证
+///
+/// 账号已在冷却中则不记（返回 None）：冷却前发出的在途请求、同一请求的后续重试、放出的试探
+/// 陆续失败，都不累加冷却；试探的失败已在放出时计入试探间隔。只有离开冷却后的再次失败才升级冷却。
 fn record_failure<T>(
     entry: &mut CredentialEntry,
     record: impl FnOnce(&mut CredentialEntry, Instant) -> T,
-) -> T {
+) -> Option<T> {
     let now = Instant::now();
-    let cooling = MultiTokenManager::compute_health_at(entry, now) == HealthStatus::Unhealthy;
-    let recorded = record(entry, now);
-    if cooling {
-        entry.probe.record_failure(now);
+    if is_cooling(entry, now) {
+        return None;
     }
-    recorded
+
+    let recorded = record(entry, now);
+    if is_cooling(entry, now) {
+        entry.probe.start(now);
+        entry.awaiting_verification = true;
+    }
+    Some(recorded)
+}
+
+fn is_cooling(entry: &CredentialEntry, now: Instant) -> bool {
+    MultiTokenManager::compute_health_at(entry, now) == HealthStatus::Unhealthy
 }
 
 /// 没拿到 HTTP 响应的失败（连接失败、超时、发送中断），区别于上游返回的错误状态与解码失败

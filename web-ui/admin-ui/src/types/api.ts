@@ -36,16 +36,22 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
-  healthStatus: 'healthy' | 'warning' | 'degraded' | 'unhealthy' | 'disabled'
+  healthStatus:
+    | 'healthy'
+    | 'warning'
+    | 'degraded'
+    | 'pending_verification'
+    | 'unhealthy'
+    | 'disabled'
   /** 健康度判定依据：最近 10 分钟上游限流 / 异常结束（空响应、上游中止、thinking 后截断）次数、连续上游失败次数 */
   recentThrottleCount: number
   recentAbnormalCount: number
   consecutiveFailures: number
-  /** 不健康时冷却期剩余秒数（冷却期内选号排除），其它状态缺省 */
+  /** 不健康时冷却期剩余秒数（限流冷却与试探等待的较大者，冷却期内选号排除），其它状态缺省 */
   cooldownRemainingSecs?: number
   /** 请求发送连续失败（代理错误、连接失败、超时）的冷却剩余秒数；显示为异常，到期自动重试 */
   unreachableCooldownSecs?: number
-  /** 候选账号全部冷却、已开始按间隔试探时，距下一次试探的剩余秒数；其它情况缺省 */
+  /** 冷却中距下一次放出试探的剩余秒数；不在冷却中缺省 */
   probeWaitSecs?: number
   throttleCount: number
   /**

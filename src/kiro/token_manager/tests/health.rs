@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
-// 健康度判定（近期上游失败）与降级账号的选号顺位
+// 健康度判定（近期上游失败）、冷却中的试探、冷却后的待验证与降级账号的选号顺位
 #[cfg(test)]
 mod tests {
     use super::super::super::entry::HealthStatus;
@@ -12,6 +12,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const MINUTE: Duration = Duration::from_secs(60);
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
 
     /// 按给定优先级建账号，id 依次为 1, 2, …
     fn manager(priorities: &[u32]) -> MultiTokenManager {
@@ -83,16 +87,19 @@ mod tests {
     }
 
     #[test]
-    fn unhealthy_only_during_cooldown_then_probed() {
+    fn unhealthy_only_during_cooldown_then_pending_verification() {
         let m = manager(&[0]);
         for _ in 0..3 {
             m.report_throttled(1);
         }
         let now = Instant::now();
         assert_eq!(health_at(&m, 1, now), HealthStatus::Unhealthy);
-        // 冷却 2 分钟后放回选号（仍是降级），离开冷却后再失败一次冷却翻倍到 4 分钟
-        let after_cooldown = now + 2 * MINUTE + Duration::from_secs(1);
-        assert_eq!(health_at(&m, 1, after_cooldown), HealthStatus::Degraded);
+        // 冷却 2 分钟后放回选号，等一次成功响应；离开冷却后再失败一次，冷却翻倍到 4 分钟
+        let after_cooldown = now + 2 * MINUTE + secs(1);
+        assert_eq!(
+            health_at(&m, 1, after_cooldown),
+            HealthStatus::PendingVerification
+        );
         m.entries.lock()[0]
             .upstream_failures
             .record(UpstreamFailure::Throttled, after_cooldown);
@@ -101,8 +108,8 @@ mod tests {
             HealthStatus::Unhealthy
         );
         assert_eq!(
-            health_at(&m, 1, after_cooldown + 4 * MINUTE + Duration::from_secs(1)),
-            HealthStatus::Degraded
+            health_at(&m, 1, after_cooldown + 4 * MINUTE + secs(1)),
+            HealthStatus::PendingVerification
         );
     }
 
@@ -120,7 +127,12 @@ mod tests {
         for _ in 0..3 {
             m.report_throttled(1);
         }
-        // 空闲 10 分钟：窗口与连续计数都过期
+        // 空闲 10 分钟：窗口与连续计数都过期，但没有一次完整成功的响应，仍待验证
+        assert_eq!(
+            health_at(&m, 1, Instant::now() + 10 * MINUTE),
+            HealthStatus::PendingVerification
+        );
+        m.report_response_completed(1, None);
         assert_eq!(
             health_at(&m, 1, Instant::now() + 10 * MINUTE),
             HealthStatus::Healthy
@@ -178,64 +190,78 @@ mod tests {
         }
     }
 
-    /// 账号连续限流进入冷却，且冷却中又失败一次（开始按间隔试探）
-    fn cool_down_and_fail_once_more(m: &MultiTokenManager, ids: &[u64]) {
+    /// 账号连续限流 3 次进入冷却
+    fn cool_down(m: &MultiTokenManager, ids: &[u64]) {
         for &id in ids {
             for _ in 0..3 {
                 m.report_throttled(id);
             }
             assert_eq!(health(m, id), HealthStatus::Unhealthy);
-            m.report_throttled(id);
         }
     }
 
-    /// 让账号的试探间隔已经过去（冷却仍在）
+    /// 让账号的试探时间已到（冷却仍在）
     fn make_probe_due(m: &MultiTokenManager, id: u64) {
         let mut entries = m.entries.lock();
         let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
         entry.probe.reset();
-        entry
-            .probe
-            .record_failure(Instant::now() - Duration::from_secs(20));
+        entry.probe.start(Instant::now() - secs(31));
+    }
+
+    /// 账号 `ago` 之前连续限流 3 次进入冷却；`ago` 超过 2 分钟则限流冷却已结束，账号待验证
+    fn cooled_down_ago(m: &MultiTokenManager, id: u64, ago: Duration) {
+        let mut entries = m.entries.lock();
+        let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
+        let at = Instant::now() - ago;
+        for _ in 0..3 {
+            entry
+                .upstream_failures
+                .record(UpstreamFailure::Throttled, at);
+        }
+        entry.probe.start(at);
+        entry.awaiting_verification = true;
     }
 
     async fn cooling_wait(m: &MultiTokenManager) -> Duration {
         let Some(err) = m.acquire_context(None).await.err() else {
-            panic!("应为全部冷却，实际选到了账号");
+            panic!("应无号可用，实际选到了账号");
         };
         err.downcast_ref::<AccountsCoolingDown>()
-            .unwrap_or_else(|| panic!("应为全部冷却，实际: {err:#}"))
+            .unwrap_or_else(|| panic!("应为全部冷却或待验证，实际: {err:#}"))
             .retry_after()
     }
 
     #[tokio::test]
     async fn all_cooling_accounts_wait_for_probe_interval() {
         let m = manager(&[0, 0]);
-        cool_down_and_fail_once_more(&m, &[1, 2]);
+        cool_down(&m, &[1, 2]);
         let wait = cooling_wait(&m).await;
         assert!(
-            wait > Duration::from_secs(14) && wait <= Duration::from_secs(15),
-            "首个试探间隔 15 秒，实际 {wait:?}"
+            wait > secs(29) && wait <= secs(30),
+            "试探冷却从进入冷却起算 30 秒，实际 {wait:?}"
         );
     }
 
-    #[tokio::test]
-    async fn cooling_without_extra_failure_is_still_released() {
-        // 刚进入冷却、冷却中还没再失败过：与原来一样放行
-        let m = manager(&[0, 0]);
-        for id in [1, 2] {
-            for _ in 0..3 {
-                m.report_throttled(id);
-            }
-        }
-        assert!(m.acquire_context(None).await.is_ok());
+    #[test]
+    fn panel_shows_probe_wait_from_the_start_of_cooling() {
+        let m = manager(&[0]);
         assert_eq!(m.snapshot().entries[0].health_detail.probe_wait_secs, None);
+
+        cool_down(&m, &[1]);
+
+        let detail = &m.snapshot().entries[0].health_detail;
+        assert!(matches!(detail.probe_wait_secs, Some(29..=30)));
+        assert!(
+            matches!(detail.cooldown_remaining_secs, Some(119..=120)),
+            "冷却取限流冷却（2 分钟）与试探等待（30 秒）的较大者: {:?}",
+            detail.cooldown_remaining_secs
+        );
     }
 
     #[tokio::test]
     async fn due_probe_releases_one_request_per_account() {
         let m = manager(&[0, 0]);
-        cool_down_and_fail_once_more(&m, &[1, 2]);
+        cool_down(&m, &[1, 2]);
         make_probe_due(&m, 1);
         make_probe_due(&m, 2);
 
@@ -247,34 +273,53 @@ mod tests {
         assert_eq!(picked, [1, 2], "每个账号各放一个试探");
         let wait = cooling_wait(&m).await;
         assert!(
-            wait > Duration::from_secs(29),
-            "试探结果回来前占住名额: {wait:?}"
+            wait > secs(59) && wait <= secs(60),
+            "放出即算一次失败，下一次间隔翻倍到 60 秒: {wait:?}"
         );
     }
 
     #[tokio::test]
-    async fn failed_probe_doubles_and_completion_resets() {
+    async fn failed_probe_extends_cooldown_to_the_next_probe_time() {
         let m = manager(&[0]);
-        cool_down_and_fail_once_more(&m, &[1]);
+        // 限流冷却还剩约 20 秒，试探时间早已到
+        cooled_down_ago(&m, 1, secs(100));
+        assert_eq!(health(&m, 1), HealthStatus::Unhealthy);
+        assert_eq!(m.acquire_context(None).await.unwrap().id, 1, "放出试探");
+
+        m.report_throttled(1);
+
+        let detail = &m.snapshot().entries[0].health_detail;
+        assert_eq!(detail.consecutive_failures, 3, "试探失败不累加限流冷却");
+        assert!(matches!(detail.probe_wait_secs, Some(59..=60)));
+        assert!(
+            matches!(detail.cooldown_remaining_secs, Some(59..=60)),
+            "冷却取限流冷却（20 秒）与试探等待（60 秒）的较大者: {:?}",
+            detail.cooldown_remaining_secs
+        );
+        let now = Instant::now();
+        assert_eq!(
+            health_at(&m, 1, now + secs(40)),
+            HealthStatus::Unhealthy,
+            "限流冷却结束后仍冷却到下一次试探时间"
+        );
+        assert_eq!(
+            health_at(&m, 1, now + secs(61)),
+            HealthStatus::PendingVerification
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_probe_returns_to_health() {
+        let m = manager(&[0]);
+        cool_down(&m, &[1]);
         make_probe_due(&m, 1);
         assert_eq!(m.acquire_context(None).await.unwrap().id, 1);
 
-        m.report_throttled(1);
-        let wait = cooling_wait(&m).await;
-        assert!(
-            wait > Duration::from_secs(29) && wait <= Duration::from_secs(30),
-            "试探失败后间隔翻倍到 30 秒，实际 {wait:?}"
-        );
-        let shown = m.snapshot().entries[0].health_detail.probe_wait_secs;
-        assert!(
-            matches!(shown, Some(29..=30)),
-            "面板显示试探等待: {shown:?}"
-        );
-
         m.report_response_completed(1, None);
-        assert_ne!(health(&m, 1), HealthStatus::Unhealthy);
-        assert_eq!(m.acquire_context(None).await.unwrap().id, 1);
+
+        assert_eq!(health(&m, 1), HealthStatus::Warning);
         assert_eq!(m.snapshot().entries[0].health_detail.probe_wait_secs, None);
+        assert_eq!(m.acquire_context(None).await.unwrap().id, 1);
     }
 
     #[test]
@@ -322,34 +367,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cooling_ended_account_awaits_verification_until_a_response_completes() {
+        let m = manager(&[0]);
+        cooled_down_ago(&m, 1, secs(200));
+        assert_eq!(health(&m, 1), HealthStatus::PendingVerification);
+
+        m.report_response_completed(1, None);
+
+        // 窗口内仍有 3 次限流，回到健康组里的警告
+        assert_eq!(health(&m, 1), HealthStatus::Warning);
+    }
+
+    #[tokio::test]
+    async fn pending_verification_admits_one_request_at_a_time() {
+        let m = manager(&[0]);
+        cooled_down_ago(&m, 1, secs(200));
+
+        let first = m.acquire_context(None).await.unwrap();
+        assert!(first.trial.is_some(), "占用试验名额");
+        assert_eq!(cooling_wait(&m).await, secs(1), "名额被占，稍后重选");
+
+        drop(first);
+        let second = m.acquire_context(None).await.unwrap();
+        assert_eq!(second.id, 1, "名额随上下文释放");
+    }
+
+    #[tokio::test]
+    async fn pending_verification_takes_part_in_normal_rotation() {
+        // 不降档：待验证账号和健康账号轮流被选中，才等得到验证
+        let m = manager(&[0, 0]);
+        cooled_down_ago(&m, 1, secs(200));
+        let mut picked = Vec::new();
+        for _ in 0..4 {
+            picked.push(m.acquire_context(None).await.unwrap().id);
+        }
+        assert!(
+            picked.contains(&1) && picked.contains(&2),
+            "待验证账号参与轮询: {picked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_trial_returns_to_cooling_with_a_longer_cooldown() {
+        let m = manager(&[0]);
+        cooled_down_ago(&m, 1, secs(200));
+        let ctx = m.acquire_context(None).await.unwrap();
+
+        // 验证失败是离开冷却后的再次失败，照常累加
+        m.report_throttled(1);
+        drop(ctx);
+
+        assert_eq!(health(&m, 1), HealthStatus::Unhealthy);
+        let detail = &m.snapshot().entries[0].health_detail;
+        assert_eq!(detail.consecutive_failures, 4);
+        assert!(
+            matches!(detail.cooldown_remaining_secs, Some(239..=240)),
+            "第 4 次连续失败冷却 4 分钟: {:?}",
+            detail.cooldown_remaining_secs
+        );
+        assert!(matches!(detail.probe_wait_secs, Some(29..=30)));
+    }
+
     #[tokio::test]
     async fn completed_response_resets_cooldown_and_probe_accumulation() {
         let m = manager(&[0]);
+        // 第一轮 2 分钟冷却已过，验证失败：第 4 次连续失败，冷却 4 分钟
+        cooled_down_ago(&m, 1, secs(200));
+        m.report_throttled(1);
         {
             let mut entries = m.entries.lock();
-            // 第一轮 2 分钟冷却已过，离开冷却后再失败：第 4 次连续失败，冷却 4 分钟
-            let earlier = Instant::now() - 3 * MINUTE;
-            for _ in 0..3 {
-                entries[0]
-                    .upstream_failures
-                    .record(UpstreamFailure::Throttled, earlier);
-            }
-            let now = Instant::now();
-            entries[0]
-                .upstream_failures
-                .record(UpstreamFailure::Throttled, now);
-            for _ in 0..7 {
-                entries[0].probe.claim(now);
-                entries[0].probe.record_failure(now);
+            for _ in 0..4 {
+                entries[0].probe.claim(Instant::now());
             }
         }
         let escalated = cooling_wait(&m).await;
-        assert!(
-            escalated > Duration::from_secs(290),
-            "试探间隔已封顶: {escalated:?}"
-        );
+        assert!(escalated > secs(290), "试探间隔已封顶: {escalated:?}");
         let detail = &m.snapshot().entries[0].health_detail;
-        assert!(matches!(detail.cooldown_remaining_secs, Some(239..=240)));
+        assert!(
+            matches!(detail.cooldown_remaining_secs, Some(299..=300)),
+            "冷却取限流冷却（4 分钟）与试探等待（5 分钟）的较大者: {:?}",
+            detail.cooldown_remaining_secs
+        );
 
         m.report_response_completed(1, None);
 
@@ -364,11 +463,10 @@ mod tests {
             "冷却从 2 分钟重新算: {:?}",
             detail.cooldown_remaining_secs
         );
-        m.report_throttled(1);
         let wait = cooling_wait(&m).await;
         assert!(
-            wait > Duration::from_secs(14) && wait <= Duration::from_secs(15),
-            "试探间隔从 15 秒重新算: {wait:?}"
+            wait > secs(29) && wait <= secs(30),
+            "试探间隔从 30 秒重新算: {wait:?}"
         );
     }
 
@@ -378,15 +476,14 @@ mod tests {
         for _ in 0..3 {
             m.report_unreachable(1, test_error());
         }
-        assert!(m.acquire_context(None).await.is_ok(), "冷却中还没再失败过");
-        m.report_unreachable(1, test_error());
-        cooling_wait(&m).await;
+        let wait = cooling_wait(&m).await;
+        assert!(wait > secs(29) && wait <= secs(30), "{wait:?}");
     }
 
     #[tokio::test]
     async fn healthy_account_is_used_while_others_wait() {
         let m = manager(&[0, 0, 1]);
-        cool_down_and_fail_once_more(&m, &[1, 2]);
+        cool_down(&m, &[1, 2]);
         for _ in 0..4 {
             assert_eq!(m.acquire_context(None).await.unwrap().id, 3);
         }

@@ -7,6 +7,7 @@ export type AccountState =
   | 'disabled'
   | 'error'
   | 'cooling'
+  | 'awaiting_verification'
   | 'degraded'
   | 'warning'
   | 'pending'
@@ -92,10 +93,12 @@ const ACCOUNT_ERROR_REASONS: ReadonlySet<CredentialStatusItem['disabledReason']>
  *   2. 其余禁用                    → disabled
  *   3. 请求发送连续失败的冷却       → error（到期自动重试）
  *   4. healthStatus 不健康        → cooling（限流 / 异常结束后的临时冷却，选号排除）
- *   5. healthStatus 降级          → degraded（同优先级内最后被选中，仍可服务）
- *   6. healthStatus 警告          → warning（仅提示，不影响选号）
- *   7. 健康 + 零成功调用 + 未查额度 → pending
- *   8. 其余                       → healthy
+ *   5. healthStatus 待验证        → awaiting_verification（冷却已结束，一次完整成功的响应前
+ *                                   同一时刻只放行一个请求，选号顺位不降档）
+ *   6. healthStatus 降级          → degraded（同优先级内最后被选中，仍可服务）
+ *   7. healthStatus 警告          → warning（仅提示，不影响选号）
+ *   8. 健康 + 零成功调用 + 未查额度 → pending
+ *   9. 其余                       → healthy
  * @param hasBalance 该账号在 balanceMap 中是否已有余额结果（会话内内存态）
  */
 export function deriveAccountState(
@@ -109,6 +112,7 @@ export function deriveAccountState(
   if (item.disabled) return 'disabled'
   if (item.unreachableCooldownSecs !== undefined) return 'error'
   if (item.healthStatus === 'unhealthy') return 'cooling'
+  if (item.healthStatus === 'pending_verification') return 'awaiting_verification'
   if (item.healthStatus === 'degraded') return 'degraded'
   if (item.healthStatus === 'warning') return 'warning'
   if (item.healthStatus === 'healthy' && item.successCount === 0 && !hasBalance) return 'pending'
@@ -120,10 +124,17 @@ export function deriveAccountState(
 /** 工具栏分段 / 指标条「异常」计数共用的分组 */
 export type AccountStateGroup = 'healthy' | 'abnormal' | 'disabled' | 'quota_exceeded' | 'pending'
 
-/** 状态归组：警告仅提示、不影响选号，归入「健康」；账号异常、冷却与降级归入「异常」 */
+/** 状态归组：警告仅提示、不影响选号，归入「健康」；账号异常、冷却、待验证与降级归入「异常」 */
 export function accountStateGroup(state: AccountState): AccountStateGroup {
   if (state === 'warning') return 'healthy'
-  if (state === 'error' || state === 'cooling' || state === 'degraded') return 'abnormal'
+  if (
+    state === 'error' ||
+    state === 'cooling' ||
+    state === 'awaiting_verification' ||
+    state === 'degraded'
+  ) {
+    return 'abnormal'
+  }
   return state
 }
 
@@ -171,6 +182,13 @@ export const ACCOUNT_STATE_VISUAL: Record<AccountState, AccountStateVisual> = {
     pipClass: 'bg-danger ring-[2.5px] ring-danger-soft',
     avatarClass: 'bg-surface-3 text-ink-2',
   },
+  // 待验证是冷却后的恢复阶段：描边无底色的警告色，介于冷却（红描边）与降级（黄实心）之间
+  awaiting_verification: {
+    labelKey: 'credentials.stateAwaitingVerification',
+    tagClass: 'text-warn bg-transparent border-warn-line',
+    pipClass: 'bg-warn ring-[2.5px] ring-warn-soft',
+    avatarClass: 'bg-warn-soft text-warn',
+  },
   pending: {
     labelKey: 'credentials.statePending',
     tagClass: 'text-brand bg-brand-soft border-transparent',
@@ -199,6 +217,7 @@ export const ACCOUNT_STATE_ORDER: readonly AccountState[] = [
   'warning',
   'degraded',
   'cooling',
+  'awaiting_verification',
   'error',
   'pending',
   'disabled',

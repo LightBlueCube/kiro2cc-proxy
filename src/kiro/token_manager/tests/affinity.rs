@@ -342,6 +342,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// 让冷却中账号的试探时间已到（冷却仍在）
+    fn make_probe_due(manager: &MultiTokenManager, id: u64) {
+        let mut entries = manager.entries.lock();
+        let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
+        entry.probe.reset();
+        entry
+            .probe
+            .start(std::time::Instant::now() - std::time::Duration::from_secs(31));
+    }
+
     #[tokio::test]
     async fn test_unhealthy_bound_account_rebinds_to_healthy_one() {
         let manager = two_accounts();
@@ -357,7 +367,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_all_accounts_unhealthy_keeps_binding() {
-        // 候选全 Unhealthy 时退回全集：绑定账号仍在候选里，不应来回改绑
+        // 候选全 Unhealthy 时只放行试探时间已到的账号：绑定账号每次到点放出试探，
+        // 仍在候选里，不应来回改绑
         let manager = two_accounts();
         let affinity = Affinity::new();
         let (bound, _) = route(&manager, &affinity, None, &[]).await;
@@ -367,6 +378,7 @@ pub(crate) mod tests {
         }
 
         for _ in 0..3 {
+            make_probe_due(&manager, bound);
             assert_eq!(
                 route(&manager, &affinity, None, &[]).await,
                 (bound, Placement::Preferred)

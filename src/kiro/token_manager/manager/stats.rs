@@ -298,24 +298,28 @@ impl MultiTokenManager {
     ///
     /// | 状态   | 条件                                              | 选号时         |
     /// |--------|---------------------------------------------------|----------------|
-    /// | 不健康 | 冷却期内，且 C ≥ 3 或 F ≥ 10                       | 排除           |
-    /// | 降级   | C ≥ 2，或 F ≥ 5，或账号失败 2 次                   | 同优先级内最后 |
+    /// | 不健康 | 冷却期内（C ≥ 3 或 F ≥ 20）或试探等待未满           | 排除           |
+    /// | 待验证 | 冷却已结束，还没有一次完整成功的响应                | 不降档，一次一个 |
+    /// | 降级   | C ≥ 2，或 F ≥ 10，或账号失败 2 次                  | 同优先级内最后 |
     /// | 警告   | F ≥ 2，或账号失败 1 次                             | 不变           |
     ///
     /// 账号失败 = 连续 401/403 + 连续请求发送失败。401/403 第 3 次即自动禁用；
     /// 请求发送失败第 3 次进入冷却（见 `unreachable` 模块），冷却期内判为不健康。
+    /// 试探等待（见 `probe` 模块）把冷却延长到下一次试探时间，所以冷却取两者的较大者。
     pub(crate) fn compute_health_at(entry: &CredentialEntry, now: Instant) -> HealthStatus {
         if entry.disabled {
             return HealthStatus::Disabled;
         }
 
-        if entry.unreachable.cooldown_remaining(now).is_some() {
+        let failures = &entry.upstream_failures;
+        let cooling = entry.unreachable.cooldown_remaining(now).is_some()
+            || failures.is_cooling(now)
+            || entry.probe.wait_remaining(now).is_some();
+        if cooling {
             return HealthStatus::Unhealthy;
         }
-
-        let failures = &entry.upstream_failures;
-        if failures.is_cooling(now) {
-            return HealthStatus::Unhealthy;
+        if entry.awaiting_verification {
+            return HealthStatus::PendingVerification;
         }
 
         let consecutive = failures.consecutive(now);
@@ -370,22 +374,20 @@ impl MultiTokenManager {
         let failures = &entry.upstream_failures;
         let recent = failures.recent(now);
         let unhealthy = Self::compute_health_at(entry, now) == HealthStatus::Unhealthy;
+        let probe_wait = entry.probe.wait_remaining(now);
         HealthDetail {
             recent_throttle_count: recent.throttled,
             recent_abnormal_count: recent.abnormal,
             consecutive_failures: failures.consecutive(now),
             cooldown_remaining_secs: unhealthy
-                .then(|| failures.cooldown_remaining(now))
+                .then(|| failures.cooldown_remaining(now).max(probe_wait))
                 .flatten()
                 .map(|d| d.as_secs().max(1)),
             unreachable_cooldown_secs: unhealthy
                 .then(|| entry.unreachable.cooldown_remaining(now))
                 .flatten()
                 .map(|d| d.as_secs().max(1)),
-            probe_wait_secs: (unhealthy && entry.probe.is_active())
-                .then(|| entry.probe.wait_remaining(now))
-                .flatten()
-                .map(|d| d.as_secs().max(1)),
+            probe_wait_secs: probe_wait.filter(|_| unhealthy).map(|d| d.as_secs().max(1)),
         }
     }
 }

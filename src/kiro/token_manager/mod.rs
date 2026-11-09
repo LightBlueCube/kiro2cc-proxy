@@ -24,6 +24,7 @@ mod entry;
 mod manager;
 mod probe;
 mod refresh;
+mod trial;
 mod types;
 mod unreachable;
 mod upstream_failures;
@@ -35,6 +36,7 @@ pub(crate) use refresh::UsageLimitsUnsupportedError;
 pub(crate) use refresh::{is_token_expired, is_token_expiring_soon, refresh_token};
 pub(crate) use types::QUOTA_EXHAUSTED_ALL_MARKER;
 pub use types::{CallContext, HealthDetail, ModelRestriction, MultiTokenManager, Placement};
+pub(crate) use upstream_failures::UNHEALTHY_CONSECUTIVE;
 
 #[cfg(test)]
 mod tests;

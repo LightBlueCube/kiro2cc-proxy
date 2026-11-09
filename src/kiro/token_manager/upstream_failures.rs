@@ -1,8 +1,7 @@
 //! 账号近期的上游失败（限流、异常结束）：最近 10 分钟的分钟级计数与连续失败次数，健康度据此判定。
 //!
 //! 只记上游失败，不看成功次数：长期成功的历史不应稀释眼前的限流。连续失败由一次完整的
-//! 正常响应中断（[`UpstreamFailures::end_streak`]）。冷却期内的失败不计，离开冷却后再失败才升级
-//! 冷却。仅存内存，重启后清空。
+//! 正常响应中断（[`UpstreamFailures::end_streak`]）。仅存内存，重启后清空。
 
 use std::time::{Duration, Instant};
 
@@ -11,7 +10,7 @@ const WINDOW_MINUTES: u64 = 10;
 const SECS_PER_MINUTE: u64 = 60;
 
 /// 连续失败达到此数（且在冷却期内）判为不健康
-const UNHEALTHY_CONSECUTIVE: u32 = 3;
+pub(crate) const UNHEALTHY_CONSECUTIVE: u32 = 3;
 /// 窗口内失败达到此数（且在冷却期内）判为不健康
 const UNHEALTHY_RECENT: u32 = 20;
 /// 连续失败达到此数判为降级
@@ -73,15 +72,7 @@ impl UpstreamFailures {
         }
     }
 
-    /// 记一次失败
-    ///
-    /// 冷却期内的失败不计：所有账号都在冷却时冷却中的账号仍可能被选中，冷却前发出的在途请求
-    /// 和同一请求的后续重试也会陆续失败。只有离开冷却后的再次失败才升级冷却。
     pub(crate) fn record(&mut self, kind: UpstreamFailure, now: Instant) {
-        if self.is_cooling(now) {
-            return;
-        }
-
         let minute = self.minute_of(now);
         let bucket = &mut self.buckets[(minute % WINDOW_MINUTES) as usize];
         if bucket.minute != minute {
@@ -221,28 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn failures_during_cooldown_are_not_accumulated() {
-        let t0 = Instant::now();
-        let mut f = UpstreamFailures::new(t0);
-        for _ in 0..3 {
-            f.record(UpstreamFailure::Throttled, t0);
-        }
-
-        let during = t0 + minutes(1);
-        for _ in 0..5 {
-            f.record(UpstreamFailure::Throttled, during);
-        }
-        assert_eq!(f.consecutive(during), 3);
-        assert_eq!(f.recent(during).total(), 3);
-        assert_eq!(
-            f.cooldown_remaining(during),
-            Some(minutes(1)),
-            "冷却中的失败不延长冷却"
-        );
-    }
-
-    #[test]
-    fn cooldown_escalates_only_by_failures_after_leaving_it() {
+    fn cooldown_escalates_by_one_failure_per_round() {
         let t0 = Instant::now();
         let mut f = UpstreamFailures::new(t0);
         f.record(UpstreamFailure::Throttled, t0);

@@ -1,5 +1,6 @@
 //! 单凭据条目：健康状态（HealthStatus）、禁用原因（DisabledReason）与统计计数。
 use super::probe::ProbeBackoff;
+use super::trial::TrialSlot;
 use super::unreachable::FailureCooldown;
 use super::upstream_failures::UpstreamFailures;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -35,8 +36,13 @@ pub(crate) struct CredentialEntry {
     pub(crate) upstream_failures: UpstreamFailures,
     /// 请求发送失败（代理错误、连接失败、超时）的连续计数与冷却；仅内存
     pub(crate) unreachable: FailureCooldown,
-    /// 候选账号全部冷却时的试探间隔；仅内存
+    /// 冷却期间的试探间隔；仅内存
     pub(crate) probe: ProbeBackoff,
+    /// 冷却结束后等一次完整成功的响应才回到健康（待验证）：进入冷却时置位，
+    /// 正常完成一次响应或手动恢复时清除；仅内存
+    pub(crate) awaiting_verification: bool,
+    /// 待验证期间的试验名额，同一时刻只放行一个请求；仅内存
+    pub(crate) trial: TrialSlot,
     /// 按模型（小写）的连续拒答与冷却；仅内存
     pub(crate) model_refusals: HashMap<String, ModelRefusals>,
     /// 最后一次被限流时间（UTC，随统计持久化；健康度不使用）
@@ -128,7 +134,9 @@ pub enum HealthStatus {
     Warning,
     /// 近期上游失败较多或连续失败；同优先级内最后被选中
     Degraded,
-    /// 冷却期内（限流 / 空响应连续或近期很多，或请求发送连续失败）；选号时排除
+    /// 冷却已结束，等一次完整成功的响应才回到健康；同一时刻只放行一个请求，选号顺位不降档
+    PendingVerification,
+    /// 冷却期内（限流 / 空响应连续或近期很多，请求发送连续失败，或试探等待未满）；选号时排除
     Unhealthy,
     /// 已禁用（手动或自动）
     Disabled,
@@ -141,7 +149,7 @@ impl HealthStatus {
         match self {
             HealthStatus::Healthy => "green",
             HealthStatus::Warning => "yellow",
-            HealthStatus::Degraded => "orange",
+            HealthStatus::Degraded | HealthStatus::PendingVerification => "orange",
             HealthStatus::Unhealthy => "red",
             HealthStatus::Disabled => "gray",
         }
@@ -153,6 +161,7 @@ impl HealthStatus {
             HealthStatus::Healthy => "健康",
             HealthStatus::Warning => "警告",
             HealthStatus::Degraded => "降级",
+            HealthStatus::PendingVerification => "恢复待验证",
             HealthStatus::Unhealthy => "不健康",
             HealthStatus::Disabled => "已禁用",
         }

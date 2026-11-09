@@ -1,5 +1,6 @@
 //! MultiTokenManager 类型定义：凭据快照（CredentialEntrySnapshot）、管理器快照与多账号管理器主体结构。
 use super::entry::{AccountError, CredentialEntry, DisabledReason, HealthStatus};
+use super::trial::TrialLease;
 use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
 use std::path::PathBuf;
@@ -26,13 +27,13 @@ pub struct HealthDetail {
     pub recent_abnormal_count: u32,
     /// 连续上游失败次数（一次正常完成的响应即清零）
     pub consecutive_failures: u32,
-    /// 不健康时冷却期剩余秒数；其它状态为 None
+    /// 不健康时冷却期剩余秒数（限流冷却与试探等待的较大者）；其它状态为 None
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_remaining_secs: Option<u64>,
     /// 请求发送连续失败导致的冷却剩余秒数（面板显示为异常，区别于限流冷却）；不在此冷却时为 None
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreachable_cooldown_secs: Option<u64>,
-    /// 候选账号全部冷却、已开始按间隔试探时，距下一次试探的剩余秒数；其它情况为 None
+    /// 冷却中距下一次放出试探的剩余秒数；不在冷却中为 None
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_wait_secs: Option<u64>,
 }
@@ -243,4 +244,7 @@ pub struct CallContext {
     pub credentials: KiroCredentials,
     /// 访问 Token
     pub token: String,
+    /// 账号待验证时占用的试验名额；随上下文丢弃（拿到响应头或放弃这次尝试）释放
+    #[allow(dead_code)] // 只为持有名额，不读取
+    pub trial: Option<TrialLease>,
 }

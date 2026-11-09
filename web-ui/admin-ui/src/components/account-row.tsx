@@ -61,6 +61,9 @@ function healthTitle(credential: CredentialStatusItem, t: TFunction): string {
     }),
   ]
   if (credential.healthStatus === 'degraded') parts.push(t('credentials.healthDegradedNote'))
+  if (credential.healthStatus === 'pending_verification') {
+    parts.push(t('credentials.healthAwaitingVerificationNote'))
+  }
   if (credential.unreachableCooldownSecs !== undefined) {
     parts.push(
       t('credentials.unreachableCooldown', {

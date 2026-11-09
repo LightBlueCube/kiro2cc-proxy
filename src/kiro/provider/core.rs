@@ -13,7 +13,7 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::affinity::{Affinity, RouteKeys};
 use crate::kiro::endpoint::{Endpoint, EndpointBucketRegistry, EndpointName, UpstreamApi};
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{MultiTokenManager, UNHEALTHY_CONSECUTIVE};
 use crate::model::config::TlsBackend;
 use crate::model::failure_log::FailureLogStore;
 use crate::model::rpm::RpmTracker;
@@ -22,10 +22,10 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
-/// 每个账号的最大重试次数
-pub(crate) const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
+/// 每个账号的最大重试次数：重试到账号连续失败进入冷却为止
+pub(crate) const MAX_RETRIES_PER_CREDENTIAL: usize = UNHEALTHY_CONSECUTIVE as usize;
 
-/// 总重试次数硬上限（避免无限重试）
+/// 总重试次数硬上限（避免无限重试；5xx 等不进冷却的失败靠它收尾）
 pub(crate) const MAX_TOTAL_RETRIES: usize = 9;
 
 /// 最大并发请求数（同时发往上游的请求上限）

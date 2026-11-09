@@ -141,15 +141,16 @@ fn classify_provider_error(
         };
     }
 
-    // 候选账号全部冷却、都没到试探时间：本次没有发往上游，按 429 让客户端等到可以试探再来
+    // 候选账号全部冷却、都没到试探时间（或待验证账号的试验名额被占）：本次没有发往上游，
+    // 按 429 让客户端等到可以使用再来
     if let Some(cooling) = err.downcast_ref::<AccountsCoolingDown>() {
-        tracing::warn!(error = %err, "账号全部冷却：返回 429，Retry-After 为最早可试探时间");
+        tracing::warn!(error = %err, "账号全部冷却或待验证：返回 429，Retry-After 为最早可用时间");
         return ProviderErrorClass {
             status: StatusCode::TOO_MANY_REQUESTS,
             error_type: "rate_limit_error",
             message: format!(
-                "All Kiro accounts are cooling down after repeated upstream failures. \
-                 Please retry in {} seconds.",
+                "All Kiro accounts are cooling down or awaiting verification after repeated \
+                 upstream failures. Please retry in {} seconds.",
                 cooling.retry_after_secs()
             ),
         };

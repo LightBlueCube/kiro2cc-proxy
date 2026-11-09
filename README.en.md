@@ -465,7 +465,11 @@ See the format reference below. Restart the service after saving.
 
 Lower `priority` value = higher priority. Up to 3 retries per account, 9 per request, with automatic failover.
 
-Accounts that keep getting throttled or cannot be reached cool down and are skipped during selection. Failures that still arrive during a cooldown are not counted and do not extend it; only a failure after the cooldown ends escalates it (throttle cooldown 2 → 4 → 8 → 10 minutes, capped), and one successful response clears the count. When every usable account is cooling down, requests are no longer sent upstream as usual: each account lets through one probe request per interval, each failed probe doubles the interval (from 15 seconds, up to 5 minutes), and one successful response restores it. Meanwhile new requests queue for up to 10 seconds; if no probe slot opens in time they get a 429 whose `Retry-After` is the seconds until the earliest probe. The admin panel shows "Probe in Ns" next to the account status.
+Accounts that keep getting throttled or cannot be reached cool down and are skipped during selection. Failures that still arrive during a cooldown are not counted and do not extend it; only a failure after the cooldown ends escalates it (throttle cooldown 2 → 4 → 8 → 10 minutes, capped), and one successful response clears the count. 
+
+When every usable account is cooling down, requests are no longer sent upstream as usual: the probe timer starts when an account enters cooling, and after it expires each account lets through exactly one probe request. A probe counts as failed as soon as it is let through, so the interval doubles (from 30 seconds, up to 5 minutes) and the cooldown lasts at least until the next probe time (the larger of the throttle cooldown and the probe wait); one complete successful response restores the account. Meanwhile new requests queue for up to 10 seconds, then get a 429 whose `Retry-After` is the seconds until the earliest usable account. The admin panel shows "Probe in Ns" next to the account status.
+
+An account whose cooldown has ended becomes "Recovering" until one complete successful response returns it to healthy: only one request is let through at a time (released once the response headers arrive, with a 30-second lease as a safety net), and its selection order is not lowered, so it takes part in normal rotation. A failed trial counts as a failure after leaving the cooldown and escalates the cooldown as usual.
 
 ---
 
