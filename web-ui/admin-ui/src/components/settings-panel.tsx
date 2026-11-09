@@ -527,6 +527,26 @@ export function SettingsPanel({
               </>
             )}
           </Row>
+          <Row label={t('settings.upstreamApi')} desc={t('settings.upstreamApiDesc')}>
+            <Seg
+              groupLabel={t('settings.upstreamApi')}
+              value={runtimeConfigData?.upstreamApi}
+              options={[
+                { value: 'createResponse' as const, label: 'CreateResponse' },
+                { value: 'generateAssistantResponse' as const, label: 'GenerateAssistantResponse' },
+              ]}
+              onSelect={(upstreamApi) =>
+                setRuntimeConfigMut(
+                  { upstreamApi },
+                  {
+                    onSuccess: (d) => toast.success(d.message),
+                    onError: (e) => toast.error(extractErrorMessage(e)),
+                  }
+                )
+              }
+              disabled={isLoadingRuntimeConfig || isRuntimeConfigError || isSettingRuntimeConfig}
+            />
+          </Row>
           <div className="px-4 py-2 text-[11px] text-ink-3">{t('settings.runtimeConfigSaveHint')}</div>
         </Section>
 

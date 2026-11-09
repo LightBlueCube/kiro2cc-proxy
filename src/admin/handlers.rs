@@ -7,6 +7,8 @@ use axum::{
     response::IntoResponse,
 };
 
+use crate::model::config::UpstreamApi;
+
 use super::{
     middleware::AdminState,
     types::{
@@ -440,13 +442,14 @@ pub async fn get_runtime_config(State(state): State<AdminState>) -> impl IntoRes
 
     // port / proxyUrl 无运行时热值概念，读取 config.json 持久化值；
     // 文件缺失或字段缺失时回退默认值（与 Config serde default 一致）
-    let (mut port, mut proxy_url) = (0u16, None);
+    let (mut port, mut proxy_url, mut upstream_api) = (0u16, None, UpstreamApi::default());
     if let Some(ref config_path) = state.config_path
         && let Ok(content) = std::fs::read_to_string(config_path)
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
     {
         port = json["port"].as_u64().unwrap_or(8080) as u16;
         proxy_url = json["proxyUrl"].as_str().map(str::to_string);
+        upstream_api = persisted_upstream_api(&json["upstreamApi"]);
     }
     if port == 0 {
         port = 8080;
@@ -460,6 +463,21 @@ pub async fn get_runtime_config(State(state): State<AdminState>) -> impl IntoRes
         port,
         proxy_url,
         write_chunking_max_lines: crate::anthropic::write_chunking_max_lines(),
+        upstream_api,
+    })
+}
+
+/// config.json 中的 upstreamApi：缺省为默认值；取值非法时下次启动会加载失败，这里告警并按默认展示
+fn persisted_upstream_api(value: &serde_json::Value) -> UpstreamApi {
+    if value.is_null() {
+        return UpstreamApi::default();
+    }
+    serde_json::from_value(value.clone()).unwrap_or_else(|e| {
+        tracing::warn!(
+            "config.json 的 upstreamApi 取值非法（重启将无法加载配置）: {}",
+            e
+        );
+        UpstreamApi::default()
     })
 }
 
@@ -478,7 +496,7 @@ fn validate_proxy_url(url: &str) -> Result<(), String> {
 }
 
 /// PUT /api/admin/config/runtime
-/// 设置运行时配置：maxRpm / writeChunkingMaxLines 热切换 + 各字段写回 config.json（port/proxyUrl 重启后生效）
+/// 设置运行时配置：maxRpm / writeChunkingMaxLines 热切换 + 各字段写回 config.json（port/proxyUrl/upstreamApi 重启后生效）
 pub async fn set_runtime_config(
     State(state): State<AdminState>,
     Json(payload): Json<super::types::SetRuntimeConfigRequest>,
@@ -538,6 +556,9 @@ pub async fn set_runtime_config(
             if let Some(port) = payload.port {
                 json["port"] = serde_json::json!(port);
             }
+            if let Some(api) = payload.upstream_api {
+                json["upstreamApi"] = serde_json::json!(api);
+            }
             if let Some(ref url) = payload.proxy_url {
                 if url.is_empty() {
                     if let Some(map) = json.as_object_mut() {
@@ -578,6 +599,9 @@ pub async fn set_runtime_config(
     }
     if payload.proxy_url.is_some() {
         parts.push("proxyUrl 已保存（重启后生效）");
+    }
+    if payload.upstream_api.is_some() {
+        parts.push("upstreamApi 已保存（重启后生效）");
     }
     Json(SuccessResponse::new(parts.join("，"))).into_response()
 }
@@ -721,6 +745,28 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_persisted_upstream_api() {
+        assert_eq!(
+            persisted_upstream_api(&serde_json::Value::Null),
+            UpstreamApi::CreateResponse
+        );
+        assert_eq!(
+            persisted_upstream_api(&serde_json::json!("generateAssistantResponse")),
+            UpstreamApi::GenerateAssistantResponse
+        );
+        assert_eq!(
+            persisted_upstream_api(&serde_json::json!("bogus")),
+            UpstreamApi::CreateResponse
+        );
+
+        // 写回的取值能被 Config 重新加载
+        let mut json = serde_json::json!({});
+        json["upstreamApi"] = serde_json::json!(UpstreamApi::GenerateAssistantResponse);
+        let config: crate::model::config::Config = serde_json::from_value(json).unwrap();
+        assert_eq!(config.upstream_api, UpstreamApi::GenerateAssistantResponse);
     }
 
     #[test]

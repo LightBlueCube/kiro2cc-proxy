@@ -30,6 +30,8 @@ pub enum ParseError {
     TooManyErrors { count: usize, last_error: String },
     /// 缓冲区溢出
     BufferOverflow { size: usize, max: usize },
+    /// 事件出现在不合法的位置（如没有进行中的工具调用时收到参数增量）
+    UnexpectedEvent(String),
 }
 
 impl std::error::Error for ParseError {}
@@ -75,6 +77,7 @@ impl fmt::Display for ParseError {
             Self::BufferOverflow { size, max } => {
                 write!(f, "缓冲区溢出: {} 字节 (最大 {})", size, max)
             }
+            Self::UnexpectedEvent(what) => write!(f, "事件顺序异常: {}", what),
         }
     }
 }

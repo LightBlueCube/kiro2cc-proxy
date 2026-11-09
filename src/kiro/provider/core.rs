@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::affinity::{Affinity, RouteKeys};
-use crate::kiro::endpoint::{Endpoint, EndpointBucketRegistry, EndpointName};
+use crate::kiro::endpoint::{Endpoint, EndpointBucketRegistry, EndpointName, UpstreamApi};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
 use crate::model::config::TlsBackend;
@@ -202,13 +202,18 @@ impl KiroProvider {
         .host
     }
 
-    /// 获取账号级 API 基础 URL（按指定 endpoint）
+    /// 对话请求走的上游 API（启动配置，修改须重启）
+    pub fn upstream_api(&self) -> UpstreamApi {
+        self.token_manager.config().upstream_api
+    }
+
+    /// 获取账号级 API 基础 URL（按指定 endpoint 与上游 API）
     pub(crate) fn base_url_for(
         &self,
         _credentials: &KiroCredentials,
         endpoint: &Endpoint,
     ) -> String {
-        format!("https://{}/generateAssistantResponse", endpoint.host)
+        format!("https://{}{}", endpoint.host, self.upstream_api().path())
     }
 
     /// 获取账号级 MCP API URL（MCP 端点不走多端点 LB）

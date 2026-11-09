@@ -44,7 +44,7 @@ impl UpstreamRejected {
     pub fn client_message(&self) -> String {
         let message = serde_json::from_str::<serde_json::Value>(&self.body)
             .ok()
-            .and_then(|v| v.get("message")?.as_str().map(str::to_string));
+            .and_then(|v| upstream_error_message(&v).map(str::to_string));
         if let Some(message) = message {
             return message;
         }
@@ -68,6 +68,25 @@ impl std::fmt::Display for UpstreamRejected {
 }
 
 impl std::error::Error for UpstreamRejected {}
+
+/// 上游报错 JSON 的说明文案
+///
+/// GenerateAssistantResponse 为 `{"message", "reason"}`；CreateResponse 为
+/// `{"error": {"message", "type", "code"}}`（KAS `classifyCreateResponseError`）。
+fn upstream_error_message(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("message")
+        .or_else(|| value.pointer("/error/message"))?
+        .as_str()
+}
+
+/// 报错原文是否含指定原因码
+///
+/// CreateResponse 的原因码为小写并带 `kiro:` 前缀（如 `kiro:thinking_signature_invalid`），
+/// GenerateAssistantResponse 为大写，故不区分大小写匹配。
+fn mentions_reason(body: &str, reason: &str) -> bool {
+    body.to_ascii_uppercase().contains(reason)
+}
 
 impl KiroProvider {
     pub(crate) fn retry_delay(attempt: usize) -> Duration {
@@ -132,7 +151,7 @@ impl KiroProvider {
     }
 
     pub(crate) fn is_monthly_request_limit(body: &str) -> bool {
-        if body.contains("MONTHLY_REQUEST_COUNT") {
+        if mentions_reason(body, "MONTHLY_REQUEST_COUNT") {
             return true;
         }
 
@@ -169,7 +188,7 @@ impl KiroProvider {
     /// `400 {"message":"messages.3.content.0: Invalid `signature` in `thinking` block",
     /// "reason":"THINKING_SIGNATURE_INVALID"}`。跨账号、跨模型的真实签名不会被拒（2026-10-30 实测）。
     pub(crate) fn is_thinking_signature_invalid(body: &str) -> bool {
-        body.contains(THINKING_SIGNATURE_INVALID_REASON)
+        mentions_reason(body, THINKING_SIGNATURE_INVALID_REASON)
     }
 
     /// 签名无效报错点名的 history 下标
@@ -179,8 +198,7 @@ impl KiroProvider {
     /// 交替、adaptive 无前缀对，点名下标均与 history 下标一致）。
     pub(crate) fn rejected_history_index(body: &str) -> Option<usize> {
         let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
-        let message = value.get("message")?.as_str()?;
-        message
+        upstream_error_message(&value)?
             .strip_prefix("messages.")?
             .split('.')
             .next()?

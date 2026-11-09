@@ -67,6 +67,16 @@ impl EventPayload for AssistantResponseEvent {
     }
 }
 
+impl AssistantResponseEvent {
+    /// 仅含正文片段的事件（CreateResponse 的 output_text / refusal 增量）
+    pub fn from_content(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for AssistantResponseEvent {
     fn default() -> Self {
         Self {

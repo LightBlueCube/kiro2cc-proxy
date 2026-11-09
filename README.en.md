@@ -485,6 +485,7 @@ Accounts that keep getting throttled or cannot be reached cool down and are skip
 | `proxyUsername` | No | — | Proxy username |
 | `proxyPassword` | No | — | Proxy password |
 | `tlsBackend` | No | `rustls` | TLS backend: `rustls` or `native-tls` |
+| `upstreamApi` | No | `createResponse` | Kiro API used for chat requests: `createResponse` (`POST /v1/responses`, used by the current Kiro client; served only by the `runtime` endpoint, other endpoints are skipped) or `generateAssistantResponse` (previous API, all endpoints). Editable in the Admin settings page; requires a restart. Override with `UPSTREAM_API` |
 | `loadBalancingMode` | No | `priority` | `priority`: only the highest-priority tier is used, round-robin within it; `balanced`: round-robin across all available accounts. In both, an existing session goes back to the account holding its cached context first |
 | `maxRpmPerCredential` | No | `30` | Per-account hard RPM limit, applies to every request: when full another account is used, otherwise the request queues for up to 10 seconds and then gets a 429; `0` means unlimited. Saving from the settings page applies it immediately and persists it to `config.json` |
 | `softRpmPerCredential` | No | `10` | Per-account soft RPM limit: once reached, new sessions are no longer assigned to the account while existing sessions keep using it; if every account is at the limit, assignment proceeds as usual under the hard limit; `0` disables it. Applies immediately when saved from the settings page |
@@ -535,6 +536,7 @@ After configuring `adminPsw`, the Admin settings page manages the following opti
 | Chunked-write line limit | `writeChunkingMaxLines` | Applies immediately to subsequent requests only; `0` disables the instruction |
 | Listen port | `port` | Takes effect after restart; valid range: `1–65535` |
 | Upstream proxy URL | `proxyUrl` | Takes effect after restart; accepts `http`, `https`, and `socks5`; empty disables the proxy |
+| Upstream Kiro API | `upstreamApi` | Takes effect after a restart; `createResponse` (default) or `generateAssistantResponse` |
 
 > **Client authentication**: `config.json` no longer provides a global API key. Clients calling `/v1/messages` or `/cc/v1/messages` must authenticate with a sub API key created and enabled in the admin panel (login with `adminPsw`). Note: if `adminPsw` is left unset, the admin panel itself is disabled — you won't be able to create sub API keys until it's configured.
 

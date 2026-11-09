@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+pub use crate::model::config::UpstreamApi;
+
 /// 单次 429 后桶封禁时长（固定窗口，独立于 `provider::throttle_delay` 的请求内退避）
 pub const BUCKET_THROTTLE_DURATION: Duration = Duration::from_secs(30);
 
@@ -103,6 +105,27 @@ impl Endpoint {
             Self::by_name(EndpointName::Codewhisperer, region),
             Self::by_name(EndpointName::Amazonq, region),
         ]
+    }
+}
+
+impl UpstreamApi {
+    /// 对话请求的 URL 路径
+    pub fn path(self) -> &'static str {
+        match self {
+            UpstreamApi::CreateResponse => "/v1/responses",
+            UpstreamApi::GenerateAssistantResponse => "/generateAssistantResponse",
+        }
+    }
+
+    /// 端点是否提供该 API
+    ///
+    /// Kiro 客户端（KAS 3.1.0）只向 `runtime.{region}.kiro.dev` 发 CreateResponse；
+    /// 其余 3 个端点按 x-amz-target / 默认路由只认 GenerateAssistantResponse 与 SendMessage。
+    pub fn supports(self, endpoint: EndpointName) -> bool {
+        match self {
+            UpstreamApi::CreateResponse => endpoint == EndpointName::Runtime,
+            UpstreamApi::GenerateAssistantResponse => true,
+        }
     }
 }
 
@@ -264,6 +287,25 @@ mod tests {
         );
         // 非法值反序列化失败（由调用方上层处理 → fallback to ALL）
         assert!(serde_json::from_str::<EndpointName>("\"invalid\"").is_err());
+    }
+
+    #[test]
+    fn create_response_is_served_by_runtime_endpoint_only() {
+        let supported: Vec<EndpointName> = EndpointName::ALL
+            .into_iter()
+            .filter(|&name| UpstreamApi::CreateResponse.supports(name))
+            .collect();
+        assert_eq!(supported, [EndpointName::Runtime]);
+        assert!(
+            EndpointName::ALL
+                .into_iter()
+                .all(|name| UpstreamApi::GenerateAssistantResponse.supports(name))
+        );
+        assert_eq!(UpstreamApi::CreateResponse.path(), "/v1/responses");
+        assert_eq!(
+            UpstreamApi::GenerateAssistantResponse.path(),
+            "/generateAssistantResponse"
+        );
     }
 
     #[test]

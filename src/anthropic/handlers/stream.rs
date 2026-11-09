@@ -6,8 +6,9 @@ use crate::model::usage::UsageError;
 
 use std::convert::Infallible;
 
-use crate::kiro::model::events::{Event, EventType};
-use crate::kiro::parser::decoder::EventStreamDecoder;
+use crate::kiro::decoder::{DecodeError, UpstreamDecoder};
+use crate::kiro::endpoint::UpstreamApi;
+use crate::kiro::model::events::Event;
 use axum::{
     body::Body,
     http::{StatusCode, header},
@@ -125,6 +126,7 @@ pub(crate) async fn handle_stream_request(
             ctx,
             initial_events,
             stream_deadline.map(|d| Instant::now() + d),
+            provider.upstream_api(),
         );
         hold_while_streaming(events, (api_key_in_flight, credential_in_flight))
     };
@@ -338,12 +340,47 @@ pub(crate) fn deadline_error_event() -> SseEvent {
     )
 }
 
+/// 解码出的上游事件交给状态机，返回要下发的 SSE 事件
+fn process_decoded(
+    ctx: &mut StreamContext,
+    decoded: Vec<Result<Event, DecodeError>>,
+) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    for result in decoded {
+        match result {
+            Ok(event) => {
+                ctx.termination.observe_event(&event);
+                ctx.report_upstream_throttle();
+                let sse_events = ctx.process_kiro_event(&event);
+                // 首字埋点：按「本帧是否产出客户端可见的 SSE 事件」
+                // 判定，而非按事件变体名 —— 空 content / thinking 关闭的
+                // ReasoningContent 等早退分支返回空事件，客户端零输出不应
+                // 计首字；Metering/ContextUsage 等元信息帧天然产出空事件，
+                // keepalive 是 SSE 层合成事件，同样不走此处
+                if !sse_events.is_empty() {
+                    ctx.mark_first_token();
+                }
+                events.extend(sse_events);
+            }
+            Err(DecodeError::Event { tool_use, error }) => {
+                ctx.termination.observe_parse_failure(tool_use, &error);
+            }
+            Err(DecodeError::Stream(e)) => {
+                tracing::warn!("解码上游响应失败: {}", e);
+                ctx.termination.observe_decode_error(&e);
+            }
+        }
+    }
+    events
+}
+
 /// 创建 SSE 事件流
 fn create_sse_stream(
     response: reqwest::Response,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
     deadline: Option<Instant>,
+    api: UpstreamApi,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -358,7 +395,7 @@ fn create_sse_stream(
     let stream_started_at = Instant::now();
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval_at(Instant::now() + Duration::from_secs(PING_INTERVAL_SECS), Duration::from_secs(PING_INTERVAL_SECS)), deadline),
+        (body_stream, ctx, UpstreamDecoder::new(api), false, interval_at(Instant::now() + Duration::from_secs(PING_INTERVAL_SECS), Duration::from_secs(PING_INTERVAL_SECS)), deadline),
         move |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, deadline)| async move {
             if finished {
                 return None;
@@ -375,44 +412,7 @@ fn create_sse_stream(
                 chunk_result = body_stream.next() => {
                     match chunk_result {
                         Some(Ok(chunk)) => {
-                            // 解码事件
-                            if let Err(e) = decoder.feed(&chunk) {
-                                tracing::warn!("缓冲区溢出: {}", e);
-                                ctx.termination.observe_decode_error(&e);
-                            }
-
-                            let mut events = Vec::new();
-                            for result in decoder.decode_iter() {
-                                match result {
-                                    Ok(frame) => {
-                                        let tool_use_frame =
-                                            frame.event_type() == Some(EventType::ToolUse.as_str());
-                                        match Event::from_frame(frame) {
-                                            Ok(event) => {
-                                                ctx.termination.observe_event(&event);
-                                                ctx.report_upstream_throttle();
-                                                let sse_events = ctx.process_kiro_event(&event);
-                                                // 首字埋点：按「本帧是否产出客户端可见的 SSE 事件」
-                                                // 判定，而非按事件变体名 —— 空 content / thinking 关闭的
-                                                // ReasoningContent 等早退分支返回空事件，客户端零输出不应
-                                                // 计首字；Metering/ContextUsage 等元信息帧天然产出空事件，
-                                                // keepalive 是 SSE 层合成事件，同样不走此处
-                                                if !sse_events.is_empty() {
-                                                    ctx.mark_first_token();
-                                                }
-                                                events.extend(sse_events);
-                                            }
-                                            Err(e) => {
-                                                ctx.termination.observe_parse_failure(tool_use_frame, &e);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("解码事件失败: {}", e);
-                                        ctx.termination.observe_decode_error(&e);
-                                    }
-                                }
-                            }
+                            let events = process_decoded(&mut ctx, decoder.decode(&chunk));
 
                             // 转换为 SSE 字节流
                             let bytes: Vec<Result<Bytes, Infallible>> = events
@@ -446,8 +446,9 @@ fn create_sse_stream(
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, deadline)))
                         }
                         None => {
-                            ctx.termination.observe_eof(decoder.buffer_len());
-                            let out_events = ctx.finish_at_eof();
+                            let mut out_events = process_decoded(&mut ctx, decoder.finish());
+                            ctx.termination.observe_eof(decoder.truncated());
+                            out_events.extend(ctx.finish_at_eof());
                             let bytes: Vec<Result<Bytes, Infallible>> = out_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))

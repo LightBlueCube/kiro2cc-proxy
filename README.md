@@ -506,6 +506,7 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `proxyUsername` | 否 | — | 代理用户名 |
 | `proxyPassword` | 否 | — | 代理密码 |
 | `tlsBackend` | 否 | `rustls` | TLS 后端：`rustls` 或 `native-tls` |
+| `upstreamApi` | 否 | `createResponse` | 对话请求使用的 Kiro 上游 API：`createResponse`（`POST /v1/responses`，Kiro 客户端当前使用，仅 `runtime` 端点提供，其余端点自动跳过）或 `generateAssistantResponse`（旧版，可用全部端点）。可在 Admin 设置页修改，需重启生效。可用环境变量 `UPSTREAM_API` 覆盖 |
 | `loadBalancingMode` | 否 | `priority` | `priority`：只用优先级最高的一档账号，档内轮询；`balanced`：在全部可用账号间轮询。已有会话都优先回到缓存了它上下文的账号 |
 | `maxRpmPerCredential` | 否 | `30` | 单账号 RPM 硬上限，对所有请求生效：满了换号，无号可换时排队最多 10 秒，仍满返回 429；`0` 表示不限。设置页保存后立即热生效并写入 `config.json` |
 | `softRpmPerCredential` | 否 | `10` | 单账号 RPM 软上限：达到后新会话不再分配到该账号，已有会话照常使用；所有账号都达到时照常分配，由硬上限把关；`0` 表示关闭。设置页保存后立即热生效 |
@@ -556,6 +557,7 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | 分块写入行数上限 | `writeChunkingMaxLines` | 立即热生效，仅影响之后的新请求，`0` 表示不追加约束 |
 | 监听端口 | `port` | 重启服务后生效，范围为 `1–65535` |
 | 上游代理地址 | `proxyUrl` | 重启服务后生效；支持 `http`、`https`、`socks5`，留空表示不使用代理 |
+| Kiro 上游 API | `upstreamApi` | 重启服务后生效；`createResponse`（默认）或 `generateAssistantResponse` |
 
 > **客户端鉴权说明**：`config.json` 不再提供全局 API Key。客户端调用 `/v1/messages`、`/cc/v1/messages` 时，需使用 Admin 后台（`adminPsw` 登录）创建并启用的子 API Key 进行鉴权。注：若未配置 `adminPsw`，Admin 面板本身将被禁用，无法创建子 API Key，需先完成配置。
 

@@ -15,6 +15,42 @@ pub enum TlsBackend {
     NativeTls,
 }
 
+/// 对话请求走的 Kiro 上游 API（启动时读取，修改后须重启）
+///
+/// - `createResponse`：`POST /v1/responses`（OpenAI Responses 形态，SSE 响应），Kiro 客户端当前默认
+/// - `generateAssistantResponse`：`POST /generateAssistantResponse`（AWS Event Stream 响应）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum UpstreamApi {
+    #[default]
+    CreateResponse,
+    GenerateAssistantResponse,
+}
+
+impl UpstreamApi {
+    /// 配置值（与 serde 表示一致）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateResponse => "createResponse",
+            Self::GenerateAssistantResponse => "generateAssistantResponse",
+        }
+    }
+}
+
+impl std::str::FromStr for UpstreamApi {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "createResponse" => Ok(Self::CreateResponse),
+            "generateAssistantResponse" => Ok(Self::GenerateAssistantResponse),
+            other => Err(format!(
+                "upstreamApi 只能是 createResponse 或 generateAssistantResponse，收到 {other:?}"
+            )),
+        }
+    }
+}
+
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +88,10 @@ pub struct Config {
 
     #[serde(default = "default_tls_backend")]
     pub tls_backend: TlsBackend,
+
+    /// 对话请求走的 Kiro 上游 API，默认 createResponse；修改后须重启
+    #[serde(default)]
+    pub upstream_api: UpstreamApi,
 
     /// 外部 count_tokens API 地址（可选）
     #[serde(default)]
@@ -258,6 +298,7 @@ impl Default for Config {
             system_version: default_system_version(),
             node_version: default_node_version(),
             tls_backend: default_tls_backend(),
+            upstream_api: UpstreamApi::default(),
             count_tokens_api_url: None,
             count_tokens_api_key: None,
             count_tokens_auth_type: default_count_tokens_auth_type(),
@@ -435,6 +476,11 @@ impl Config {
         {
             self.write_chunking_max_lines = n;
         }
+        if let Ok(v) = env::var("UPSTREAM_API")
+            && let Ok(api) = v.parse::<UpstreamApi>()
+        {
+            self.upstream_api = api;
+        }
 
         self.removed_settings.extend(
             REMOVED_ENV_VARS
@@ -494,6 +540,30 @@ mod tests {
             removed_keys_in(content).unwrap(),
             ["cacheSimulation", "promptCacheAccounting"]
         );
+    }
+
+    #[test]
+    fn upstream_api_defaults_to_create_response_and_round_trips() {
+        assert_eq!(Config::default().upstream_api, UpstreamApi::CreateResponse);
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.upstream_api, UpstreamApi::CreateResponse);
+
+        let c: Config =
+            serde_json::from_str(r#"{"upstreamApi": "generateAssistantResponse"}"#).unwrap();
+        assert_eq!(c.upstream_api, UpstreamApi::GenerateAssistantResponse);
+        assert!(serde_json::from_str::<Config>(r#"{"upstreamApi": "sendMessage"}"#).is_err());
+
+        for api in [
+            UpstreamApi::CreateResponse,
+            UpstreamApi::GenerateAssistantResponse,
+        ] {
+            assert_eq!(api.as_str().parse::<UpstreamApi>(), Ok(api));
+            assert_eq!(
+                serde_json::to_string(&api).unwrap(),
+                format!("\"{}\"", api.as_str())
+            );
+        }
+        assert!("CreateResponse".parse::<UpstreamApi>().is_err());
     }
 
     #[test]

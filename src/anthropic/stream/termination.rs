@@ -117,10 +117,10 @@ impl UpstreamTermination {
         }
     }
 
-    /// 上游 EOF：解码缓冲区残留字节说明流在帧中间被截断
-    pub(crate) fn observe_eof(&mut self, residual_bytes: usize) {
-        if residual_bytes > 0 {
-            tracing::warn!(residual_bytes, "上游流结束时残留未完成的帧");
+    /// 上游 EOF：`truncated` 表示响应不完整（残留半帧，或 CreateResponse 缺少终止事件）
+    pub(crate) fn observe_eof(&mut self, truncated: bool) {
+        if truncated {
+            tracing::warn!("上游流结束时响应不完整");
             self.mark_fatal("stream ended mid-frame", true);
         }
     }
@@ -186,7 +186,7 @@ mod tests {
         let mut t = UpstreamTermination::default();
         t.observe_event(&tool_use());
         t.observe_event(&metadata("TOOL_USE"));
-        t.observe_eof(0);
+        t.observe_eof(false);
         assert_eq!(t.failure(), None);
 
         let mut t = UpstreamTermination::default();
@@ -302,7 +302,7 @@ mod tests {
         assert!(account_fault(&t), "解码中断属于截断，计入账号");
 
         let mut t = UpstreamTermination::default();
-        t.observe_eof(7);
+        t.observe_eof(true);
         assert_eq!(reason(&t).as_deref(), Some("stream ended mid-frame"));
         assert!(account_fault(&t), "半帧截断计入账号");
     }

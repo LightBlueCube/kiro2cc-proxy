@@ -238,6 +238,7 @@ async fn main() {
         .with_throttle_log_store(throttle_log_store.clone())
         .with_failure_log_store(failure_log_store.clone());
     let affinity = kiro_provider.affinity();
+    log_upstream_api(config.upstream_api);
 
     // 初始化 count_tokens 配置
     token::init_config(token::CountTokensConfig {
@@ -411,4 +412,22 @@ async fn main() {
     )
     .await
     .unwrap();
+}
+
+/// 启动时说明对话请求走的上游 API，以及因此不使用的端点
+fn log_upstream_api(api: kiro::endpoint::UpstreamApi) {
+    let skipped: Vec<&str> = kiro::endpoint::EndpointName::ALL
+        .into_iter()
+        .filter(|&name| !api.supports(name))
+        .map(|name| name.as_str())
+        .collect();
+    if skipped.is_empty() {
+        tracing::info!("上游 API: {}", api.as_str());
+        return;
+    }
+    tracing::info!(
+        "上游 API: {}；以下端点不提供该 API，已跳过: {}",
+        api.as_str(),
+        skipped.join(", ")
+    );
 }

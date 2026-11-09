@@ -6,7 +6,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use crate::kiro::endpoint::{BUCKET_THROTTLE_DURATION, Endpoint, EndpointName};
+    use crate::kiro::endpoint::{BUCKET_THROTTLE_DURATION, Endpoint, EndpointName, UpstreamApi};
     use crate::kiro::model::credentials::{
         BUILDER_ID_PLACEHOLDER_PROFILE_ARN, KiroCredentials, SOCIAL_PROFILE_ARN,
     };
@@ -421,6 +421,7 @@ mod tests {
     fn test_select_endpoint_skips_throttled_buckets() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
+        config.upstream_api = UpstreamApi::GenerateAssistantResponse;
         let mut creds = KiroCredentials::default();
         creds.id = Some(1);
         creds.refresh_token = Some("a".repeat(150));
@@ -444,6 +445,7 @@ mod tests {
     fn test_select_endpoint_attempt_offset_rotates_endpoints() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
+        config.upstream_api = UpstreamApi::GenerateAssistantResponse;
         let mut creds = KiroCredentials::default();
         creds.id = Some(2);
         creds.refresh_token = Some("a".repeat(150));
@@ -477,6 +479,7 @@ mod tests {
     fn test_select_endpoint_returns_none_when_all_throttled() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
+        config.upstream_api = UpstreamApi::GenerateAssistantResponse;
         let mut creds = KiroCredentials::default();
         creds.id = Some(3);
         creds.refresh_token = Some("a".repeat(150));
@@ -496,6 +499,7 @@ mod tests {
     fn test_select_endpoint_respects_account_preferred_order() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
+        config.upstream_api = UpstreamApi::GenerateAssistantResponse;
         let mut creds = KiroCredentials::default();
         creds.id = Some(4);
         creds.refresh_token = Some("a".repeat(150));
@@ -617,5 +621,87 @@ mod tests {
     #[test]
     fn test_prefix_family_absent_without_history() {
         assert_eq!(family(&route_body("a", None, "Read", "x")), None);
+    }
+
+    // -------- CreateResponse --------
+
+    #[test]
+    fn test_create_response_uses_runtime_endpoint_and_responses_path() {
+        let mut config = Config::default();
+        config.region = "us-east-1".to_string();
+        let mut creds = KiroCredentials::default();
+        creds.id = Some(5);
+        creds.refresh_token = Some("a".repeat(150));
+        let provider = create_test_provider(config, creds.clone());
+        assert_eq!(provider.upstream_api(), UpstreamApi::CreateResponse);
+
+        for attempt in 0..4 {
+            let endpoint = provider.select_endpoint(&creds, attempt).unwrap();
+            assert_eq!(endpoint.name, EndpointName::Runtime);
+            assert_eq!(
+                provider.base_url_for(&creds, &endpoint),
+                "https://runtime.us-east-1.kiro.dev/v1/responses"
+            );
+        }
+
+        // 唯一可用的 runtime 桶被封禁：本账号无端点可用
+        provider
+            .endpoint_registry
+            .throttle(5, EndpointName::Runtime, BUCKET_THROTTLE_DURATION);
+        assert!(provider.select_endpoint(&creds, 0).is_none());
+    }
+
+    #[test]
+    fn test_build_create_response_headers() {
+        let mut creds = KiroCredentials::default();
+        creds.refresh_token = Some("a".repeat(150));
+        creds.auth_method = Some("external_idp".to_string());
+        let provider = create_test_provider(Config::default(), creds.clone());
+        let ctx = CallContext {
+            id: 1,
+            credentials: creds,
+            token: "test_token".to_string(),
+        };
+        let endpoint = Endpoint::by_name(EndpointName::Runtime, "us-east-1");
+        let request = crate::kiro::create_response::CreateResponseRequest {
+            body: "{}".to_string(),
+            origin: "AI_EDITOR".to_string(),
+            profile_arn: Some("arn:aws:codewhisperer:us-east-1:1:profile/X".to_string()),
+        };
+        let headers = provider
+            .build_create_response_headers(&ctx, &request, 1, &endpoint)
+            .unwrap();
+
+        assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer test_token");
+        assert_eq!(headers.get("host").unwrap(), "runtime.us-east-1.kiro.dev");
+        assert_eq!(headers.get("x-amzn-kiro-origin").unwrap(), "AI_EDITOR");
+        assert_eq!(headers.get("x-amzn-codewhisperer-optout").unwrap(), "true");
+        assert_eq!(
+            headers.get("x-amzn-kiro-profile").unwrap(),
+            "arn:aws:codewhisperer:us-east-1:1:profile/X"
+        );
+        assert_eq!(headers.get("TokenType").unwrap(), "EXTERNAL_IDP");
+        assert_eq!(headers.get("x-amzn-kiro-attempt").unwrap(), "2;max=3");
+        assert!(headers.get("x-amz-target").is_none());
+        assert!(headers.get("amz-sdk-request").is_none());
+    }
+
+    #[test]
+    fn test_create_response_error_bodies_are_recognized() {
+        let signature = r#"{"error":{"message":"messages.3.content.0: Invalid `signature` in `thinking` block","type":"invalid_request","code":"kiro:thinking_signature_invalid"}}"#;
+        assert!(KiroProvider::is_thinking_signature_invalid(signature));
+        assert_eq!(KiroProvider::rejected_history_index(signature), Some(3));
+
+        assert!(KiroProvider::is_monthly_request_limit(
+            r#"{"error":{"message":"limit","type":"insufficient_quota","code":"kiro:monthly_request_count"}}"#
+        ));
+
+        let rejected = crate::kiro::provider::UpstreamRejected::new(
+            "流式",
+            http::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Input is too long.","type":"invalid_request"}}"#.to_string(),
+        );
+        assert_eq!(rejected.client_message(), "Input is too long.");
     }
 }

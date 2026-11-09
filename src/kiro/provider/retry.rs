@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use tokio::time::{Instant, sleep, sleep_until};
 
-use crate::kiro::endpoint::{BUCKET_THROTTLE_DURATION, Endpoint, EndpointName};
+use crate::kiro::create_response::to_create_response_request;
+use crate::kiro::endpoint::{BUCKET_THROTTLE_DURATION, Endpoint, EndpointName, UpstreamApi};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::{AccountError, AccountsCoolingDown};
 use crate::model::throttle_log::ThrottleContext;
@@ -172,13 +173,23 @@ mod tests {
 }
 
 impl KiroProvider {
+    /// 账号可用的端点中提供当前上游 API 的部分（保持账号配置的顺序）
+    fn api_endpoints(&self, credentials: &KiroCredentials) -> Vec<Endpoint> {
+        let api = self.upstream_api();
+        let region = credentials.effective_api_region(self.token_manager.config());
+        credentials
+            .effective_endpoints(region)
+            .into_iter()
+            .filter(|endpoint| api.supports(endpoint.name))
+            .collect()
+    }
+
     pub(crate) fn select_endpoint(
         &self,
         credentials: &KiroCredentials,
         attempt: usize,
     ) -> Option<Endpoint> {
-        let region = credentials.effective_api_region(self.token_manager.config());
-        let endpoints = credentials.effective_endpoints(region);
+        let endpoints = self.api_endpoints(credentials);
         if endpoints.is_empty() {
             return None;
         }
@@ -322,12 +333,8 @@ impl KiroProvider {
                     // 4 桶全封：该账号本次请求内已无可用端点。
                     // 登记避让后继续重试其它账号，仅在所有账号都走到这一步时才失败，
                     // 避免多账号池里因单账号端点全封而直接返回 502。
-                    let endpoints: Vec<EndpointName> = ctx
-                        .credentials
-                        .effective_endpoints(
-                            ctx.credentials
-                                .effective_api_region(self.token_manager.config()),
-                        )
+                    let endpoints: Vec<EndpointName> = self
+                        .api_endpoints(&ctx.credentials)
                         .iter()
                         .map(|e| e.name)
                         .collect();
@@ -363,9 +370,22 @@ impl KiroProvider {
 
             let url = self.base_url_for(&ctx.credentials, &endpoint);
             let current_body = signature_repair.body.as_deref().unwrap_or(request_body);
-            let effective_body = Self::rewrite_profile_arn(current_body, &ctx.credentials);
-            let headers = match self.build_headers(&ctx, &effective_body, attempt, &endpoint) {
-                Ok(h) => h,
+            let kiro_body = Self::rewrite_profile_arn(current_body, &ctx.credentials);
+            // 签名删改、亲和、模型提取都基于 GenerateAssistantResponse 请求体；CreateResponse 在发送前才翻译
+            let prepared = match self.upstream_api() {
+                UpstreamApi::GenerateAssistantResponse => self
+                    .build_headers(&ctx, &kiro_body, attempt, &endpoint)
+                    .map(|headers| (headers, kiro_body)),
+                UpstreamApi::CreateResponse => {
+                    let agent_mode = Self::extract_agent_task_type_from_request(&kiro_body);
+                    // 翻译失败是请求体本身的问题，换号重试结果不变
+                    let request = to_create_response_request(&kiro_body, agent_mode)?;
+                    self.build_create_response_headers(&ctx, &request, attempt, &endpoint)
+                        .map(|headers| (headers, request.body))
+                }
+            };
+            let (headers, effective_body) = match prepared {
+                Ok(prepared) => prepared,
                 Err(e) => {
                     last_error = Some(e);
                     continue;

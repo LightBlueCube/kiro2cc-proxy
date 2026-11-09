@@ -479,6 +479,8 @@ pub struct RuntimeConfigResponse {
     pub proxy_url: Option<String>,
     /// 分块写入约束的行数上限（运行时当前值，0 = 不追加约束，热生效）
     pub write_chunking_max_lines: u32,
+    /// 对话请求走的上游 API（config.json 持久化值，重启后生效）
+    pub upstream_api: crate::model::config::UpstreamApi,
 }
 
 /// 设置运行时配置请求（字段均为可选，仅更新显式传入的字段）
@@ -499,6 +501,8 @@ pub struct SetRuntimeConfigRequest {
     pub proxy_url: Option<String>,
     /// 分块写入约束的行数上限（0 = 不追加约束，热生效，仅影响之后的新请求）
     pub write_chunking_max_lines: Option<u32>,
+    /// 对话请求走的上游 API（重启后生效）
+    pub upstream_api: Option<crate::model::config::UpstreamApi>,
 }
 
 // ============ 通用响应 ============

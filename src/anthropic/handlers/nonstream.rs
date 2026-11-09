@@ -8,8 +8,8 @@ use crate::anthropic::stream::{
 use crate::anthropic::types::ErrorResponse;
 use std::sync::Arc;
 
-use crate::kiro::model::events::{Event, EventType, ReasoningContentEvent, UpstreamStop};
-use crate::kiro::parser::decoder::EventStreamDecoder;
+use crate::kiro::decoder::{DecodeError, UpstreamDecoder};
+use crate::kiro::model::events::{Event, ReasoningContentEvent, UpstreamStop};
 use crate::token;
 use axum::{
     http::StatusCode,
@@ -252,104 +252,98 @@ pub(crate) async fn handle_non_stream_request(
     // 上游异常终止判定（错误帧 / 异常 stopReason / 帧丢失），收集结束后决定是否报错
     let mut termination = UpstreamTermination::default();
 
-    let mut decoder = EventStreamDecoder::new();
-    if let Err(e) = decoder.feed(&body_bytes) {
-        tracing::warn!("缓冲区溢出: {}", e);
-        termination.observe_decode_error(&e);
-    }
+    let mut decoder = UpstreamDecoder::new(provider.upstream_api());
+    let mut decoded = decoder.decode(&body_bytes);
+    decoded.extend(decoder.finish());
 
-    for result in decoder.decode_iter() {
+    for result in decoded {
         match result {
-            Ok(frame) => {
-                let tool_use_frame = frame.event_type() == Some(EventType::ToolUse.as_str());
-                let parsed = Event::from_frame(frame);
-                if let Err(e) = &parsed {
-                    termination.observe_parse_failure(tool_use_frame, e);
-                }
-                if let Ok(event) = parsed {
-                    termination.observe_event(&event);
-                    collect_native_reasoning(
-                        &event,
-                        &mut native_reasoning,
-                        &mut native_thinking_blocks,
-                    );
-                    match event {
-                        Event::AssistantResponse(resp) => {
-                            text_content.push_str(&resp.content);
-                        }
-                        Event::ToolUse(tool_use) => {
-                            has_tool_use = true;
+            Err(DecodeError::Event { tool_use, error }) => {
+                termination.observe_parse_failure(tool_use, &error);
+            }
+            Err(DecodeError::Stream(e)) => {
+                tracing::warn!("解码上游响应失败: {}", e);
+                termination.observe_decode_error(&e);
+            }
+            Ok(event) => {
+                termination.observe_event(&event);
+                collect_native_reasoning(
+                    &event,
+                    &mut native_reasoning,
+                    &mut native_thinking_blocks,
+                );
+                match event {
+                    Event::AssistantResponse(resp) => {
+                        text_content.push_str(&resp.content);
+                    }
+                    Event::ToolUse(tool_use) => {
+                        has_tool_use = true;
 
-                            // 累积工具的 JSON 输入
-                            let buffer = tool_json_buffers
-                                .entry(tool_use.tool_use_id.clone())
-                                .or_default();
-                            buffer.push_str(&tool_use.input);
+                        // 累积工具的 JSON 输入
+                        let buffer = tool_json_buffers
+                            .entry(tool_use.tool_use_id.clone())
+                            .or_default();
+                        buffer.push_str(&tool_use.input);
 
-                            // 如果是完整的工具调用，添加到列表
-                            if tool_use.stop {
-                                let input: serde_json::Value = if buffer.is_empty() {
+                        // 如果是完整的工具调用，添加到列表
+                        if tool_use.stop {
+                            let input: serde_json::Value = if buffer.is_empty() {
+                                serde_json::json!({})
+                            } else {
+                                serde_json::from_str(buffer).unwrap_or_else(|e| {
+                                    tracing::warn!(
+                                        "工具输入 JSON 解析失败: {}, tool_use_id: {}",
+                                        e,
+                                        tool_use.tool_use_id
+                                    );
                                     serde_json::json!({})
-                                } else {
-                                    serde_json::from_str(buffer).unwrap_or_else(|e| {
-                                        tracing::warn!(
-                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}",
-                                            e,
-                                            tool_use.tool_use_id
-                                        );
-                                        serde_json::json!({})
-                                    })
-                                };
+                                })
+                            };
 
-                                tool_uses.push(json!({
-                                    "type": "tool_use",
-                                    "id": tool_use.tool_use_id,
-                                    "name": tool_use.name,
-                                    "input": input
-                                }));
-                            }
+                            tool_uses.push(json!({
+                                "type": "tool_use",
+                                "id": tool_use.tool_use_id,
+                                "name": tool_use.name,
+                                "input": input
+                            }));
                         }
-                        Event::ContextUsage(context_usage) => {
-                            // contextUsage 本地化：弃用 percentage × window 反算，
-                            // 仅保留 100% 触发 stop_reason 兜底
-                            if context_usage.context_usage_percentage >= 100.0 {
-                                stop_reason = "model_context_window_exceeded".to_string();
-                            }
-                            tracing::debug!(
-                                "[deprecated] contextUsageEvent: {:.2}% (仅记录, 不参与 input_tokens 反算)",
-                                context_usage.context_usage_percentage,
-                            );
+                    }
+                    Event::ContextUsage(context_usage) => {
+                        // contextUsage 本地化：弃用 percentage × window 反算，
+                        // 仅保留 100% 触发 stop_reason 兜底
+                        if context_usage.context_usage_percentage >= 100.0 {
+                            stop_reason = "model_context_window_exceeded".to_string();
                         }
-                        Event::Metering(metering) => {
-                            metering_cache_read_tokens = metering.cache_read_input_tokens;
-                            metering_usage = Some(metering.usage);
-                        }
-                        Event::Exception { exception_type, .. }
-                            if exception_type == CONTENT_LENGTH_EXCEEDED_EXCEPTION =>
-                        {
+                        tracing::debug!(
+                            "[deprecated] contextUsageEvent: {:.2}% (仅记录, 不参与 input_tokens 反算)",
+                            context_usage.context_usage_percentage,
+                        );
+                    }
+                    Event::Metering(metering) => {
+                        metering_cache_read_tokens = metering.cache_read_input_tokens;
+                        metering_usage = Some(metering.usage);
+                    }
+                    Event::Exception { exception_type, .. }
+                        if exception_type == CONTENT_LENGTH_EXCEEDED_EXCEPTION =>
+                    {
+                        stop_reason = "max_tokens".to_string();
+                    }
+                    // 异常类 stopReason 由 termination 判定，此处只映射正常收尾的 stop_reason
+                    Event::Metadata(metadata) => match metadata.upstream_stop() {
+                        Some(UpstreamStop::MaxTokens) => {
                             stop_reason = "max_tokens".to_string();
                         }
-                        // 异常类 stopReason 由 termination 判定，此处只映射正常收尾的 stop_reason
-                        Event::Metadata(metadata) => match metadata.upstream_stop() {
-                            Some(UpstreamStop::MaxTokens) => {
-                                stop_reason = "max_tokens".to_string();
-                            }
-                            Some(UpstreamStop::ContextWindowExceeded) => {
-                                stop_reason = "model_context_window_exceeded".to_string();
-                            }
-                            _ => {}
-                        },
+                        Some(UpstreamStop::ContextWindowExceeded) => {
+                            stop_reason = "model_context_window_exceeded".to_string();
+                        }
                         _ => {}
-                    }
+                    },
+                    _ => {}
                 }
-            }
-            Err(e) => {
-                tracing::warn!("解码事件失败: {}", e);
-                termination.observe_decode_error(&e);
             }
         }
     }
-    termination.observe_eof(decoder.buffer_len());
+    termination.observe_eof(decoder.truncated());
     let feedback = crate::kiro::provider::UpstreamFeedback::new(Arc::clone(&provider), route);
     if let Some(message) = termination.throttle_message() {
         feedback.throttled(message);

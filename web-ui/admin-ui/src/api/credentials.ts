@@ -131,7 +131,10 @@ export async function setSuggestionMode(enabled: boolean): Promise<{ success: bo
   return data
 }
 
-// 获取运行时配置（maxRpm / softRpm / port / proxyUrl / writeChunkingMaxLines）
+/** 对话请求走的 Kiro 上游 API（重启后生效） */
+export type UpstreamApi = 'createResponse' | 'generateAssistantResponse'
+
+// 获取运行时配置（maxRpm / softRpm / port / proxyUrl / writeChunkingMaxLines / upstreamApi）
 export async function getRuntimeConfig(): Promise<{
   maxRpmPerCredential: number
   softRpmPerCredential: number
@@ -140,6 +143,7 @@ export async function getRuntimeConfig(): Promise<{
   port: number
   proxyUrl: string | null
   writeChunkingMaxLines: number
+  upstreamApi: UpstreamApi
 }> {
   const { data } = await api.get<{
     maxRpmPerCredential: number
@@ -149,11 +153,12 @@ export async function getRuntimeConfig(): Promise<{
     port: number
     proxyUrl: string | null
     writeChunkingMaxLines: number
+    upstreamApi: UpstreamApi
   }>('/config/runtime')
   return data
 }
 
-// 设置运行时配置（仅更新传入字段；maxRpm / writeChunkingMaxLines 热生效，port/proxyUrl 重启后生效）
+// 设置运行时配置（仅更新传入字段；maxRpm / writeChunkingMaxLines 热生效，port/proxyUrl/upstreamApi 重启后生效）
 export async function setRuntimeConfig(payload: {
   maxRpmPerCredential?: number
   softRpmPerCredential?: number
@@ -162,6 +167,7 @@ export async function setRuntimeConfig(payload: {
   writeChunkingMaxLines?: number
   port?: number
   proxyUrl?: string
+  upstreamApi?: UpstreamApi
 }): Promise<{ success: boolean; message: string }> {
   const { data } = await api.put<{ success: boolean; message: string }>('/config/runtime', payload)
   return data
