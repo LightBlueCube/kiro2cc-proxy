@@ -479,6 +479,8 @@ bash start_server.sh restart   # 重启
 
 Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazonq`）走独立的限流桶。本代理在单账号内自动轮询这些端点：429 时只封禁命中桶（30s 后自动恢复），不影响其它端点、不切换账号。
 
+以上仅适用于 `generateAssistantResponse`。默认的 `createResponse` 只走 `runtime` 一个端点，无处可换，429 时不封桶，限流冷却由账号层处理（见上文冷却与试探）。
+
 默认启用全部 4 端点。账号可通过 `endpoint` 字段声明首选端点（首选在首 + 剩余端点按默认序去重追加）：
 
 ```json

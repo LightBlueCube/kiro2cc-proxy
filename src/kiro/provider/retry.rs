@@ -722,9 +722,11 @@ impl KiroProvider {
         let id = route.credential_id;
         self.token_manager.report_throttled(id);
         self.token_manager.report_throttled_for_rotation(id);
-        // 端点级：封禁命中桶（不动其它桶）
-        self.endpoint_registry
-            .throttle(id, route.endpoint, BUCKET_THROTTLE_DURATION);
+        // 端点级：封禁命中桶（不动其它桶）；只有一个端点时不封，限流冷却交给账号层
+        if self.upstream_api().rotates_endpoints() {
+            self.endpoint_registry
+                .throttle(id, route.endpoint, BUCKET_THROTTLE_DURATION);
+        }
         if let Some(keys) = &route.route_keys {
             self.affinity.on_upstream_throttled(&keys.conversation, id);
         }

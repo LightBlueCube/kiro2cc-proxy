@@ -127,6 +127,18 @@ impl UpstreamApi {
             UpstreamApi::GenerateAssistantResponse => true,
         }
     }
+
+    /// 是否在多个端点（独立限流桶）间轮换
+    ///
+    /// 只有一个端点时无处可换，封桶等于把整个账号停用 `BUCKET_THROTTLE_DURATION`，
+    /// 限流冷却交给账号层。
+    pub fn rotates_endpoints(self) -> bool {
+        EndpointName::ALL
+            .into_iter()
+            .filter(|&endpoint| self.supports(endpoint))
+            .count()
+            > 1
+    }
 }
 
 /// `codewhisperer` 端点在 us-east-1 走独占主机，其它区域回退到 `q.*`
@@ -185,6 +197,12 @@ impl EndpointBucketRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_generate_assistant_response_rotates_endpoints() {
+        assert!(UpstreamApi::GenerateAssistantResponse.rotates_endpoints());
+        assert!(!UpstreamApi::CreateResponse.rotates_endpoints());
+    }
 
     #[test]
     fn endpoint_all_returns_four_with_correct_hosts_and_amz_targets() {

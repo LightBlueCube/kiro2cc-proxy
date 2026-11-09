@@ -10,7 +10,7 @@ mod tests {
     use crate::kiro::model::credentials::{
         BUILDER_ID_PLACEHOLDER_PROFILE_ARN, KiroCredentials, SOCIAL_PROFILE_ARN,
     };
-    use crate::kiro::provider::KiroProvider;
+    use crate::kiro::provider::{KiroProvider, UpstreamRoute};
     use crate::kiro::token_manager::{CallContext, MultiTokenManager};
     use crate::model::config::Config;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -653,6 +653,53 @@ mod tests {
             .endpoint_registry
             .throttle(5, EndpointName::Runtime, BUCKET_THROTTLE_DURATION);
         assert!(provider.select_endpoint(&creds, 0).is_none());
+    }
+
+    fn throttled_route(credential_id: u64, endpoint: EndpointName) -> UpstreamRoute {
+        UpstreamRoute {
+            credential_id,
+            endpoint,
+            route_keys: None,
+            model: None,
+            attempt: 1,
+        }
+    }
+
+    #[test]
+    fn test_create_response_throttle_leaves_the_only_bucket_open() {
+        let mut config = Config::default();
+        config.region = "us-east-1".to_string();
+        let mut creds = KiroCredentials::default();
+        creds.id = Some(6);
+        creds.refresh_token = Some("a".repeat(150));
+        let provider = create_test_provider(config, creds.clone());
+        assert_eq!(provider.upstream_api(), UpstreamApi::CreateResponse);
+
+        provider.report_stream_throttled(&throttled_route(6, EndpointName::Runtime), "throttled");
+
+        // 唯一的端点不封桶：限流冷却由账号层负责
+        assert_eq!(
+            provider.select_endpoint(&creds, 0).unwrap().name,
+            EndpointName::Runtime
+        );
+    }
+
+    #[test]
+    fn test_generate_assistant_response_throttle_blocks_only_the_hit_bucket() {
+        let mut config = Config::default();
+        config.region = "us-east-1".to_string();
+        config.upstream_api = UpstreamApi::GenerateAssistantResponse;
+        let mut creds = KiroCredentials::default();
+        creds.id = Some(7);
+        creds.refresh_token = Some("a".repeat(150));
+        let provider = create_test_provider(config, creds.clone());
+
+        provider.report_stream_throttled(&throttled_route(7, EndpointName::Ide), "throttled");
+
+        assert_eq!(
+            provider.select_endpoint(&creds, 0).unwrap().name,
+            EndpointName::Runtime
+        );
     }
 
     #[test]
