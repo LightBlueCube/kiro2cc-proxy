@@ -38,7 +38,15 @@ type Config struct {
 	SnapshotTTL time.Duration
 	// Recorder, when set, receives a record of every request.
 	Recorder Recorder
-	Log      *slog.Logger
+	// Budget measures key quota use; it must be set when keys have limits.
+	Budget Budget
+	Log    *slog.Logger
+}
+
+// Budget reports an API key's weekly-quota use in a quota group, as a
+// share of one account's weekly bucket.
+type Budget interface {
+	Used(ctx context.Context, key, group string) (float64, error)
 }
 
 type Gateway struct {
@@ -48,6 +56,7 @@ type Gateway struct {
 	snaps    *snapshotStore
 	models   *catalog
 	recorder Recorder
+	budget   Budget
 	stop     chan struct{}
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
@@ -113,6 +122,7 @@ func New(cfg Config) (*Gateway, error) {
 		snaps:    snaps,
 		models:   newCatalog(),
 		recorder: cfg.Recorder,
+		budget:   cfg.Budget,
 		stop:     make(chan struct{}),
 		sessions: map[string]*session{},
 	}
@@ -172,6 +182,9 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if !caller.Allows(modelID) {
 		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf("this API key may not use model %q", modelID)}
 	}
+	if err := g.checkLimit(ctx, caller, rec.QuotaGroup); err != nil {
+		return err
+	}
 
 	user := caller.Name
 	r := &run{user: user, req: req, t: t, slug: slug, group: pool.QuotaGroup(slug), exclude: map[string]bool{}, reuse: true}
@@ -194,6 +207,26 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		r.exclude[failure.account] = true
 		r.reuse = false
 	}
+}
+
+// checkLimit refuses a key that used up its limit for the quota group. A
+// turn running when the limit is reached finishes; later requests,
+// including those continuing a parked turn, are refused.
+func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, group string) *conv.Error {
+	limit, limited := caller.Limits[group]
+	if !limited {
+		return nil
+	}
+	used, err := g.budget.Used(ctx, caller.Name, group)
+	if err != nil {
+		g.log.Error("key limit check failed", "key", caller.Name, "err", err)
+		return &conv.Error{Kind: conv.ErrUnavailable, Message: "could not check this API key's usage limit"}
+	}
+	if used >= limit {
+		return &conv.Error{Kind: conv.ErrKeyLimit, Message: fmt.Sprintf(
+			"this API key used %.2f%% of its %.2f%% limit on %s weekly quota in the last 7 days", used*100, limit*100, group)}
+	}
+	return nil
 }
 
 func validate(req conv.Request, t *transcript) *conv.Error {

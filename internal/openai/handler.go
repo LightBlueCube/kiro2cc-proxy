@@ -326,6 +326,8 @@ func statusFor(kind conv.ErrorKind) (int, string) {
 		return http.StatusNotFound, "model_not_found"
 	case conv.ErrQuota:
 		return http.StatusTooManyRequests, "rate_limit_exceeded"
+	case conv.ErrKeyLimit:
+		return http.StatusTooManyRequests, "insufficient_quota"
 	case conv.ErrOverloaded, conv.ErrUnavailable:
 		return http.StatusServiceUnavailable, "service_unavailable"
 	}

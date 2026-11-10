@@ -37,6 +37,7 @@ type harness struct {
 	p       *pool.Pool
 	log     string
 	records *recordLog
+	budget  *fakeBudget
 }
 
 // newHarness runs a gateway on fake agy accounts; extraEnv adds
@@ -68,7 +69,8 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 		t.Fatal(err)
 	}
 	records := &recordLog{}
-	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Recorder: records, Log: logger})
+	budget := &fakeBudget{used: map[string]float64{}}
+	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Recorder: records, Budget: budget, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +79,28 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 		p.Close()
 		b.Close()
 	})
-	return &harness{t: t, gw: gw, p: p, log: logPath, records: records}
+	return &harness{t: t, gw: gw, p: p, log: logPath, records: records, budget: budget}
+}
+
+// fakeBudget reports set usage by key and group and counts its calls.
+type fakeBudget struct {
+	mu    sync.Mutex
+	used  map[string]float64
+	err   error
+	calls int
+}
+
+func (b *fakeBudget) set(key, group string, used float64) {
+	b.mu.Lock()
+	b.used[key+"\x00"+group] = used
+	b.mu.Unlock()
+}
+
+func (b *fakeBudget) Used(_ context.Context, key, group string) (float64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls++
+	return b.used[key+"\x00"+group], b.err
 }
 
 type recordLog struct {
@@ -118,8 +141,13 @@ type result struct {
 
 func (h *harness) complete(ctx context.Context, user string, req conv.Request) result {
 	h.t.Helper()
+	return h.completeAs(ctx, conv.Caller{Name: user}, req)
+}
+
+func (h *harness) completeAs(ctx context.Context, caller conv.Caller, req conv.Request) result {
+	h.t.Helper()
 	var r result
-	for ev := range h.gw.Complete(ctx, conv.Caller{Name: user}, req) {
+	for ev := range h.gw.Complete(ctx, caller, req) {
 		r.text += ev.Text
 		r.reasoning += ev.Reasoning
 		r.calls = append(r.calls, ev.ToolCalls...)
@@ -186,6 +214,35 @@ func (h *harness) requests(method string) []acpRequest {
 var readTool = conv.ToolSpec{Name: "read", Description: "Read a file", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)}
 
 func user(text string) conv.Message { return conv.Message{Role: conv.RoleUser, Text: text} }
+
+func TestKeyLimits(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello")}}
+
+	if r := h.complete(ctx, "bob", req); r.err != nil || h.budget.calls != 0 {
+		t.Fatalf("unlimited key: %+v, budget calls %d", r, h.budget.calls)
+	}
+
+	alice := conv.Caller{Name: "alice", Limits: map[string]float64{"gemini": 0.3}}
+	h.budget.set("alice", "gemini", 0.29)
+	if r := h.completeAs(ctx, alice, req); r.err != nil {
+		t.Fatalf("under the limit: %+v", r)
+	}
+	h.budget.set("alice", "gemini", 0.3)
+	r := h.completeAs(ctx, alice, req)
+	if r.err == nil || r.err.Kind != conv.ErrKeyLimit || !strings.Contains(r.err.Message, "30.00% of its 30.00% limit on gemini") {
+		t.Fatalf("at the limit: %+v", r.err)
+	}
+	if n := len(h.requests("session/prompt")); n != 2 {
+		t.Fatalf("prompts = %d, want 2 (the refused request reaches no agy)", n)
+	}
+
+	h.budget.err = errors.New("disk on fire")
+	if r := h.completeAs(ctx, alice, req); r.err == nil || r.err.Kind != conv.ErrUnavailable {
+		t.Fatalf("budget failure: %+v", r.err)
+	}
+}
 
 func TestPlainReplyThenWarmDelta(t *testing.T) {
 	h := newHarness(t, 1, nil)

@@ -218,7 +218,9 @@ func (s *Store) Distinct(ctx context.Context, by SummaryBy, since time.Time) ([]
 
 // QuotaWeight is a request's share key in quota attribution.
 type QuotaWeight struct {
-	ID      int64
+	ID int64
+	// Ended is when the request finished.
+	Ended   time.Time
 	CostUSD *float64
 	Tokens  int64
 }
@@ -226,7 +228,7 @@ type QuotaWeight struct {
 // QuotaWeights lists the account's requests in the quota group with
 // tokens, at in (from, to].
 func (s *Store) QuotaWeights(ctx context.Context, account, group string, from, to time.Time) ([]QuotaWeight, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, cost_usd, input + output FROM requests
+	rows, err := s.db.QueryContext(ctx, `SELECT id, at + duration_ms, cost_usd, input + output FROM requests
 		WHERE account = ? AND quota_group = ? AND at > ? AND at <= ? AND input + output > 0`, account, group, from.UnixMilli(), to.UnixMilli())
 	if err != nil {
 		return nil, err
@@ -235,10 +237,12 @@ func (s *Store) QuotaWeights(ctx context.Context, account, group string, from, t
 	var out []QuotaWeight
 	for rows.Next() {
 		var w QuotaWeight
+		var ended int64
 		var cost sql.NullFloat64
-		if err := rows.Scan(&w.ID, &cost, &w.Tokens); err != nil {
+		if err := rows.Scan(&w.ID, &ended, &cost, &w.Tokens); err != nil {
 			return nil, err
 		}
+		w.Ended = time.UnixMilli(ended)
 		if cost.Valid {
 			w.CostUSD = &cost.Float64
 		}
@@ -247,8 +251,9 @@ func (s *Store) QuotaWeights(ctx context.Context, account, group string, from, t
 	return out, rows.Err()
 }
 
-// SetQuotaUsed stores attributed quota shares by request id.
-func (s *Store) SetQuotaUsed(ctx context.Context, shares map[int64]float64) error {
+// AttributeQuota stores attributed quota shares by request id and moves
+// the bucket's attribution cursor to the sample at `through`.
+func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, through time.Time, shares map[int64]float64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -259,7 +264,79 @@ func (s *Store) SetQuotaUsed(ctx context.Context, shares map[int64]float64) erro
 			return err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO quota_cursors (account, bucket, at) VALUES (?, ?, ?)
+		ON CONFLICT (account, bucket) DO UPDATE SET at = excluded.at`, account, bucket, through.UnixMilli()); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// QuotaUse totals one key's requests of one quota group on one account.
+type QuotaUse struct {
+	Key     string
+	Group   string
+	Account string
+	// Attributed is the sum of attributed weekly-quota shares.
+	Attributed float64
+	// PendingCostUSD is the list-price cost of the requests that have no
+	// attributed share yet.
+	PendingCostUSD float64
+}
+
+// QuotaUses totals requests since the given time by key, quota group, and
+// account; key "" selects every key.
+func (s *Store) QuotaUses(ctx context.Context, key string, since time.Time) ([]QuotaUse, error) {
+	query := `SELECT key_name, quota_group, account, COALESCE(SUM(quota_used), 0),
+		COALESCE(SUM(CASE WHEN quota_used IS NULL THEN cost_usd END), 0)
+		FROM requests WHERE at >= ? AND account != ''`
+	args := []any{since.UnixMilli()}
+	if key != "" {
+		query += ` AND key_name = ?`
+		args = append(args, key)
+	}
+	rows, err := s.db.QueryContext(ctx, query+` GROUP BY 1, 2, 3`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QuotaUse
+	for rows.Next() {
+		var u QuotaUse
+		if err := rows.Scan(&u.Key, &u.Group, &u.Account, &u.Attributed, &u.PendingCostUSD); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// QuotaRate is the weekly-quota share one list-price dollar used, from
+// the attributed requests of a quota group on an account.
+type QuotaRate struct {
+	Group      string
+	Account    string
+	Attributed float64
+	CostUSD    float64
+}
+
+// QuotaRates totals attributed, priced requests since the given time by
+// quota group and account.
+func (s *Store) QuotaRates(ctx context.Context, since time.Time) ([]QuotaRate, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT quota_group, account, SUM(quota_used), SUM(cost_usd) FROM requests
+		WHERE at >= ? AND quota_used IS NOT NULL AND cost_usd > 0 GROUP BY 1, 2`, since.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QuotaRate
+	for rows.Next() {
+		var r QuotaRate
+		if err := rows.Scan(&r.Group, &r.Account, &r.Attributed, &r.CostUSD); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // Prune deletes requests, quota samples, and audit entries older than

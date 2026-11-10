@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -93,6 +94,7 @@ type Config struct {
 	Gateway  *gateway.Gateway
 	Monitor  *usage.Monitor
 	Recorder *usage.Recorder
+	Budget   *usage.Budget
 	// AgyBin runs sign-ins.
 	AgyBin string
 	// Level is the process log level, changed with the setting.
@@ -121,7 +123,7 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 		return nil, err
 	}
 	for _, a := range accounts {
-		account, err := cfg.Pool.Add(pool.AccountConfig{Name: a.Name, Home: c.accountHome(a.Name), Env: a.Env})
+		account, err := cfg.Pool.Add(pool.AccountConfig{Name: a.Name, Home: c.accountHome(a.Name), Env: a.Env, Proxy: a.Proxy})
 		if err != nil {
 			return nil, err
 		}
@@ -184,7 +186,7 @@ type InputError struct{ Message string }
 func (e *InputError) Error() string { return e.Message }
 
 // AddAccount registers a new account; it needs a sign-in before use.
-func (c *Control) AddAccount(ctx context.Context, name string, env []string) (*pool.Account, error) {
+func (c *Control) AddAccount(ctx context.Context, name string, env []string, proxy string) (*pool.Account, error) {
 	if !pool.ValidAccountName(name) {
 		return nil, &InputError{"account names use letters, digits, '.', '_', '-' and start with a letter or digit"}
 	}
@@ -193,14 +195,18 @@ func (c *Control) AddAccount(ctx context.Context, name string, env []string) (*p
 			return nil, &InputError{fmt.Sprintf("environment entry %q is not NAME=value", kv)}
 		}
 	}
-	err := c.cfg.Store.AddAccount(ctx, store.Account{Name: name, Env: env, CreatedAt: time.Now()})
+	proxy, err := cleanProxy(proxy)
+	if err != nil {
+		return nil, err
+	}
+	err = c.cfg.Store.AddAccount(ctx, store.Account{Name: name, Env: env, Proxy: proxy, CreatedAt: time.Now()})
 	if errors.Is(err, store.ErrExists) {
 		return nil, &InputError{fmt.Sprintf("account %q exists", name)}
 	}
 	if err != nil {
 		return nil, err
 	}
-	account, err := c.cfg.Pool.Add(pool.AccountConfig{Name: name, Home: c.accountHome(name), Env: env})
+	account, err := c.cfg.Pool.Add(pool.AccountConfig{Name: name, Home: c.accountHome(name), Env: env, Proxy: proxy})
 	if err != nil {
 		if rmErr := c.cfg.Store.RemoveAccount(ctx, name); rmErr != nil {
 			c.log.Error("account half-added", "account", name, "err", rmErr)
@@ -220,6 +226,40 @@ func (c *Control) SetAccountPaused(ctx context.Context, name string, paused bool
 	}
 	account.SetPaused(paused)
 	return nil
+}
+
+// SetAccountProxy changes the account's proxy ("" = direct) and restarts
+// its agy; turns running there fail.
+func (c *Control) SetAccountProxy(ctx context.Context, name, proxy string) error {
+	account := c.cfg.Pool.Account(name)
+	if account == nil {
+		return store.ErrNotFound
+	}
+	proxy, err := cleanProxy(proxy)
+	if err != nil {
+		return err
+	}
+	if err := c.cfg.Store.SetAccountProxy(ctx, name, proxy); err != nil {
+		return err
+	}
+	account.SetProxy(proxy)
+	return nil
+}
+
+// cleanProxy accepts "" or an http:// proxy with a host and port, the
+// kind verified with agy (e.g. mihomo's HTTP port).
+func cleanProxy(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	valid := err == nil && u.Scheme == "http" && u.Hostname() != "" && u.Port() != "" &&
+		(u.Path == "" || u.Path == "/") && u.RawQuery == "" && u.Fragment == ""
+	if !valid {
+		return "", &InputError{"the proxy must be an http:// URL with a host and port, e.g. http://127.0.0.1:7890"}
+	}
+	return (&url.URL{Scheme: u.Scheme, User: u.User, Host: u.Host}).String(), nil
 }
 
 // RemoveAccount unregisters the account; its HOME directory stays.
@@ -266,13 +306,18 @@ func (c *Control) Models() []conv.ModelInfo { return c.cfg.Gateway.Models() }
 const keyPrefix = "sk-agyrelay-"
 
 // CreateKey stores a new key and returns its plaintext, which is not kept.
-func (c *Control) CreateKey(ctx context.Context, name, note string, models []string) (string, error) {
+func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate) (string, error) {
 	name = strings.TrimSpace(name)
 	if err := validateKeyName(name); err != nil {
 		return "", err
 	}
+	if err := validateLimits(u.Limits); err != nil {
+		return "", err
+	}
 	token := keyPrefix + rand.Text()
-	_, err := c.cfg.Store.AddKey(ctx, store.Key{Name: name, SHA256: sha256.Sum256([]byte(token)), Note: note, Models: cleanModels(models), CreatedAt: time.Now()})
+	_, err := c.cfg.Store.AddKey(ctx, store.Key{
+		Name: name, SHA256: sha256.Sum256([]byte(token)), Note: u.Note, Models: cleanModels(u.Models), Limits: u.Limits, CreatedAt: time.Now(),
+	})
 	if errors.Is(err, store.ErrExists) {
 		return "", &InputError{fmt.Sprintf("key name %q is taken (revoked keys keep their name)", name)}
 	}
@@ -282,11 +327,35 @@ func (c *Control) CreateKey(ctx context.Context, name, note string, models []str
 	return token, c.reloadKeys(ctx)
 }
 
-func (c *Control) UpdateKey(ctx context.Context, id int64, note string, models []string) error {
-	if err := c.cfg.Store.UpdateKey(ctx, id, note, cleanModels(models)); err != nil {
+func (c *Control) UpdateKey(ctx context.Context, id int64, u store.KeyUpdate) error {
+	if err := validateLimits(u.Limits); err != nil {
+		return err
+	}
+	u.Models = cleanModels(u.Models)
+	if err := c.cfg.Store.UpdateKey(ctx, id, u); err != nil {
 		return err
 	}
 	return c.reloadKeys(ctx)
+}
+
+// KeyUses is every key's quota use over the last week by quota group.
+func (c *Control) KeyUses(ctx context.Context) (map[string]map[string]usage.Use, error) {
+	return c.cfg.Budget.Uses(ctx, "")
+}
+
+// maxLimit bounds a key limit: 1000% is ten accounts' weekly buckets.
+const maxLimit = 10
+
+func validateLimits(limits map[string]float64) error {
+	for group, limit := range limits {
+		if !slices.Contains(usage.Groups, group) {
+			return &InputError{fmt.Sprintf("unknown quota group %q (known: %s)", group, strings.Join(usage.Groups, ", "))}
+		}
+		if !(limit >= 0 && limit <= maxLimit) {
+			return &InputError{fmt.Sprintf("the %s limit must be between 0%% and %d%%", group, maxLimit*100)}
+		}
+	}
+	return nil
 }
 
 func (c *Control) RevokeKey(ctx context.Context, id int64) error {
@@ -304,7 +373,7 @@ func (c *Control) reloadKeys(ctx context.Context) error {
 	byHash := make(map[[sha256.Size]byte]conv.Caller, len(keys))
 	for _, k := range keys {
 		if k.RevokedAt.IsZero() {
-			byHash[k.SHA256] = conv.Caller{Name: k.Name, Models: k.Models}
+			byHash[k.SHA256] = conv.Caller{Name: k.Name, Models: k.Models, Limits: k.Limits}
 		}
 	}
 	c.mu.Lock()

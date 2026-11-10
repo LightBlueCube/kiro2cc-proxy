@@ -44,12 +44,16 @@ func TestRecordAndAttribute(t *testing.T) {
 	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Cached: 0, Output: 1}}, log)
 
 	t0 := time.Now().Add(-time.Hour)
-	sample := func(at time.Time, remaining float64) {
-		if err := st.AddQuotaSamples(ctx, []store.QuotaSample{{Account: "a", At: at, Bucket: "gemini-weekly", Group: "Gemini", Window: "weekly", Remaining: remaining}}); err != nil {
+	attributor := NewAttributor(st, log)
+	sample := func(at time.Time, remaining float64, busy bool) {
+		t.Helper()
+		if err := st.AddQuotaSamples(ctx, []store.QuotaSample{{Account: "a", At: at, Bucket: "gemini-weekly", Group: "Gemini",
+			Window: "weekly", Remaining: remaining, ResetAt: t0.Add(BudgetWindow)}}); err != nil {
 			t.Fatal(err)
 		}
+		attributor.Attribute(ctx, "a", at, busy)
 	}
-	sample(t0, 0.9)
+	sample(t0, 0.9, false)
 	// Two requests, the second costing three times the first.
 	for i, tokens := range []int64{1000, 3000} {
 		rec.Record(gateway.Record{
@@ -59,8 +63,7 @@ func TestRecordAndAttribute(t *testing.T) {
 	}
 	rec.Record(gateway.Record{At: t0.Add(3 * time.Minute), Key: "k", Account: "a", Model: "m", QuotaGroup: "gemini",
 		Err: &conv.Error{Kind: conv.ErrQuota, Message: "limit"}})
-	sample(t0.Add(5*time.Minute), 0.86)
-	NewAttributor(st, log).Attribute(ctx, "a", t0.Add(5*time.Minute))
+	sample(t0.Add(5*time.Minute), 0.86, false)
 
 	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, 10)
 	if err != nil || len(rows) != 3 {
@@ -77,5 +80,48 @@ func TestRecordAndAttribute(t *testing.T) {
 	sums, err := st.Summarize(ctx, store.RequestFilter{}, store.ByKey, 0)
 	if err != nil || len(sums) != 1 || sums[0].Requests != 3 || sums[0].Errors != 1 || math.Abs(sums[0].QuotaUsed-0.04) > 1e-9 {
 		t.Fatalf("summary = %+v, %v", sums, err)
+	}
+
+	record := func(at time.Duration, key string) {
+		rec.Record(gateway.Record{At: t0.Add(at), Key: key, Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
+	}
+	// A sample during a running turn carries its drop to the next idle one.
+	record(6*time.Minute, "k")
+	sample(t0.Add(10*time.Minute), 0.85, true)
+	sample(t0.Add(15*time.Minute), 0.84, false)
+	// A sample right after a request waits for the quota to catch up.
+	record(19*time.Minute, "k")
+	sample(t0.Add(20*time.Minute), 0.84, false)
+	sample(t0.Add(25*time.Minute), 0.83, false)
+	// A drop with no request is use outside agyrelay.
+	sample(t0.Add(30*time.Minute), 0.80, false)
+	record(31*time.Minute, "k2")
+	sample(t0.Add(40*time.Minute), 0.79, false)
+	// Not sampled yet: estimated.
+	record(45*time.Minute, "k")
+
+	rows, err = st.Requests(ctx, store.RequestFilter{}, 0, 10)
+	if err != nil || len(rows) != 7 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	want := []float64{-1, 0.01, 0.01, 0.02} // newest first; -1 = unattributed
+	for i, w := range want {
+		got := rows[i].QuotaUsed
+		if (w < 0) != (got == nil) || (got != nil && math.Abs(*got-w) > 1e-9) {
+			t.Fatalf("row %d (%s) quota = %v, want %v", i, rows[i].At.Sub(t0), got, w)
+		}
+	}
+
+	uses, err := NewBudget(st).Uses(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0.08 of quota for $0.007 of attributed requests; the pending one costs $0.001.
+	k, k2 := uses["k"]["gemini"], uses["k2"]["gemini"]
+	if math.Abs(k.Attributed-0.07) > 1e-9 || math.Abs(k.Estimated-0.08/7) > 1e-9 || math.Abs(k2.Total()-0.01) > 1e-9 {
+		t.Fatalf("uses = %+v", uses)
+	}
+	if used, err := NewBudget(st).Used(ctx, "k", "claude-gpt"); err != nil || used != 0 {
+		t.Fatalf("claude-gpt used = %v, %v", used, err)
 	}
 }

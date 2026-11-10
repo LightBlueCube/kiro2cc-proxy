@@ -36,8 +36,19 @@ func (s *Store) AddQuotaSamples(ctx context.Context, samples []QuotaSample) erro
 
 // LastQuotaSample returns the account's newest sample of bucket before at.
 func (s *Store) LastQuotaSample(ctx context.Context, account, bucket string, before time.Time) (QuotaSample, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT account, at, bucket, grp, win, remaining, reset_at FROM quota_samples
-		WHERE account = ? AND bucket = ? AND at < ? ORDER BY at DESC LIMIT 1`, account, bucket, before.UnixMilli())
+	return scanQuotaSample(s.db.QueryRowContext(ctx, `SELECT account, at, bucket, grp, win, remaining, reset_at FROM quota_samples
+		WHERE account = ? AND bucket = ? AND at < ? ORDER BY at DESC LIMIT 1`, account, bucket, before.UnixMilli()))
+}
+
+// QuotaCursor returns the sample the bucket's attribution has reached:
+// drops up to it are attributed (or known to be nobody's).
+func (s *Store) QuotaCursor(ctx context.Context, account, bucket string) (QuotaSample, error) {
+	return scanQuotaSample(s.db.QueryRowContext(ctx, `SELECT q.account, q.at, q.bucket, q.grp, q.win, q.remaining, q.reset_at
+		FROM quota_cursors c JOIN quota_samples q ON q.account = c.account AND q.bucket = c.bucket AND q.at = c.at
+		WHERE c.account = ? AND c.bucket = ?`, account, bucket))
+}
+
+func scanQuotaSample(row *sql.Row) (QuotaSample, error) {
 	var q QuotaSample
 	var at, reset int64
 	err := row.Scan(&q.Account, &at, &q.Bucket, &q.Group, &q.Window, &q.Remaining, &reset)
