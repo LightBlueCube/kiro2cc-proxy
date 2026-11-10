@@ -7,10 +7,12 @@ import (
 	"agyrelay/internal/store"
 )
 
-// BudgetWindow is the span API key limits count: the last 7 days.
-const BudgetWindow = 7 * 24 * time.Hour
+// rateWindow is how far back attributed requests set the quota share per
+// dollar that estimates requests not attributed yet.
+const rateWindow = 7 * 24 * time.Hour
 
-// Budget measures API keys' weekly-quota use against their limits.
+// Budget measures API keys' quota use against their limits. Use counts
+// since the key was created and never resets.
 type Budget struct {
 	store *store.Store
 	now   func() time.Time
@@ -18,45 +20,53 @@ type Budget struct {
 
 func NewBudget(st *store.Store) *Budget { return &Budget{store: st, now: time.Now} }
 
-// Use is a key's weekly-quota use in one quota group, as a share of one
+// Use is a key's quota use in one quota group, as a share of one
 // account's weekly bucket.
 type Use struct {
 	// Attributed is the sum of the shares attributed from quota samples.
 	Attributed float64
 	// Estimated covers requests not attributed yet: their list-price cost
 	// times the quota share per dollar their account's attributed requests
-	// used (or, without those, the quota group's across accounts).
-	// Unpriced requests are estimated as 0.
+	// used over rateWindow (or, without those, the quota group's across
+	// accounts). Unpriced requests are estimated as 0.
 	Estimated float64
 }
 
 func (u Use) Total() float64 { return u.Attributed + u.Estimated }
 
-// Uses returns quota use over BudgetWindow by key and quota group; key ""
-// selects every key.
+// Uses returns quota use by key and quota group; key "" selects every key.
 func (b *Budget) Uses(ctx context.Context, key string) (map[string]map[string]Use, error) {
-	since := b.now().Add(-BudgetWindow)
-	rows, err := b.store.QuotaUses(ctx, key, since)
+	attributed, err := b.store.KeyUses(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	rates, err := b.store.QuotaRates(ctx, since)
+	pending, err := b.store.PendingCosts(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	rates, err := b.store.QuotaRates(ctx, b.now().Add(-rateWindow))
 	if err != nil {
 		return nil, err
 	}
 	rate := rateLookup(rates)
 
 	out := map[string]map[string]Use{}
-	for _, row := range rows {
-		byGroup := out[row.Key]
+	add := func(key, group string, attributed, estimated float64) {
+		byGroup := out[key]
 		if byGroup == nil {
 			byGroup = map[string]Use{}
-			out[row.Key] = byGroup
+			out[key] = byGroup
 		}
-		use := byGroup[row.Group]
-		use.Attributed += row.Attributed
-		use.Estimated += row.PendingCostUSD * rate(row.Group, row.Account)
-		byGroup[row.Group] = use
+		use := byGroup[group]
+		use.Attributed += attributed
+		use.Estimated += estimated
+		byGroup[group] = use
+	}
+	for _, u := range attributed {
+		add(u.Key, u.Group, u.Used, 0)
+	}
+	for _, p := range pending {
+		add(p.Key, p.Group, 0, p.CostUSD*rate(p.Group, p.Account))
 	}
 	return out, nil
 }

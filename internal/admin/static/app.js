@@ -177,9 +177,10 @@ function polling(container, interval, render) {
 const GROUP_NAMES = { "gemini": "Gemini", "claude-gpt": "Claude + GPT", "argon": "Gemini 4 Argon" };
 const groupName = g => GROUP_NAMES[g] || g;
 
-const LIMIT_HINT = "Limits cap each quota group's weekly quota use over the last 7 days; 100% = one account's whole weekly bucket "
-  + "of that group, and blank = unlimited. Use is the share attributed from quota samples plus an estimate for calls not sampled yet. "
-  + "A turn already running when the key reaches its limit finishes; the key's next request is refused.";
+const LIMIT_HINT = "Limits cap a key's total quota use per quota group since the key was created; it never resets, so raise the limit "
+  + "to allow more. 100% = one account's whole weekly bucket of that group; blank = unlimited. Use is the share attributed from quota "
+  + "samples plus an estimate for calls not sampled yet. A turn already running when the key reaches its limit finishes; the key's "
+  + "next request is refused.";
 
 // limitInputs makes one percent field per quota group; blank = unlimited.
 function limitInputs(groups, limits) {
@@ -256,7 +257,7 @@ views.keys = container => {
       { title: "Name", cell: k => k.name },
       { title: "Note", cell: k => k.note || h("span", { class: "muted" }, "—") },
       { title: "Models", cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, "all") },
-      { title: "Weekly quota use (7 days) / limit", cell: k => usageCell(k, groups) },
+      { title: "Quota used (total) / limit", cell: k => usageCell(k, groups) },
       { title: "Created", cell: k => fmt.time(k.created_at) },
       { title: "", cell: k => k.revoked_at ? `revoked ${fmt.time(k.revoked_at)}` : h("span", { class: "row" },
           h("button", { onclick: () => editKey(k) }, "Edit"),
@@ -323,13 +324,12 @@ views.settings = container => {
     const addPriceRow = p => {
       const cells = {
         model: h("input", { value: p.model, list: "price-models", required: true }),
-        from: h("input", { type: "date", value: p.from }),
         input: number(p.input), cached: number(p.cached), output: number(p.output),
       };
       const row = h("tr", {},
-        ["model", "from", "input", "cached", "output"].map(k => h("td", {}, cells[k])),
+        ["model", "input", "cached", "output"].map(k => h("td", {}, cells[k])),
         h("td", {}, h("button", { type: "button", class: "danger", onclick: () => row.remove() }, "Remove")));
-      row.read = () => ({ model: cells.model.value.trim(), from: cells.from.value,
+      row.read = () => ({ model: cells.model.value.trim(),
         input: Number(cells.input.value), cached: Number(cells.cached.value), output: Number(cells.output.value) });
       priceRows.append(row);
     };
@@ -352,14 +352,15 @@ views.settings = container => {
         h("label", {}, "Log level", level),
         h("label", {}, "Keep call records (days)", retention)),
       h("p", { class: "muted" }, `Process per session: ${s.process_per_session ? "on" : "off"} (set in the config file; needs a restart).`),
-      h("h3", {}, "API list prices (USD per 1M tokens)"),
-      h("p", { class: "muted" }, "Used for the list-price estimate of each call. A row applies from its date (UTC) until the model's next row; leave the date empty for “always”. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10, including Google's announced increases; gpt-oss-120b has no official price."),
-      h("datalist", { id: "price-models" }, catalog.map(m => h("option", { value: m.id }))),
-      h("div", { class: "table-wrap" }, h("table", {},
-        h("thead", {}, h("tr", {}, ["Model", "From", "Input", "Cached input", "Output", ""].map(t => h("th", {}, t)))),
-        priceRows)),
-      h("div", { class: "row", style: "margin-top:8px" },
-        h("button", { type: "button", onclick: () => addPriceRow({ model: "", from: "", input: 0, cached: 0, output: 0 }) }, "Add price"),
+      h("details", { class: "prices" },
+        h("summary", {}, `API list prices (${s.prices.length} models, USD per 1M tokens)`),
+        h("p", { class: "muted" }, "Used for the list-price estimate of each call. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10; gpt-oss-120b has no official price."),
+        h("datalist", { id: "price-models" }, catalog.map(m => h("option", { value: m.id }))),
+        h("div", { class: "table-wrap" }, h("table", {},
+          h("thead", {}, h("tr", {}, ["Model", "Input", "Cached input", "Output", ""].map(t => h("th", {}, t)))),
+          priceRows)),
+        h("button", { type: "button", style: "margin-top:8px", onclick: () => addPriceRow({ model: "", input: 0, cached: 0, output: 0 }) }, "Add price")),
+      h("div", { class: "row", style: "margin-top:12px" },
         h("span", { class: "grow" }),
         h("button", { type: "submit" }, "Save settings")));
     general.replaceChildren(h("h2", {}, "General"), form);

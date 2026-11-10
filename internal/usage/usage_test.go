@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,17 +15,15 @@ import (
 	"agyrelay/internal/store"
 )
 
-func TestPriceAt(t *testing.T) {
-	before := time.Date(2026, 11, 30, 23, 0, 0, 0, time.UTC)
-	after := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
-	if p, ok := priceAt(DefaultPrices, "gemini-4-argon", before); !ok || p.Input != 2 {
-		t.Fatalf("before = %+v %v", p, ok)
+func TestPrices(t *testing.T) {
+	if p, ok := priceOf(DefaultPrices, "gemini-4-argon"); !ok || p.Input != 2 {
+		t.Fatalf("argon = %+v %v", p, ok)
 	}
-	if p, ok := priceAt(DefaultPrices, "gemini-4-argon", after); !ok || p.Input != 4 {
-		t.Fatalf("after = %+v %v", p, ok)
-	}
-	if _, ok := priceAt(DefaultPrices, "gpt-oss-120b", after); ok {
+	if _, ok := priceOf(DefaultPrices, "gpt-oss-120b"); ok {
 		t.Fatal("gpt-oss-120b has a price")
+	}
+	if err := ValidatePrices(append(slices.Clone(DefaultPrices), Price{Model: "gemini-4-argon"})); err == nil {
+		t.Fatal("a second price for a model passed")
 	}
 	// 1M prompt tokens of which 400k cached, 100k output.
 	got := Price{Input: 2, Cached: 0.1, Output: 10}.cost(1_000_000, 400_000, 100_000)
@@ -48,7 +47,7 @@ func TestRecordAndAttribute(t *testing.T) {
 	sample := func(at time.Time, remaining float64, busy bool) {
 		t.Helper()
 		if err := st.AddQuotaSamples(ctx, []store.QuotaSample{{Account: "a", At: at, Bucket: "gemini-weekly", Group: "Gemini",
-			Window: "weekly", Remaining: remaining, ResetAt: t0.Add(BudgetWindow)}}); err != nil {
+			Window: "weekly", Remaining: remaining, ResetAt: t0.Add(7 * 24 * time.Hour)}}); err != nil {
 			t.Fatal(err)
 		}
 		attributor.Attribute(ctx, "a", at, busy)
@@ -123,5 +122,13 @@ func TestRecordAndAttribute(t *testing.T) {
 	}
 	if used, err := NewBudget(st).Used(ctx, "k", "claude-gpt"); err != nil || used != 0 {
 		t.Fatalf("claude-gpt used = %v, %v", used, err)
+	}
+
+	// Use never resets: pruning every request keeps the attributed part.
+	if err := st.Prune(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if used, err := NewBudget(st).Used(ctx, "k", "gemini"); err != nil || math.Abs(used-0.07) > 1e-9 {
+		t.Fatalf("after pruning, used = %v, %v", used, err)
 	}
 }

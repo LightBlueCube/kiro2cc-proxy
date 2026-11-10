@@ -130,8 +130,9 @@ type Caller struct {
 	Name string
 	// Models limits the key to these model ids; empty allows all.
 	Models []string
-	// Limits caps the key's weekly quota use by quota group, as a share of
-	// one account's weekly bucket; absent groups are unlimited.
+	// Limits caps the key's total quota use (it never resets) by quota
+	// group, as a share of one account's weekly bucket; absent groups are
+	// unlimited.
 	Limits map[string]float64
 }
 

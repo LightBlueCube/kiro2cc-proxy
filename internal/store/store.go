@@ -98,6 +98,17 @@ var migrations = []string{
 		at      INTEGER NOT NULL,
 		PRIMARY KEY (account, bucket)
 	);`,
+
+	// key_usage keeps each key's attributed quota after old requests are
+	// pruned; key limits count it.
+	`CREATE TABLE key_usage (
+		key_name TEXT NOT NULL,
+		grp      TEXT NOT NULL,
+		used     REAL NOT NULL,
+		PRIMARY KEY (key_name, grp)
+	);
+	INSERT INTO key_usage (key_name, grp, used)
+		SELECT key_name, quota_group, SUM(quota_used) FROM requests WHERE quota_used IS NOT NULL GROUP BY 1, 2;`,
 }
 
 // ErrNotFound means the named row does not exist.
