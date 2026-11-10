@@ -47,11 +47,19 @@ func (h *Handler) Models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
 
+// decodeBody reads a JSON request body into v, answering 400 on failure.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(v); err != nil {
+		WriteError(w, &conv.Error{Kind: conv.ErrInvalidRequest, Message: "invalid JSON body: " + err.Error()})
+		return false
+	}
+	return true
+}
+
 // Chat serves POST /v1/chat/completions for the authenticated user.
 func (h *Handler) Chat(w http.ResponseWriter, r *http.Request, user string) {
 	var wire chatRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(&wire); err != nil {
-		WriteError(w, &conv.Error{Kind: conv.ErrInvalidRequest, Message: "invalid JSON body: " + err.Error()})
+	if !decodeBody(w, r, &wire) {
 		return
 	}
 	req, err := decodeRequest(wire)
@@ -62,19 +70,20 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request, user string) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	events := h.backend.Complete(ctx, user, req)
-	meta := responseMeta{id: "chatcmpl-" + rand.Text(), model: wire.Model, created: time.Now().Unix()}
+	meta := chatMeta{id: "chatcmpl-" + rand.Text(), model: wire.Model, created: time.Now().Unix(), hideReasoning: wire.hideReasoning()}
 	if wire.Stream {
 		includeUsage := wire.StreamOptions != nil && wire.StreamOptions.IncludeUsage
-		stream(w, events, meta, includeUsage)
+		streamChat(w, events, meta, includeUsage)
 		return
 	}
-	collect(w, events, meta)
+	collectChat(w, events, meta)
 }
 
-type responseMeta struct {
-	id      string
-	model   string
-	created int64
+type chatMeta struct {
+	id            string
+	model         string
+	created       int64
+	hideReasoning bool
 }
 
 type usageJSON struct {
@@ -108,12 +117,22 @@ func encodeToolCalls(calls []conv.ToolCall, indexed bool, base int) []chatToolCa
 	return out
 }
 
-// collect answers a non-streaming request. Reasoning is not passed on
-// until its wire format is designed.
-func collect(w http.ResponseWriter, events <-chan conv.Event, meta responseMeta) {
-	var text strings.Builder
+// reasoning_details indexes: the text entry, then the anchor entry.
+const (
+	textDetailIndex   = 0
+	anchorDetailIndex = 1
+)
+
+func anchorDetail(anchor string) reasoningDetail {
+	return reasoningDetail{Type: detailEncrypted, Data: anchor, Format: detailFormat, Index: anchorDetailIndex}
+}
+
+// collectChat answers a non-streaming request.
+func collectChat(w http.ResponseWriter, events <-chan conv.Event, meta chatMeta) {
+	var text, reasoning strings.Builder
 	var calls []conv.ToolCall
 	var usage *conv.Usage
+	anchor := ""
 	for ev := range events {
 		switch {
 		case ev.Err != nil:
@@ -121,14 +140,29 @@ func collect(w http.ResponseWriter, events <-chan conv.Event, meta responseMeta)
 			return
 		case ev.Text != "":
 			text.WriteString(ev.Text)
+		case ev.Reasoning != "":
+			reasoning.WriteString(ev.Reasoning)
 		case ev.ToolCalls != nil:
 			calls = append(calls, ev.ToolCalls...)
+		case ev.Anchor != "":
+			anchor = ev.Anchor
 		case ev.Usage != nil:
 			usage = ev.Usage
 		case ev.Finish != "":
 			message := map[string]any{"role": "assistant", "content": text.String()}
 			if len(calls) > 0 {
 				message["tool_calls"] = encodeToolCalls(calls, false, 0)
+			}
+			var details []reasoningDetail
+			if reasoning.Len() > 0 && !meta.hideReasoning {
+				message["reasoning_content"] = reasoning.String()
+				details = append(details, reasoningDetail{Type: detailText, Text: reasoning.String(), Format: detailFormat, Index: textDetailIndex})
+			}
+			if anchor != "" {
+				details = append(details, anchorDetail(anchor))
+			}
+			if len(details) > 0 {
+				message["reasoning_details"] = details
 			}
 			body := map[string]any{
 				"id": meta.id, "object": "chat.completion", "created": meta.created, "model": meta.model,
@@ -145,12 +179,21 @@ func collect(w http.ResponseWriter, events <-chan conv.Event, meta responseMeta)
 	// means the request context ended and nobody is listening.
 }
 
-// sse writes chat.completion.chunk events.
+// sse writes server-sent events. Headers wait for the first write, so a
+// failure before any output can still get a proper HTTP status.
 type sse struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
-	meta    responseMeta
 	started bool
+}
+
+func newSSE(w http.ResponseWriter) (*sse, bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		WriteError(w, &conv.Error{Kind: conv.ErrUpstream, Message: "streaming unsupported by the HTTP server"})
+		return nil, false
+	}
+	return &sse{w: w, flusher: flusher}, true
 }
 
 func (s *sse) begin() {
@@ -165,73 +208,88 @@ func (s *sse) begin() {
 	s.w.WriteHeader(http.StatusOK)
 }
 
-func (s *sse) data(payload any) {
+// write sends one event; name is empty for Chat's unnamed data events.
+func (s *sse) write(name string, payload any) {
 	s.begin()
 	raw, _ := json.Marshal(payload)
+	if name != "" {
+		fmt.Fprintf(s.w, "event: %s\n", name)
+	}
 	fmt.Fprintf(s.w, "data: %s\n\n", raw)
 	s.flusher.Flush()
 }
 
-func (s *sse) comment() {
+func (s *sse) raw(line string) {
 	s.begin()
-	fmt.Fprint(s.w, ": keepalive\n\n")
+	fmt.Fprint(s.w, line)
 	s.flusher.Flush()
 }
 
-func (s *sse) chunk(delta map[string]any, finish *string) {
-	s.data(map[string]any{
-		"id": s.meta.id, "object": "chat.completion.chunk", "created": s.meta.created, "model": s.meta.model,
-		"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
-	})
-}
+func (s *sse) comment() { s.raw(": keepalive\n\n") }
 
-// stream answers a streaming request. Headers wait for the first event, so
-// a failure before any output still gets a proper HTTP status; after a
-// heartbeat interval without output the stream starts anyway.
-func stream(w http.ResponseWriter, events <-chan conv.Event, meta responseMeta, includeUsage bool) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		WriteError(w, &conv.Error{Kind: conv.ErrUpstream, Message: "streaming unsupported by the HTTP server"})
-		return
-	}
-	s := &sse{w: w, flusher: flusher, meta: meta}
+// pump reads events, sending a keepalive comment whenever none arrived for
+// a heartbeat interval. handle returns false to stop. pump returns when
+// events closes (the request context ended).
+func pump(s *sse, events <-chan conv.Event, handle func(conv.Event) bool) {
 	ticker := time.NewTicker(heartbeat)
 	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.comment()
+		case ev, open := <-events:
+			if !open || !handle(ev) {
+				return
+			}
+		}
+	}
+}
+
+// streamChat answers a streaming request with chat.completion.chunk events.
+func streamChat(w http.ResponseWriter, events <-chan conv.Event, meta chatMeta, includeUsage bool) {
+	s, ok := newSSE(w)
+	if !ok {
+		return
+	}
+	chunk := func(delta map[string]any, finish *string) {
+		s.write("", map[string]any{
+			"id": meta.id, "object": "chat.completion.chunk", "created": meta.created, "model": meta.model,
+			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
+		})
+	}
 	roleSent := false
-	toolIndex := 0
-	var usage *conv.Usage
 	delta := func(fields map[string]any) {
 		if !roleSent {
 			fields["role"] = "assistant"
 			roleSent = true
 		}
-		s.chunk(fields, nil)
+		chunk(fields, nil)
 	}
-	for {
-		var ev conv.Event
-		select {
-		case <-ticker.C:
-			s.comment()
-			continue
-		case next, open := <-events:
-			if !open {
-				return // request context ended
-			}
-			ev = next
-		}
+	toolIndex := 0
+	var usage *conv.Usage
+	pump(s, events, func(ev conv.Event) bool {
 		switch {
 		case ev.Err != nil:
 			if !s.started {
 				WriteError(w, ev.Err)
-				return
+				return false
 			}
-			s.data(errorBody(ev.Err))
-			return
+			s.write("", errorBody(ev.Err))
+			return false
 		case ev.Text != "":
 			delta(map[string]any{"content": ev.Text})
+		case ev.Reasoning != "":
+			if !meta.hideReasoning {
+				delta(map[string]any{
+					"reasoning_content": ev.Reasoning,
+					"reasoning_details": []reasoningDetail{{Type: detailText, Text: ev.Reasoning, Format: detailFormat, Index: textDetailIndex}},
+				})
+			}
 		case ev.ToolCalls != nil:
 			delta(map[string]any{"tool_calls": encodeToolCalls(ev.ToolCalls, true, toolIndex)})
 			toolIndex += len(ev.ToolCalls)
+		case ev.Anchor != "":
+			delta(map[string]any{"reasoning_details": []reasoningDetail{anchorDetail(ev.Anchor)}})
 		case ev.Usage != nil:
 			usage = ev.Usage
 		case ev.Finish != "":
@@ -239,18 +297,18 @@ func stream(w http.ResponseWriter, events <-chan conv.Event, meta responseMeta, 
 				delta(map[string]any{"content": ""})
 			}
 			finish := string(ev.Finish)
-			s.chunk(map[string]any{}, &finish)
+			chunk(map[string]any{}, &finish)
 			if includeUsage && usage != nil {
-				s.data(map[string]any{
+				s.write("", map[string]any{
 					"id": meta.id, "object": "chat.completion.chunk", "created": meta.created, "model": meta.model,
 					"choices": []any{}, "usage": encodeUsage(usage),
 				})
 			}
-			fmt.Fprint(w, "data: [DONE]\n\n")
-			flusher.Flush()
-			return
+			s.raw("data: [DONE]\n\n")
+			return false
 		}
-	}
+		return true
+	})
 }
 
 func statusFor(kind conv.ErrorKind) (int, string) {

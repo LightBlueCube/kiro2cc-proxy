@@ -289,8 +289,8 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 			group := ev.Payload.(*callGroup)
 			reply := conv.Message{Role: conv.RoleAssistant, Text: text.String(), ToolCalls: group.toolCalls()}
 			g.park(at, group)
-			g.record(at, r, &reply)
-			if !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
+			mark := g.record(at, r, &reply)
+			if !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.send(conv.Event{Anchor: mark}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
 				g.log.Info("client left after tool calls; turn stays parked", "session", at.sess.id)
 			}
 			return nil
@@ -344,11 +344,14 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard
 			return nil
 		}
 	}
-	g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()})
+	mark := g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()})
 	if outcome.Usage != nil {
 		if !w.send(conv.Event{Usage: usageFrom(outcome.Usage)}) {
 			return nil
 		}
+	}
+	if !w.send(conv.Event{Anchor: mark}) {
+		return nil
 	}
 	finish := conv.FinishStop
 	if outcome.StopReason == agy.StopMaxTokens {
@@ -396,8 +399,9 @@ func usageFrom(u *agy.Usage) *conv.Usage {
 }
 
 // record stores the session's snapshot: the request's transcript plus the
-// reply agy produced for it (nil when the reply is not reusable).
-func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message) {
+// reply agy produced for it (nil when the reply is not reusable). It
+// returns the anchor naming that position.
+func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message) string {
 	count, hash := len(r.t.body), r.t.hashes[len(r.t.body)]
 	if reply != nil {
 		count++
@@ -415,6 +419,7 @@ func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message) {
 	if err := g.snaps.put(snap); err != nil {
 		g.log.Warn("snapshot not persisted", "err", err)
 	}
+	return anchor{Account: snap.Account, SessionID: snap.SessionID, Count: count, Hash: hash}.encode()
 }
 
 // forget drops the session's snapshot: its native state no longer matches

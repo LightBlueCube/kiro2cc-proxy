@@ -83,6 +83,17 @@ func (s *snapshotStore) lookup(user string, t *transcript) (snapshot, bool) {
 	return snapshot{}, false
 }
 
+// get returns a session's snapshot regardless of which user made it.
+func (s *snapshotStore) get(account, sessionID string) (snapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap, ok := s.bySession[sessionRef(account, sessionID)]
+	if !ok || time.Since(snap.UpdatedAt) > s.ttl {
+		return snapshot{}, false
+	}
+	return snap, true
+}
+
 func (s *snapshotStore) put(snap snapshot) error {
 	snap.UpdatedAt = time.Now()
 	s.mu.Lock()

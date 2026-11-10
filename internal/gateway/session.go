@@ -15,12 +15,19 @@ import (
 
 // start plans the attempt and returns a running turn:
 //
+// The snapshot comes from the request's anchors, else from the user's own
+// snapshots.
+//
 //	snapshot prefix hit ─┬─ parked turn answered by the delta ──▶ continue
 //	                     └─ else (cancel what runs there) ──────▶ warm delta
 //	no hit, or warm failed ─────────────────────────────────────▶ fresh replay
 func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailure) {
 	if r.reuse {
-		if snap, ok := g.snaps.lookup(r.user, r.t); ok && snap.ToolsKey == toolsKey(r.req.Tools) {
+		snap, ok := g.anchoredSnapshot(r.t)
+		if !ok {
+			snap, ok = g.snaps.lookup(r.user, r.t)
+		}
+		if ok && snap.ToolsKey == toolsKey(r.req.Tools) {
 			if at := g.tryContinue(snap, r); at != nil {
 				return at, nil
 			}
