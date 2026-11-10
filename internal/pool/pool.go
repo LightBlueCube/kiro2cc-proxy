@@ -378,12 +378,15 @@ func (a *Account) LiveProcs() []*agy.Proc {
 	return out
 }
 
+// killProcs kills the running processes and forgets them at once, so the
+// next Proc starts a new one instead of returning a process still dying.
 func (a *Account) killProcs() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, slot := range a.procs {
+	for name, slot := range a.procs {
 		if slot.proc != nil {
 			slot.proc.Kill()
+			delete(a.procs, name)
 		}
 	}
 }

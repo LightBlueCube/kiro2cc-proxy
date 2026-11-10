@@ -224,7 +224,7 @@ func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, group stri
 	}
 	if used >= limit {
 		return &conv.Error{Kind: conv.ErrKeyLimit, Message: fmt.Sprintf(
-			"this API key used %.2f%% of its %.2f%% limit on %s weekly quota in the last 7 days", used*100, limit*100, group)}
+			"this API key used %.2f%% of its %.2f%% limit on %s quota (100%% = one account's weekly bucket)", used*100, limit*100, group)}
 	}
 	return nil
 }

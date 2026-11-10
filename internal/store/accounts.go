@@ -78,9 +78,9 @@ type Key struct {
 	Note   string
 	// Models limits the key to these client model names; empty allows all.
 	Models []string
-	// Limits caps the key's weekly quota use per quota group, as a share
-	// of one account's weekly bucket (0.3 = 30%); absent groups are
-	// unlimited.
+	// Limits caps the key's total quota use (key_usage) per quota group,
+	// as a share of one account's weekly bucket (0.3 = 30%); absent
+	// groups are unlimited.
 	Limits    map[string]float64
 	CreatedAt time.Time
 	// RevokedAt is zero while the key is valid.

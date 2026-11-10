@@ -398,9 +398,9 @@ func TestSettingsValidation(t *testing.T) {
 		t.Fatalf("bad settings = %d %s", r.status, r.raw)
 	}
 	good := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "log_level": "debug", "retention_days": 30,
-		"prices": []map[string]any{{"model": "m", "from": "", "input": 1, "cached": 0.1, "output": 2}}}
+		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
 	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "log_level": "debug", "retention_days": 30,
-		"prices": []map[string]any{{"model": "m", "from": "next week", "input": 1, "cached": 0.1, "output": 2}}}
+		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}, {"model": "m", "input": 2, "cached": 0.1, "output": 2}}}
 	if r := c.do("PUT", "/admin/api/settings", badPrice, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad price = %d %s", r.status, r.raw)
 	}

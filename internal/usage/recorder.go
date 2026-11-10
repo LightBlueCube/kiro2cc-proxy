@@ -50,7 +50,7 @@ func (r *Recorder) Record(rec gateway.Record) {
 	if u := rec.Usage; u != nil {
 		row.Input, row.Cached, row.Output, row.Reasoning = u.PromptTokens, u.CachedTokens, u.CompletionTokens, u.ReasoningTokens
 		r.mu.Lock()
-		price, ok := priceAt(r.prices, rec.Model, rec.At)
+		price, ok := priceOf(r.prices, rec.Model)
 		r.mu.Unlock()
 		if ok {
 			cost := price.cost(u.PromptTokens, u.CachedTokens, u.CompletionTokens)

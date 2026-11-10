@@ -46,6 +46,8 @@ th { font-size: 12px; color: var(--muted); font-weight: 500; white-space: nowrap
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.revoked td { color: var(--muted); text-decoration: line-through; }
 .table-wrap { overflow-x: auto; }
+details.prices { margin-top: 16px; }
+details.prices > summary { cursor: pointer; font-weight: 600; }
 
 .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
 .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }

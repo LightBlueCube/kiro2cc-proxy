@@ -260,7 +260,13 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 	}
 	defer tx.Rollback()
 	for id, share := range shares {
-		if _, err := tx.ExecContext(ctx, `UPDATE requests SET quota_used = ? WHERE id = ?`, share, id); err != nil {
+		var key, group string
+		err := tx.QueryRowContext(ctx, `UPDATE requests SET quota_used = ? WHERE id = ? RETURNING key_name, quota_group`, share, id).Scan(&key, &group)
+		if err != nil {
+			return fmt.Errorf("request %d: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_name, grp, used) VALUES (?, ?, ?)
+			ON CONFLICT (key_name, grp) DO UPDATE SET used = used + excluded.used`, key, group, share); err != nil {
 			return err
 		}
 	}
@@ -271,25 +277,53 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 	return tx.Commit()
 }
 
-// QuotaUse totals one key's requests of one quota group on one account.
-type QuotaUse struct {
+// KeyUse is a key's attributed quota in one quota group since the key
+// was created; pruning requests keeps it.
+type KeyUse struct {
+	Key   string
+	Group string
+	Used  float64
+}
+
+// KeyUses lists attributed quota by key and group; key "" selects every
+// key.
+func (s *Store) KeyUses(ctx context.Context, key string) ([]KeyUse, error) {
+	query, args := `SELECT key_name, grp, used FROM key_usage`, []any{}
+	if key != "" {
+		query += ` WHERE key_name = ?`
+		args = append(args, key)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KeyUse
+	for rows.Next() {
+		var u KeyUse
+		if err := rows.Scan(&u.Key, &u.Group, &u.Used); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// PendingCost totals the list-price cost of one key's priced requests of
+// one quota group on one account that have no attributed share.
+type PendingCost struct {
 	Key     string
 	Group   string
 	Account string
-	// Attributed is the sum of attributed weekly-quota shares.
-	Attributed float64
-	// PendingCostUSD is the list-price cost of the requests that have no
-	// attributed share yet.
-	PendingCostUSD float64
+	CostUSD float64
 }
 
-// QuotaUses totals requests since the given time by key, quota group, and
-// account; key "" selects every key.
-func (s *Store) QuotaUses(ctx context.Context, key string, since time.Time) ([]QuotaUse, error) {
-	query := `SELECT key_name, quota_group, account, COALESCE(SUM(quota_used), 0),
-		COALESCE(SUM(CASE WHEN quota_used IS NULL THEN cost_usd END), 0)
-		FROM requests WHERE at >= ? AND account != ''`
-	args := []any{since.UnixMilli()}
+// PendingCosts lists unattributed cost by key, group, and account; key ""
+// selects every key.
+func (s *Store) PendingCosts(ctx context.Context, key string) ([]PendingCost, error) {
+	query := `SELECT key_name, quota_group, account, SUM(cost_usd) FROM requests
+		WHERE quota_used IS NULL AND cost_usd > 0 AND account != ''`
+	var args []any
 	if key != "" {
 		query += ` AND key_name = ?`
 		args = append(args, key)
@@ -299,13 +333,13 @@ func (s *Store) QuotaUses(ctx context.Context, key string, since time.Time) ([]Q
 		return nil, err
 	}
 	defer rows.Close()
-	var out []QuotaUse
+	var out []PendingCost
 	for rows.Next() {
-		var u QuotaUse
-		if err := rows.Scan(&u.Key, &u.Group, &u.Account, &u.Attributed, &u.PendingCostUSD); err != nil {
+		var p PendingCost
+		if err := rows.Scan(&p.Key, &p.Group, &p.Account, &p.CostUSD); err != nil {
 			return nil, err
 		}
-		out = append(out, u)
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }

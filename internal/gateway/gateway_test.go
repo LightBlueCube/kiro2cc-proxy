@@ -231,7 +231,7 @@ func TestKeyLimits(t *testing.T) {
 	}
 	h.budget.set("alice", "gemini", 0.3)
 	r := h.completeAs(ctx, alice, req)
-	if r.err == nil || r.err.Kind != conv.ErrKeyLimit || !strings.Contains(r.err.Message, "30.00% of its 30.00% limit on gemini") {
+	if r.err == nil || r.err.Kind != conv.ErrKeyLimit || !strings.Contains(r.err.Message, "30.00% of its 30.00% limit on gemini quota") {
 		t.Fatalf("at the limit: %+v", r.err)
 	}
 	if n := len(h.requests("session/prompt")); n != 2 {
