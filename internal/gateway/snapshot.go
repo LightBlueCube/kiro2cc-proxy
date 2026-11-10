@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,8 +38,8 @@ type snapshot struct {
 // so sessions survive a restart. A session's age is that of its latest
 // position.
 type snapshotStore struct {
-	path string
-	ttl  time.Duration
+	path   string
+	ttlNow atomic.Int64 // time.Duration
 
 	saveMu    sync.Mutex
 	mu        sync.Mutex
@@ -51,7 +52,8 @@ func sessionRef(account, sessionID string) string { return account + "/" + sessi
 func prefixRef(user, hash string) string { return user + "/" + hash }
 
 func openSnapshotStore(path string, ttl time.Duration) (*snapshotStore, error) {
-	s := &snapshotStore{path: path, ttl: ttl, bySession: map[string][]snapshot{}, byPrefix: map[string]string{}}
+	s := &snapshotStore{path: path, bySession: map[string][]snapshot{}, byPrefix: map[string]string{}}
+	s.setTTL(ttl)
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
@@ -80,8 +82,12 @@ func openSnapshotStore(path string, ttl time.Duration) (*snapshotStore, error) {
 	return s, nil
 }
 
+func (s *snapshotStore) ttl() time.Duration { return time.Duration(s.ttlNow.Load()) }
+
+func (s *snapshotStore) setTTL(ttl time.Duration) { s.ttlNow.Store(int64(ttl)) }
+
 func (s *snapshotStore) expired(positions []snapshot) bool {
-	return time.Since(positions[len(positions)-1].UpdatedAt) > s.ttl
+	return time.Since(positions[len(positions)-1].UpdatedAt) > s.ttl()
 }
 
 // lookup finds the user's longest position that is a strict prefix of t's

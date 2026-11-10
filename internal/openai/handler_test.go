@@ -17,7 +17,7 @@ type stubBackend struct {
 	events []conv.Event
 }
 
-func (b *stubBackend) Complete(_ context.Context, _ string, req conv.Request) <-chan conv.Event {
+func (b *stubBackend) Complete(_ context.Context, _ conv.Caller, req conv.Request) <-chan conv.Event {
 	b.got = req
 	out := make(chan conv.Event, len(b.events))
 	for _, ev := range b.events {
@@ -29,10 +29,10 @@ func (b *stubBackend) Complete(_ context.Context, _ string, req conv.Request) <-
 
 func (b *stubBackend) Models() []conv.ModelInfo { return []conv.ModelInfo{{ID: "m"}} }
 
-func post(t *testing.T, serve func(http.ResponseWriter, *http.Request, string), body string) *httptest.ResponseRecorder {
+func post(t *testing.T, serve func(http.ResponseWriter, *http.Request, conv.Caller), body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	serve(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)), "alice")
+	serve(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)), conv.Caller{Name: "alice"})
 	return rec
 }
 
@@ -172,7 +172,7 @@ func TestChatExcludeReasoningKeepsAnchor(t *testing.T) {
 func TestEarlyErrorKeepsStatus(t *testing.T) {
 	backend := &stubBackend{events: []conv.Event{{Err: &conv.Error{Kind: conv.ErrQuota, Message: "quota", RetryAfterSeconds: 60}}}}
 	h := NewHandler(backend)
-	for _, serve := range []func(http.ResponseWriter, *http.Request, string){h.Chat, h.Responses} {
+	for _, serve := range []func(http.ResponseWriter, *http.Request, conv.Caller){h.Chat, h.Responses} {
 		rec := post(t, serve, `{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}],"input":"x"}`)
 		if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "60" {
 			t.Fatalf("status %d headers %v", rec.Code, rec.Header())

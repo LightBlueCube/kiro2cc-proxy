@@ -1,50 +1,52 @@
 // Command agyrelay serves an OpenAI-compatible API backed by Antigravity
-// accounts through `agy acp`.
+// accounts through `agy acp`, with an admin UI for accounts, keys, usage,
+// and logs.
 package main
 
 import (
+	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
+	"agyrelay/internal/admin"
 	"agyrelay/internal/bridge"
+	"agyrelay/internal/control"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/openai"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/server"
+	"agyrelay/internal/store"
+	"agyrelay/internal/usage"
 )
 
-const usage = `usage:
-  agyrelay serve  -config FILE          run the API server
-  agyrelay login  -config FILE ACCOUNT  sign an account in (interactive agy)
-  agyrelay keygen NAME                  create an API key and its config entry`
+const commandUsage = `usage:
+  agyrelay serve  -config FILE   run the API server and admin UI
+  agyrelay passwd -config FILE   set the admin password (signs every admin out)`
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, usage)
+		fmt.Fprintln(os.Stderr, commandUsage)
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
 	case "serve":
 		err = runServe(os.Args[2:])
-	case "login":
-		err = runLogin(os.Args[2:])
-	case "keygen":
-		err = runKeygen(os.Args[2:])
+	case "passwd":
+		err = runPasswd(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, usage)
+		fmt.Fprintln(os.Stderr, commandUsage)
 		os.Exit(2)
 	}
 	if err != nil {
@@ -53,25 +55,45 @@ func main() {
 	}
 }
 
-func parseConfigFlag(name string, args []string) (*config, []string, error) {
+func parseConfigFlag(name string, args []string) (*config, error) {
 	flags := flag.NewFlagSet(name, flag.ExitOnError)
 	path := flags.String("config", "agyrelay.json", "configuration file")
 	if err := flags.Parse(args); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	cfg, err := loadConfig(*path)
-	return cfg, flags.Args(), err
+	if flags.NArg() > 0 {
+		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	return loadConfig(*path)
+}
+
+func openStore(cfg *config) (*store.Store, error) {
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		return nil, err
+	}
+	return store.Open(cfg.dbPath())
 }
 
 func runServe(args []string) error {
-	cfg, _, err := parseConfigFlag("serve", args)
+	cfg, err := parseConfigFlag("serve", args)
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+	st, err := openStore(cfg)
+	if err != nil {
 		return err
 	}
+	defer st.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	settings, err := control.LoadSettings(ctx, st)
+	if err != nil {
+		return err
+	}
+	level := new(slog.LevelVar)
+	level.Set(settings.Level())
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	tools, err := bridge.Start(log.With("component", "bridge"))
 	if err != nil {
@@ -79,14 +101,9 @@ func runServe(args []string) error {
 	}
 	defer tools.Close()
 
-	accounts := make([]pool.AccountConfig, len(cfg.Accounts))
-	for i, a := range cfg.Accounts {
-		accounts[i] = pool.AccountConfig{Name: a.Name, Home: cfg.accountHome(a.Name), Env: a.Env}
-	}
 	accountPool, err := pool.New(pool.Config{
 		Bin:               cfg.AgyBin,
-		Accounts:          accounts,
-		TurnsPerAccount:   cfg.TurnsPerAccount,
+		TurnsPerAccount:   settings.TurnsPerAccount,
 		ProcessPerSession: *cfg.ProcessPerSession,
 		Log:               log.With("component", "pool"),
 	})
@@ -99,7 +116,7 @@ func runServe(args []string) error {
 		Pool:        accountPool,
 		Bridge:      tools,
 		DataDir:     cfg.DataDir,
-		SnapshotTTL: cfg.snapshotTTL,
+		SnapshotTTL: settings.SnapshotTTLDuration(),
 		Log:         log.With("component", "gateway"),
 	})
 	if err != nil {
@@ -107,16 +124,37 @@ func runServe(args []string) error {
 	}
 	defer gw.Close()
 
+	monitor := usage.NewMonitor(usage.MonitorConfig{
+		Store: st, Pool: accountPool, Profile: gateway.IdleProfile(), Log: log.With("component", "usage"),
+	})
+	go monitor.Run(ctx)
+
+	ctl, err := control.New(ctx, control.Config{
+		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, AgyBin: cfg.AgyBin, Level: level,
+		AccountsDir: cfg.accountsDir(), Settings: settings, Log: log.With("component", "control"),
+	})
+	if err != nil {
+		return err
+	}
+
+	var adminUI http.Handler
+	if cfg.loopbackOnly() {
+		adminUI = admin.New(admin.Config{
+			Store: st, Control: ctl, Pool: accountPool, Monitor: monitor,
+			ProcessPerSession: *cfg.ProcessPerSession, Log: log.With("component", "admin"),
+		})
+	} else {
+		log.Warn("admin UI disabled: it needs a loopback listen address behind a TLS tunnel or proxy", "listen", cfg.Listen)
+	}
+
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(cfg.keys, openai.NewHandler(gw)),
+		Handler:           server.New(server.Config{Keys: ctl, OpenAI: openai.NewHandler(gw), Admin: adminUI}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	served := make(chan error, 1)
 	go func() { served <- httpServer.ListenAndServe() }()
-	log.Info("listening", "addr", cfg.Listen, "accounts", len(accounts))
+	log.Info("listening", "addr", cfg.Listen, "accounts", len(accountPool.Accounts()))
 
 	select {
 	case err := <-served:
@@ -132,42 +170,58 @@ func runServe(args []string) error {
 	return nil
 }
 
-// runLogin starts agy's interactive UI with the account's HOME, where agy
-// stores its sign-in.
-func runLogin(args []string) error {
-	cfg, rest, err := parseConfigFlag("login", args)
+// runPasswd reads the new password twice: hidden from a terminal, or as
+// two lines from a pipe.
+func runPasswd(args []string) error {
+	cfg, err := parseConfigFlag("passwd", args)
 	if err != nil {
 		return err
 	}
-	if len(rest) != 1 {
-		return errors.New("login needs exactly one account name")
-	}
-	name := rest[0]
-	configured := false
-	for _, a := range cfg.Accounts {
-		configured = configured || a.Name == name
-	}
-	if !configured {
-		return fmt.Errorf("account %q is not in the config", name)
-	}
-	home := cfg.accountHome(name)
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	read := readPasswordLine()
+	first, err := read("New admin password: ")
+	if err != nil {
 		return err
 	}
-	fmt.Printf("Starting agy with HOME=%s. Sign in, then exit agy.\n", home)
-	cmd := exec.Command(cfg.AgyBin)
-	cmd.Dir = home
-	cmd.Env = append(os.Environ(), "HOME="+home, "AGY_CLI_DISABLE_AUTO_UPDATE=1")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	if err := admin.ValidatePassword(first); err != nil {
+		return err
+	}
+	second, err := read("Again: ")
+	if err != nil {
+		return err
+	}
+	if first != second {
+		return errors.New("the passwords differ")
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := admin.SetPassword(context.Background(), st, first); err != nil {
+		return err
+	}
+	fmt.Println("Admin password set; every admin session was signed out.")
+	return nil
 }
 
-func runKeygen(args []string) error {
-	if len(args) != 1 {
-		return errors.New("keygen needs exactly one key name")
+func readPasswordLine() func(prompt string) (string, error) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		return func(prompt string) (string, error) {
+			fmt.Fprint(os.Stderr, prompt)
+			raw, err := term.ReadPassword(fd)
+			fmt.Fprintln(os.Stderr)
+			return string(raw), err
+		}
 	}
-	key := "sk-agyrelay-" + rand.Text()
-	sum := sha256.Sum256([]byte(key))
-	fmt.Printf("API key (give it to %s; it is not stored):\n  %s\nConfig entry for \"keys\":\n  {\"name\": %q, \"sha256\": %q}\n", args[0], key, args[0], hex.EncodeToString(sum[:]))
-	return nil
+	lines := bufio.NewScanner(os.Stdin)
+	return func(string) (string, error) {
+		if !lines.Scan() {
+			if err := lines.Err(); err != nil {
+				return "", err
+			}
+			return "", errors.New("expected two password lines on stdin")
+		}
+		return strings.TrimRight(lines.Text(), "\r"), nil
+	}
 }

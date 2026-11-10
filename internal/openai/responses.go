@@ -227,8 +227,8 @@ func finishStatus(finish conv.FinishReason) string {
 	return statusCompleted
 }
 
-// Responses serves POST /v1/responses for the authenticated user.
-func (h *Handler) Responses(w http.ResponseWriter, r *http.Request, user string) {
+// Responses serves POST /v1/responses for the authenticated caller.
+func (h *Handler) Responses(w http.ResponseWriter, r *http.Request, caller conv.Caller) {
 	var wire responsesRequest
 	if !decodeBody(w, r, &wire) {
 		return
@@ -240,7 +240,7 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request, user string)
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	events := h.backend.Complete(ctx, user, req)
+	events := h.backend.Complete(ctx, caller, req)
 	b := &responseBuilder{id: itemID("resp_"), model: wire.Model, created: time.Now().Unix(), tools: wire.Tools}
 	if wire.Stream {
 		streamResponses(w, events, b)
