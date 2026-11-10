@@ -395,9 +395,13 @@ func (g *Gateway) park(at *activeTurn, group *callGroup) {
 	})
 }
 
+// usageFrom maps agy's usage to OpenAI's, whose prompt tokens include the
+// cached ones. agy's inputTokens excludes cache reads: a repeated 36.6k
+// prompt reported input 28.9k + cachedRead 36.7k. cachedWriteTokens has
+// only been seen as 0, so whether input includes it is unknown.
 func usageFrom(u *agy.Usage) *conv.Usage {
 	return &conv.Usage{
-		PromptTokens:     u.InputTokens,
+		PromptTokens:     u.InputTokens + u.CachedReadTokens,
 		CompletionTokens: u.OutputTokens + u.ThoughtTokens,
 		ReasoningTokens:  u.ThoughtTokens,
 		CachedTokens:     u.CachedReadTokens,
