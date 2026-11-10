@@ -1,0 +1,322 @@
+// Package agytest provides a scripted stand-in for `agy acp`, run by test
+// binaries in place of the real agy.
+//
+// The live input of each prompt (text after the last </history>, or the
+// whole last text block) may hold one directive line:
+//
+//	@tool NAME JSON      call the client tool NAME, reply "tool said: <result>"
+//	@parallel A B ...    call tools A, B, ... through the parallel tool
+//	@hang                produce nothing until cancelled
+//
+// Anything else gets a thought and "reply to: <input>". Environment:
+//
+//	FAKE_AGY_LOG    append every request as a JSON line
+//	FAKE_AGY_QUOTA  answer every prompt with agy's quota notice
+package agytest
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// EnvRun makes a test binary act as the fake agent (see Main).
+const EnvRun = "FAKE_AGY"
+
+// QuotaNotice is agy's exhausted-quota reply.
+const QuotaNotice = "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours."
+
+// Models is the catalog the fake reports.
+var Models = []map[string]string{
+	{"modelId": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)"},
+	{"modelId": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)"},
+	{"modelId": "claude-opus-5-5-high", "name": "Claude Opus 5.5 (High)"},
+}
+
+type fake struct {
+	geminiDir string
+	log       *os.File
+
+	outMu sync.Mutex
+	out   *bufio.Writer
+
+	mu       sync.Mutex
+	sessions map[string]*fakeSession
+	nextID   int
+}
+
+type fakeSession struct {
+	url, token string
+	cancel     context.CancelFunc
+}
+
+type rpcMessage struct {
+	ID     json.RawMessage `json:"id,omitempty"`
+	Method string          `json:"method,omitempty"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+// Main serves ACP on stdin/stdout until stdin closes.
+func Main() {
+	f := &fake{out: bufio.NewWriter(os.Stdout), sessions: map[string]*fakeSession{}}
+	for i, arg := range os.Args {
+		if arg == "--gemini-dir" && i+1 < len(os.Args) {
+			f.geminiDir = os.Args[i+1]
+		}
+	}
+	if path := os.Getenv("FAKE_AGY_LOG"); path != "" {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fake agy:", err)
+			os.Exit(1)
+		}
+		f.log = file
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 1<<20), 64<<20)
+	for scanner.Scan() {
+		var msg rpcMessage
+		if json.Unmarshal(scanner.Bytes(), &msg) != nil || msg.Method == "" {
+			continue // responses to our requests are not used
+		}
+		f.record(scanner.Bytes())
+		go f.handle(msg)
+	}
+}
+
+func (f *fake) record(line []byte) {
+	if f.log == nil {
+		return
+	}
+	f.outMu.Lock()
+	defer f.outMu.Unlock()
+	f.log.Write(append(append([]byte{}, line...), '\n'))
+}
+
+func (f *fake) send(v any) {
+	raw, _ := json.Marshal(v)
+	f.outMu.Lock()
+	defer f.outMu.Unlock()
+	f.out.Write(raw)
+	f.out.WriteByte('\n')
+	f.out.Flush()
+}
+
+func (f *fake) reply(id json.RawMessage, result any) {
+	f.send(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+func (f *fake) fail(id json.RawMessage, code int, message string) {
+	f.send(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
+}
+
+func (f *fake) update(sessionID string, update map[string]any) {
+	f.send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": sessionID, "update": update}})
+}
+
+func (f *fake) chunk(sessionID, kind, text string) {
+	f.update(sessionID, map[string]any{"sessionUpdate": kind, "content": map[string]string{"type": "text", "text": text}})
+}
+
+type sessionParams struct {
+	SessionID  string `json:"sessionId"`
+	MCPServers []struct {
+		URL     string `json:"url"`
+		Headers []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"headers"`
+	} `json:"mcpServers"`
+}
+
+func (f *fake) handle(msg rpcMessage) {
+	switch msg.Method {
+	case "initialize":
+		f.reply(msg.ID, map[string]any{
+			"protocolVersion":   1,
+			"agentInfo":         map[string]string{"name": "fake-agy", "version": "1.5.3"},
+			"agentCapabilities": map[string]any{"sessionCapabilities": map[string]any{"resume": map[string]any{}}},
+		})
+	case "session/new":
+		var p sessionParams
+		json.Unmarshal(msg.Params, &p)
+		f.mu.Lock()
+		f.nextID++
+		id := fmt.Sprintf("fake-%d-%d", os.Getpid(), f.nextID)
+		f.mu.Unlock()
+		f.open(id, p)
+		store := f.store(id)
+		os.MkdirAll(filepath.Dir(store), 0o700)
+		os.WriteFile(store, nil, 0o600)
+		f.reply(msg.ID, map[string]any{"sessionId": id, "models": map[string]any{"availableModels": Models}})
+	case "session/resume", "session/load":
+		var p sessionParams
+		json.Unmarshal(msg.Params, &p)
+		if _, err := os.Stat(f.store(p.SessionID)); err != nil {
+			f.fail(msg.ID, -32602, "unknown session")
+			return
+		}
+		f.open(p.SessionID, p)
+		f.reply(msg.ID, map[string]any{})
+	case "session/set_config_option":
+		f.reply(msg.ID, map[string]any{"configOptions": []any{}})
+	case "session/prompt":
+		f.prompt(msg)
+	case "session/cancel":
+		var p sessionParams
+		json.Unmarshal(msg.Params, &p)
+		f.mu.Lock()
+		if s := f.sessions[p.SessionID]; s != nil && s.cancel != nil {
+			s.cancel()
+		}
+		f.mu.Unlock()
+	default:
+		if msg.ID != nil {
+			f.fail(msg.ID, -32601, "method not found")
+		}
+	}
+}
+
+func (f *fake) store(id string) string {
+	return filepath.Join(f.geminiDir, "antigravity-cli", "conversations", id+".db")
+}
+
+func (f *fake) open(id string, p sessionParams) {
+	s := &fakeSession{}
+	if len(p.MCPServers) > 0 {
+		s.url = p.MCPServers[0].URL
+		for _, h := range p.MCPServers[0].Headers {
+			s.token = h.Value
+		}
+	}
+	f.mu.Lock()
+	f.sessions[id] = s
+	f.mu.Unlock()
+}
+
+func (f *fake) prompt(msg rpcMessage) {
+	var p struct {
+		SessionID string `json:"sessionId"`
+		Prompt    []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"prompt"`
+	}
+	json.Unmarshal(msg.Params, &p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.mu.Lock()
+	s := f.sessions[p.SessionID]
+	if s == nil {
+		f.mu.Unlock()
+		f.fail(msg.ID, -32602, "unknown session")
+		return
+	}
+	s.cancel = cancel
+	f.mu.Unlock()
+
+	input := ""
+	for _, block := range p.Prompt {
+		if block.Type == "text" {
+			input = block.Text
+		}
+	}
+	f.chunk(p.SessionID, "user_message_chunk", input)
+	for _, end := range []string{"</client-system>", "</history>"} {
+		if i := strings.LastIndex(input, end); i >= 0 {
+			input = input[i+len(end):]
+		}
+	}
+	input = strings.TrimSpace(input)
+
+	text, err := f.respond(ctx, s, p.SessionID, input)
+	if ctx.Err() != nil {
+		f.reply(msg.ID, map[string]any{"stopReason": "cancelled"})
+		return
+	}
+	if err != nil {
+		f.fail(msg.ID, -32603, err.Error())
+		return
+	}
+	f.chunk(p.SessionID, "agent_message_chunk", text)
+	f.reply(msg.ID, map[string]any{"stopReason": "end_turn", "usage": map[string]int{"inputTokens": 100, "outputTokens": 10, "thoughtTokens": 5, "cachedReadTokens": 40, "totalTokens": 115}})
+}
+
+func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input string) (string, error) {
+	if os.Getenv("FAKE_AGY_QUOTA") != "" {
+		return QuotaNotice, nil
+	}
+	fields := strings.Fields(input)
+	directive := ""
+	if len(fields) > 0 {
+		directive = fields[0]
+	}
+	switch directive {
+	case "@hang":
+		<-ctx.Done()
+		return "", nil
+	case "@tool":
+		name, args, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(input, "@tool")), " ")
+		result, err := callTool(ctx, s, name, json.RawMessage(args))
+		if err != nil {
+			return "", err
+		}
+		return "tool said: " + result, nil
+	case "@parallel":
+		var calls []map[string]any
+		for _, name := range fields[1:] {
+			calls = append(calls, map[string]any{"name": name, "arguments": map[string]any{}})
+		}
+		args, _ := json.Marshal(map[string]any{"calls": calls})
+		result, err := callTool(ctx, s, "parallel", args)
+		if err != nil {
+			return "", err
+		}
+		return "tool said: " + result, nil
+	}
+	f.chunk(sessionID, "agent_thought_chunk", "thinking")
+	return "reply to: " + input, nil
+}
+
+type tokenTransport struct{ token string }
+
+func (t tokenTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("X-Relay-Token", t.token)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func callTool(ctx context.Context, s *fakeSession, name string, args json.RawMessage) (string, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "fake-agy", Version: "1.5.3"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:             s.url,
+		HTTPClient:           &http.Client{Transport: tokenTransport{s.token}},
+		DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("connect bridge: %w", err)
+	}
+	defer session.Close()
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		return "", fmt.Errorf("call %s: %w", name, err)
+	}
+	var texts []string
+	for _, content := range result.Content {
+		if text, ok := content.(*mcp.TextContent); ok {
+			texts = append(texts, text.Text)
+		}
+	}
+	return strings.Join(texts, "\n"), nil
+}
