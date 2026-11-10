@@ -7,10 +7,17 @@
 //	@tool NAME JSON      call the client tool NAME, reply "tool said: <result>"
 //	@parallel A B ...    call tools A, B, ... through the parallel tool
 //	@hang                produce nothing until cancelled
+//	@steps               reply "steps: N", N the steps before this prompt
 //
-// Anything else gets a thought and "reply to: <input>". Environment:
+// Anything else gets a thought and "reply to: <input>".
 //
-//	FAKE_AGY_LOG    append every request as a JSON line
+// Like agy, the fake runs a language server with the session's steps
+// (stored in its conversation file) and logs its port. After
+// RevertToCascadeStep the next prompt replies "stale stream" unless the
+// session was resumed, as agy streams stale text then. Environment:
+//
+//	FAKE_AGY_LOG    append every request as a JSON line; language server
+//	                calls have the method "ls/<Name>"
 //	FAKE_AGY_QUOTA  answer every prompt with agy's quota notice
 package agytest
 
@@ -19,13 +26,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// Step types the fake records, as agy names them.
+const (
+	stepUserInput = "CORTEX_STEP_TYPE_USER_INPUT"
+	stepPlanner   = "CORTEX_STEP_TYPE_PLANNER_RESPONSE"
+	stepGeneric   = "CORTEX_STEP_TYPE_GENERIC"
 )
 
 // EnvRun makes a test binary act as the fake agent (see Main).
@@ -42,8 +58,11 @@ var Models = []map[string]string{
 }
 
 type fake struct {
-	geminiDir string
-	log       *os.File
+	geminiDir  string
+	perSession bool
+	started    string // log file timestamp
+	log        *os.File
+	lsOnce     sync.Once
 
 	outMu sync.Mutex
 	out   *bufio.Writer
@@ -56,6 +75,8 @@ type fake struct {
 type fakeSession struct {
 	url, token string
 	cancel     context.CancelFunc
+	steps      []string
+	stale      bool
 }
 
 type rpcMessage struct {
@@ -66,11 +87,17 @@ type rpcMessage struct {
 
 // Main serves ACP on stdin/stdout until stdin closes.
 func Main() {
-	f := &fake{out: bufio.NewWriter(os.Stdout), sessions: map[string]*fakeSession{}}
+	f := &fake{out: bufio.NewWriter(os.Stdout), sessions: map[string]*fakeSession{}, started: time.Now().Format("20060102_150405")}
 	for i, arg := range os.Args {
 		if arg == "--gemini-dir" && i+1 < len(os.Args) {
 			f.geminiDir = os.Args[i+1]
 		}
+		if arg == "--process-per-session" {
+			f.perSession = true
+		}
+	}
+	if f.perSession {
+		f.appendLog("acp-front", fmt.Sprintf("front: started worker 1 (pid %d)", os.Getpid()))
 	}
 	if path := os.Getenv("FAKE_AGY_LOG"); path != "" {
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -152,19 +179,20 @@ func (f *fake) handle(msg rpcMessage) {
 		f.nextID++
 		id := fmt.Sprintf("fake-%d-%d", os.Getpid(), f.nextID)
 		f.mu.Unlock()
-		f.open(id, p)
-		store := f.store(id)
-		os.MkdirAll(filepath.Dir(store), 0o700)
-		os.WriteFile(store, nil, 0o600)
+		os.MkdirAll(filepath.Dir(f.store(id)), 0o700)
+		f.open(id, p, nil)
 		f.reply(msg.ID, map[string]any{"sessionId": id, "models": map[string]any{"availableModels": Models}})
 	case "session/resume", "session/load":
 		var p sessionParams
 		json.Unmarshal(msg.Params, &p)
-		if _, err := os.Stat(f.store(p.SessionID)); err != nil {
+		raw, err := os.ReadFile(f.store(p.SessionID))
+		if err != nil {
 			f.fail(msg.ID, -32602, "unknown session")
 			return
 		}
-		f.open(p.SessionID, p)
+		var steps []string
+		json.Unmarshal(raw, &steps)
+		f.open(p.SessionID, p, steps)
 		f.reply(msg.ID, map[string]any{})
 	case "session/set_config_option":
 		f.reply(msg.ID, map[string]any{"configOptions": []any{}})
@@ -189,8 +217,9 @@ func (f *fake) store(id string) string {
 	return filepath.Join(f.geminiDir, "antigravity-cli", "conversations", id+".db")
 }
 
-func (f *fake) open(id string, p sessionParams) {
-	s := &fakeSession{}
+func (f *fake) open(id string, p sessionParams, steps []string) {
+	f.lsOnce.Do(f.startLanguageServer)
+	s := &fakeSession{steps: steps}
 	if len(p.MCPServers) > 0 {
 		s.url = p.MCPServers[0].URL
 		for _, h := range p.MCPServers[0].Headers {
@@ -199,7 +228,95 @@ func (f *fake) open(id string, p sessionParams) {
 	}
 	f.mu.Lock()
 	f.sessions[id] = s
+	f.saveLocked(id, s)
 	f.mu.Unlock()
+	if f.perSession {
+		f.appendLog("acp-front", fmt.Sprintf("front: session %s served by worker 1", id))
+	}
+}
+
+// addSteps appends steps to the session's trajectory.
+func (f *fake) addSteps(id string, s *fakeSession, steps ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s.steps = append(s.steps, steps...)
+	f.saveLocked(id, s)
+}
+
+func (f *fake) saveLocked(id string, s *fakeSession) {
+	raw, _ := json.Marshal(s.steps)
+	os.WriteFile(f.store(id), raw, 0o600)
+}
+
+// appendLog writes a glog-style line to <kind>-<ts>-<pid>.log.
+func (f *fake) appendLog(kind, line string) {
+	dir := filepath.Join(f.geminiDir, "antigravity-cli", "log")
+	os.MkdirAll(dir, 0o700)
+	file, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("%s-%s-%d.log", kind, f.started, os.Getpid())), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake agy:", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+	fmt.Fprintf(file, "I%s       1 fake.go:1] %s\n", time.Now().Format("0102 15:04:05.000000"), line)
+}
+
+func (f *fake) startLanguageServer() {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake agy:", err)
+		os.Exit(1)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /exa.language_server_pb.LanguageServerService/{method}", f.serveLanguageServer)
+	go http.Serve(listener, mux)
+	kind := "acp-server"
+	if f.perSession {
+		kind = "acp-worker"
+	}
+	f.appendLog(kind, fmt.Sprintf("Language server listening on random port at %d for HTTP", listener.Addr().(*net.TCPAddr).Port))
+}
+
+func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CascadeID        string `json:"cascadeId"`
+		StepOffset       int    `json:"stepOffset"`
+		StepIndex        int    `json:"stepIndex"`
+		ConversationOnly bool   `json:"conversationOnly"`
+	}
+	var raw []byte
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	logged, _ := json.Marshal(map[string]any{"method": "ls/" + r.PathValue("method"), "params": req})
+	f.record(logged)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.sessions[req.CascadeID]
+	if s == nil {
+		http.Error(w, "run state not found", http.StatusInternalServerError)
+		return
+	}
+	switch r.PathValue("method") {
+	case "GetCascadeTrajectorySteps":
+		steps := []map[string]string{}
+		for _, step := range s.steps[min(req.StepOffset, len(s.steps)):] {
+			steps = append(steps, map[string]string{"type": step})
+		}
+		raw, _ = json.Marshal(map[string]any{"steps": steps})
+	case "RevertToCascadeStep":
+		s.steps = s.steps[:min(req.StepIndex+1, len(s.steps))]
+		s.stale = true
+		f.saveLocked(req.CascadeID, s)
+		raw, _ = json.Marshal(map[string]any{"metadata": map[string]any{}})
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(raw)
 }
 
 func (f *fake) prompt(msg rpcMessage) {
@@ -237,6 +354,10 @@ func (f *fake) prompt(msg rpcMessage) {
 	}
 	input = strings.TrimSpace(input)
 
+	f.mu.Lock()
+	stepsBefore, stale := len(s.steps), s.stale
+	f.mu.Unlock()
+	f.addSteps(p.SessionID, s, stepUserInput)
 	text, err := f.respond(ctx, s, p.SessionID, input)
 	if ctx.Err() != nil {
 		f.reply(msg.ID, map[string]any{"stopReason": "cancelled"})
@@ -246,6 +367,13 @@ func (f *fake) prompt(msg rpcMessage) {
 		f.fail(msg.ID, -32603, err.Error())
 		return
 	}
+	if input == "@steps" {
+		text = fmt.Sprintf("steps: %d", stepsBefore)
+	}
+	if stale {
+		text = "stale stream"
+	}
+	f.addSteps(p.SessionID, s, stepPlanner)
 	f.chunk(p.SessionID, "agent_message_chunk", text)
 	f.reply(msg.ID, map[string]any{"stopReason": "end_turn", "usage": map[string]int{"inputTokens": 100, "outputTokens": 10, "thoughtTokens": 5, "cachedReadTokens": 40, "totalTokens": 115}})
 }
@@ -265,10 +393,12 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		return "", nil
 	case "@tool":
 		name, args, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(input, "@tool")), " ")
+		f.addSteps(sessionID, s, stepPlanner)
 		result, err := callTool(ctx, s, name, json.RawMessage(args))
 		if err != nil {
 			return "", err
 		}
+		f.addSteps(sessionID, s, stepGeneric)
 		return "tool said: " + result, nil
 	case "@parallel":
 		var calls []map[string]any
@@ -276,10 +406,12 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 			calls = append(calls, map[string]any{"name": name, "arguments": map[string]any{}})
 		}
 		args, _ := json.Marshal(map[string]any{"calls": calls})
+		f.addSteps(sessionID, s, stepPlanner)
 		result, err := callTool(ctx, s, "parallel", args)
 		if err != nil {
 			return "", err
 		}
+		f.addSteps(sessionID, s, stepGeneric)
 		return "tool said: " + result, nil
 	}
 	f.chunk(sessionID, "agent_thought_chunk", "thinking")

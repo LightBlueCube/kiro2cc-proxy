@@ -19,7 +19,8 @@ import (
 // snapshots.
 //
 //	snapshot prefix hit ─┬─ parked turn answered by the delta ──▶ continue
-//	                     └─ else (cancel what runs there) ──────▶ warm delta
+//	                     └─ else (cancel what runs there, rewind
+//	                        to a rewindable position) ──────────▶ warm delta
 //	no hit, or warm failed ─────────────────────────────────────▶ fresh replay
 func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailure) {
 	if r.reuse {
@@ -86,6 +87,15 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 		}
 		return nil, err
 	}
+	if snap.Steps > 0 {
+		if err := g.rewindTo(ctx, at, snap, r.req.Tools); err != nil {
+			g.releaseClaim(at)
+			if ctx.Err() == nil {
+				g.forget(snap.Account, snap.SessionID)
+			}
+			return nil, err
+		}
+	}
 	if err := account.TryAcquire(r.group); err != nil {
 		g.releaseClaim(at)
 		return nil, err
@@ -97,8 +107,31 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 			systemUpdate = "(The client removed its system prompt.)"
 		}
 	}
-	g.launch(at, account, r, deltaPromptBlocks(r.t.body[snap.Count:], systemUpdate))
+	g.launch(at, account, r, deltaPromptBlocks(r.t.body[snap.Count:], systemUpdate), snap.Steps)
 	return at, nil
+}
+
+// rewindTo returns the claimed session to snap's position when turns ran
+// past it: later replies, or what a cancelled turn left.
+func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, tools []conv.ToolSpec) error {
+	g.mu.Lock()
+	proc, binding := at.sess.proc, at.sess.binding
+	g.mu.Unlock()
+	steps, err := proc.StepCount(ctx, snap.SessionID, snap.Steps)
+	if err != nil {
+		return err
+	}
+	if steps == snap.Steps {
+		return nil
+	}
+	if err := proc.Rewind(ctx, snap.SessionID, snap.Steps, sessionSpec(at.sess.account, binding, tools)); err != nil {
+		return err
+	}
+	g.log.Info("rewound session", "session", snap.SessionID, "steps", steps, "kept", snap.Steps)
+	if err := g.snaps.rewound(snap.Account, snap.SessionID, snap.Count); err != nil {
+		g.log.Warn("snapshot rewind not persisted", "err", err)
+	}
+	return nil
 }
 
 // claimSession reserves the snapshot's session for a new turn, cancelling
@@ -188,7 +221,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run) (*activeTurn, *attempt
 		}
 		at, err := g.openSession(ctx, r, account)
 		if err == nil {
-			g.launch(at, account, r, freshPrompt(r.t, replayBudget))
+			g.launch(at, account, r, freshPrompt(r.t, replayBudget), 0)
 			return at, nil
 		}
 		account.Release()
@@ -230,11 +263,12 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 	return at, nil
 }
 
-// launch starts the prompt on a claimed session. The slot on account is
-// held until the turn settles.
-func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, prompt []agy.ContentBlock) {
+// launch starts the prompt on a claimed session that has at least
+// baseSteps native steps. The slot on account is held until the turn
+// settles.
+func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, prompt []agy.ContentBlock, baseSteps int) {
 	g.mu.Lock()
-	at.account, at.choice, at.consuming = account, r.choice(), true
+	at.account, at.choice, at.consuming, at.baseSteps = account, r.choice(), true, baseSteps
 	at.turn = at.sess.proc.RunTurn(agy.TurnSpec{SessionID: at.sess.id, Model: r.slug, Prompt: prompt})
 	at.sess.lastUsed = time.Now()
 	g.mu.Unlock()
