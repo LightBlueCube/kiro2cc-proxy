@@ -2,7 +2,10 @@
 // API codecs and the gateway.
 package conv
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 type Role string
 
@@ -98,6 +101,7 @@ type ErrorKind int
 const (
 	ErrInvalidRequest ErrorKind = iota + 1
 	ErrUnauthorized
+	ErrForbidden
 	ErrUnknownModel
 	ErrQuota
 	ErrOverloaded
@@ -113,6 +117,19 @@ type Error struct {
 }
 
 func (e *Error) Error() string { return e.Message }
+
+// Caller is the API key a request came with.
+type Caller struct {
+	// Name identifies the key; sessions and records are scoped by it.
+	Name string
+	// Models limits the key to these model ids; empty allows all.
+	Models []string
+}
+
+// Allows reports whether the caller may use the model id.
+func (c Caller) Allows(modelID string) bool {
+	return len(c.Models) == 0 || slices.Contains(c.Models, modelID)
+}
 
 // ModelInfo is one model the gateway serves.
 type ModelInfo struct {

@@ -1,0 +1,160 @@
+package admin
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"agyrelay/internal/agy"
+	"agyrelay/internal/store"
+)
+
+const refreshTimeout = time.Minute
+
+type accountView struct {
+	Name      string               `json:"name"`
+	CreatedAt time.Time            `json:"created_at"`
+	EnvNames  []string             `json:"env_names"`
+	Paused    bool                 `json:"paused"`
+	Disabled  string               `json:"disabled"`
+	Cooldowns map[string]time.Time `json:"cooldowns"`
+	Turns     int                  `json:"turns"`
+	Procs     int                  `json:"procs"`
+	Login     bool                 `json:"login_pending"`
+	User      *agy.UserStatus      `json:"user"`
+	Groups    []agy.QuotaGroup     `json:"quota"`
+	SampledAt *time.Time           `json:"sampled_at"`
+	SampleErr string               `json:"sample_error"`
+}
+
+func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
+	records, err := h.control.AccountRecords(r.Context())
+	if err != nil {
+		h.internalError(w, "list accounts", err)
+		return
+	}
+	out := []accountView{}
+	for _, account := range h.pool.Accounts() {
+		st := account.Status()
+		v := accountView{
+			Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Cooldowns: st.Cooldowns,
+			Turns: st.Turns, Procs: st.Procs, Login: h.control.LoginPending(st.Name), EnvNames: []string{},
+		}
+		if rec, ok := records[st.Name]; ok {
+			v.CreatedAt = rec.CreatedAt
+			// Values may hold proxy credentials; only names are shown.
+			for _, kv := range rec.Env {
+				name, _, _ := strings.Cut(kv, "=")
+				v.EnvNames = append(v.EnvNames, name)
+			}
+		}
+		if q, ok := h.monitor.Latest(st.Name); ok {
+			if !q.At.IsZero() {
+				user, at := q.User, q.At
+				v.User, v.Groups, v.SampledAt = &user, q.Groups, &at
+			}
+			v.SampleErr = q.Err
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) addAccount(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string   `json:"name"`
+		Env  []string `json:"env"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if _, err := h.control.AddAccount(r.Context(), strings.TrimSpace(req.Name), req.Env); err != nil {
+		h.fail(w, "add account", err)
+		return
+	}
+	h.audit(r, "account_added", req.Name)
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) removeAccount(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := h.control.RemoveAccount(r.Context(), name); err != nil {
+		h.fail(w, "remove account", err)
+		return
+	}
+	h.audit(r, "account_removed", name)
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) pauseAccount(paused bool) http.HandlerFunc {
+	action := "account_resumed"
+	if paused {
+		action = "account_paused"
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if err := h.control.SetAccountPaused(r.Context(), name, paused); err != nil {
+			h.fail(w, action, err)
+			return
+		}
+		h.audit(r, action, name)
+		writeJSON(w, http.StatusOK, map[string]any{})
+	}
+}
+
+func (h *Handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
+	account := h.pool.Account(r.PathValue("name"))
+	if account == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), refreshTimeout)
+	defer cancel()
+	if _, err := h.monitor.Refresh(ctx, account); err != nil {
+		writeError(w, http.StatusBadGateway, "quota refresh failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) startLogin(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	url, err := h.control.StartLogin(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeError(w, http.StatusBadGateway, "could not start the sign-in: "+err.Error())
+		return
+	}
+	h.audit(r, "signin_started", name)
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
+}
+
+func (h *Handler) submitLogin(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req struct {
+		Code string `json:"code"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	email, err := h.control.SubmitLogin(r.Context(), name, req.Code)
+	if err != nil {
+		h.audit(r, "signin_failed", name)
+		h.fail(w, "finish sign-in", err)
+		return
+	}
+	h.audit(r, "signin_finished", name+" as "+email)
+	writeJSON(w, http.StatusOK, map[string]string{"email": email})
+}
+
+func (h *Handler) cancelLogin(w http.ResponseWriter, r *http.Request) {
+	h.control.CancelLogin(r.PathValue("name"))
+	writeJSON(w, http.StatusOK, map[string]any{})
+}

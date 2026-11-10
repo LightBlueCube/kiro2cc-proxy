@@ -45,7 +45,6 @@ type Gateway struct {
 	bridge *bridge.Server
 	snaps  *snapshotStore
 	models *catalog
-	ttl    time.Duration
 	stop   chan struct{}
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
@@ -110,7 +109,6 @@ func New(cfg Config) (*Gateway, error) {
 		bridge:   cfg.Bridge,
 		snaps:    snaps,
 		models:   newCatalog(),
-		ttl:      cfg.SnapshotTTL,
 		stop:     make(chan struct{}),
 		sessions: map[string]*session{},
 	}
@@ -121,34 +119,41 @@ func New(cfg Config) (*Gateway, error) {
 // Close stops background work. Running turns end with their processes.
 func (g *Gateway) Close() { close(g.stop) }
 
+// SetSnapshotTTL changes how long idle sessions stay reusable.
+func (g *Gateway) SetSnapshotTTL(ttl time.Duration) { g.snaps.setTTL(ttl) }
+
 func (g *Gateway) Models() []conv.ModelInfo { return g.models.list() }
 
 // Complete runs req for user (the API key's name). The channel yields
 // output events and ends with exactly one Finish or Err event. An Err
 // before any output means nothing was produced, so the HTTP layer may
 // still choose a status code.
-func (g *Gateway) Complete(ctx context.Context, user string, req conv.Request) <-chan conv.Event {
+func (g *Gateway) Complete(ctx context.Context, caller conv.Caller, req conv.Request) <-chan conv.Event {
 	out := make(chan conv.Event)
 	go func() {
 		defer close(out)
 		w := &response{ctx: ctx, out: out}
-		if err := g.serve(ctx, user, req, w); err != nil {
+		if err := g.serve(ctx, caller, req, w); err != nil {
 			w.fail(err)
 		}
 	}()
 	return out
 }
 
-func (g *Gateway) serve(ctx context.Context, user string, req conv.Request, w *response) *conv.Error {
+func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Request, w *response) *conv.Error {
 	t := newTranscript(req.Messages)
 	if err := validate(req, t); err != nil {
 		return err
 	}
-	slug, ok := g.models.resolve(req.Model, req.Effort)
+	slug, modelID, ok := g.models.resolve(req.Model, req.Effort)
 	if !ok {
 		return &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", req.Model)}
 	}
+	if !caller.Allows(modelID) {
+		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf("this API key may not use model %q", modelID)}
+	}
 
+	user := caller.Name
 	r := &run{user: user, req: req, t: t, slug: slug, group: pool.QuotaGroup(slug), exclude: map[string]bool{}, reuse: true}
 	attempts := min(maxAttempts, len(g.pool.Accounts()))
 	for attempt := 1; ; attempt++ {
@@ -500,7 +505,7 @@ func (g *Gateway) janitor() {
 		}
 		g.mu.Lock()
 		for ref, sess := range g.sessions {
-			idle := sess.turn == nil && time.Since(sess.lastUsed) > g.ttl
+			idle := sess.turn == nil && time.Since(sess.lastUsed) > g.snaps.ttl()
 			dead := sess.turn == nil && !sess.proc.Alive()
 			if idle || dead {
 				sess.binding.Close()

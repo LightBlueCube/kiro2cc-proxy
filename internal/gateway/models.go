@@ -77,27 +77,28 @@ func (c *catalog) list() []conv.ModelInfo {
 	return out
 }
 
-// resolve maps a public model id and requested effort to the full ACP slug.
-// A tier slug ("gemini-3.8-flash-high") is accepted as is.
-func (c *catalog) resolve(model, effort string) (string, bool) {
+// resolve maps a public model id and requested effort to the full ACP slug
+// and the public id. A tier slug ("gemini-3.8-flash-high") is accepted as
+// is.
+func (c *catalog) resolve(model, effort string) (slug, id string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, e := range c.entries {
 		if e.id == model {
 			if len(e.efforts) == 0 {
-				return e.id, true
+				return e.id, e.id, true
 			}
-			return e.id + "-" + pickEffort(effort, e.efforts), true
+			return e.id + "-" + pickEffort(effort, e.efforts), e.id, true
 		}
 	}
 	if m := tierPattern.FindStringSubmatch(model); m != nil {
 		for _, e := range c.entries {
 			if e.id == m[1] && slices.Contains(e.efforts, m[2]) {
-				return model, true
+				return model, e.id, true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // pickEffort maps a requested effort onto the available tiers: the wanted

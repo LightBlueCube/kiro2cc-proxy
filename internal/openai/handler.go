@@ -22,7 +22,7 @@ const (
 
 // Backend runs completions.
 type Backend interface {
-	Complete(ctx context.Context, user string, req conv.Request) <-chan conv.Event
+	Complete(ctx context.Context, caller conv.Caller, req conv.Request) <-chan conv.Event
 	Models() []conv.ModelInfo
 }
 
@@ -32,8 +32,8 @@ type Handler struct {
 
 func NewHandler(backend Backend) *Handler { return &Handler{backend: backend} }
 
-// Models serves GET /v1/models.
-func (h *Handler) Models(w http.ResponseWriter, r *http.Request) {
+// Models serves GET /v1/models: the models the caller may use.
+func (h *Handler) Models(w http.ResponseWriter, r *http.Request, caller conv.Caller) {
 	type model struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -42,7 +42,9 @@ func (h *Handler) Models(w http.ResponseWriter, r *http.Request) {
 	}
 	data := []model{}
 	for _, m := range h.backend.Models() {
-		data = append(data, model{ID: m.ID, Object: "model", OwnedBy: "antigravity"})
+		if caller.Allows(m.ID) {
+			data = append(data, model{ID: m.ID, Object: "model", OwnedBy: "antigravity"})
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -56,8 +58,8 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// Chat serves POST /v1/chat/completions for the authenticated user.
-func (h *Handler) Chat(w http.ResponseWriter, r *http.Request, user string) {
+// Chat serves POST /v1/chat/completions for the authenticated caller.
+func (h *Handler) Chat(w http.ResponseWriter, r *http.Request, caller conv.Caller) {
 	var wire chatRequest
 	if !decodeBody(w, r, &wire) {
 		return
@@ -69,7 +71,7 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request, user string) {
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	events := h.backend.Complete(ctx, user, req)
+	events := h.backend.Complete(ctx, caller, req)
 	meta := chatMeta{id: "chatcmpl-" + rand.Text(), model: wire.Model, created: time.Now().Unix(), hideReasoning: wire.hideReasoning()}
 	if wire.Stream {
 		includeUsage := wire.StreamOptions != nil && wire.StreamOptions.IncludeUsage
@@ -317,6 +319,8 @@ func statusFor(kind conv.ErrorKind) (int, string) {
 		return http.StatusBadRequest, "invalid_request_error"
 	case conv.ErrUnauthorized:
 		return http.StatusUnauthorized, "invalid_api_key"
+	case conv.ErrForbidden:
+		return http.StatusForbidden, "permission_denied"
 	case conv.ErrUnknownModel:
 		return http.StatusNotFound, "model_not_found"
 	case conv.ErrQuota:

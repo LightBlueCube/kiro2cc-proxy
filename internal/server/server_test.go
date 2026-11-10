@@ -3,7 +3,6 @@ package server
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -17,6 +16,7 @@ import (
 
 	"agyrelay/internal/agy/agytest"
 	"agyrelay/internal/bridge"
+	"agyrelay/internal/conv"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/openai"
 	"agyrelay/internal/pool"
@@ -31,6 +31,13 @@ func TestMain(m *testing.M) {
 }
 
 const testKey = "sk-test"
+
+type staticKeys map[string]conv.Caller
+
+func (k staticKeys) Lookup(token string) (conv.Caller, bool) {
+	caller, ok := k[token]
+	return caller, ok
+}
 
 type relay struct {
 	t   *testing.T
@@ -60,7 +67,7 @@ func newRelay(t *testing.T) *relay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New([]Key{{Name: "alice", SHA256: sha256.Sum256([]byte(testKey))}}, openai.NewHandler(gw)))
+	srv := httptest.NewServer(New(Config{Keys: staticKeys{testKey: {Name: "alice"}}, OpenAI: openai.NewHandler(gw)}))
 	t.Cleanup(func() {
 		srv.Close()
 		gw.Close()

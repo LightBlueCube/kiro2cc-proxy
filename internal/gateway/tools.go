@@ -44,6 +44,10 @@ func bridgeTools(tools []conv.ToolSpec) []bridge.Tool {
 	return out
 }
 
+// IdleProfile is the profile of requests without client tools; account
+// probes use its process.
+func IdleProfile() agy.Profile { return profileFor(nil) }
+
 // profileFor is the agent profile whose eager tool list matches tools.
 func profileFor(tools []conv.ToolSpec) agy.Profile {
 	names := []string{pollToolName}

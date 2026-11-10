@@ -11,6 +11,13 @@
 //
 // Anything else gets a thought and "reply to: <input>".
 //
+// With --login the fake signs in like `agy acp --login`: it prints a
+// Google link and accepts LoginCode.
+//
+// Its language server also answers GetUserStatus and
+// RetrieveUserQuotaSummary; the gemini-weekly bucket loses
+// QuotaPerPrompt for every prompt the process served.
+//
 // Like agy, the fake runs a language server with the session's steps
 // (stored in its conversation file) and logs its port. After
 // RevertToCascadeStep the next prompt replies "stale stream" unless the
@@ -30,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +57,30 @@ const EnvRun = "FAKE_AGY"
 
 // QuotaNotice is agy's exhausted-quota reply.
 const QuotaNotice = "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours."
+
+// LoginCode is the authorization code the fake login accepts; it signs in
+// LoginEmail.
+const (
+	LoginCode  = "4/fake-code"
+	LoginEmail = "fake@example.com"
+)
+
+// QuotaPerPrompt is the gemini-weekly share each prompt uses.
+const QuotaPerPrompt = 0.01
+
+func login() {
+	fmt.Println("Open this link in a browser to log in with Google:")
+	fmt.Println()
+	fmt.Println("  https://accounts.google.com/o/oauth2/auth?client_id=fake&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback")
+	fmt.Println()
+	fmt.Println("Then paste the authorization code, or the full URL of the page you land on, and press Enter:")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	if strings.TrimSpace(line) != LoginCode {
+		fmt.Println(`couldn't log in: token exchange failed: oauth2: "invalid_grant" "Bad Request"`)
+		os.Exit(1)
+	}
+	fmt.Printf("Logged in as %s.\n", LoginEmail)
+}
 
 // Models is the catalog the fake reports.
 var Models = []map[string]string{
@@ -70,6 +102,7 @@ type fake struct {
 	mu       sync.Mutex
 	sessions map[string]*fakeSession
 	nextID   int
+	prompts  int
 }
 
 type fakeSession struct {
@@ -95,6 +128,10 @@ func Main() {
 		if arg == "--process-per-session" {
 			f.perSession = true
 		}
+	}
+	if slices.Contains(os.Args, "--login") {
+		login()
+		return
 	}
 	if f.perSession {
 		f.appendLog("acp-front", fmt.Sprintf("front: started worker 1 (pid %d)", os.Getpid()))
@@ -294,6 +331,27 @@ func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	switch r.PathValue("method") {
+	case "GetUserStatus":
+		writeJSON(w, map[string]any{"userStatus": map[string]any{
+			"email": LoginEmail, "name": "Fake User",
+			"planStatus": map[string]any{"planInfo": map[string]any{"planName": "Pro"}},
+			"userTier":   map[string]any{"name": "Google AI Pro"},
+		}})
+		return
+	case "RetrieveUserQuotaSummary":
+		reset := time.Now().Add(72 * time.Hour).UTC().Format(time.RFC3339)
+		writeJSON(w, map[string]any{"response": map[string]any{"groups": []any{
+			map[string]any{"displayName": "Gemini Models", "buckets": []any{
+				map[string]any{"bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": 1 - QuotaPerPrompt*float64(f.prompts), "resetTime": reset},
+				map[string]any{"bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining", "window": "5h", "remainingFraction": 1, "resetTime": reset},
+			}},
+			map[string]any{"displayName": "Claude and GPT models", "buckets": []any{
+				map[string]any{"bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": 1, "resetTime": reset},
+			}},
+		}}})
+		return
+	}
 	s := f.sessions[req.CascadeID]
 	if s == nil {
 		http.Error(w, "run state not found", http.StatusInternalServerError)
@@ -315,6 +373,12 @@ func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(raw)
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	raw, _ := json.Marshal(v)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(raw)
 }
@@ -356,6 +420,7 @@ func (f *fake) prompt(msg rpcMessage) {
 
 	f.mu.Lock()
 	stepsBefore, stale := len(s.steps), s.stale
+	f.prompts++
 	f.mu.Unlock()
 	f.addSteps(p.SessionID, s, stepUserInput)
 	text, err := f.respond(ctx, s, p.SessionID, input)

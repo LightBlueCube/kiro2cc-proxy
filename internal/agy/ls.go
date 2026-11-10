@@ -75,6 +75,11 @@ func (p *Proc) lsCall(ctx context.Context, sessionID, method string, params, out
 	if err != nil {
 		return fmt.Errorf("find language server of session %s: %w", sessionID, err)
 	}
+	return lsPost(ctx, port, method, params, out)
+}
+
+// lsPost calls method on the language server at port.
+func lsPost(ctx context.Context, port, method string, params, out any) error {
 	body, err := json.Marshal(params)
 	if err != nil {
 		return err
@@ -102,6 +107,57 @@ func (p *Proc) lsCall(ctx context.Context, sessionID, method string, params, out
 		return fmt.Errorf("language server %s: %w", method, err)
 	}
 	return nil
+}
+
+// errNoLanguageServer means the process has not started one yet: agy
+// starts it with the first session.
+var errNoLanguageServer = errors.New("no language server yet")
+
+// accountCall calls an account-level method on any of the process's
+// language servers, newest first; under --process-per-session workers
+// retire, so earlier ones may be gone.
+func (p *Proc) accountCall(ctx context.Context, method string, out any) error {
+	ports, err := p.lsPorts()
+	if err != nil {
+		return err
+	}
+	if len(ports) == 0 {
+		return errNoLanguageServer
+	}
+	var errs []error
+	for _, port := range ports {
+		err := lsPost(ctx, port, method, map[string]any{}, out)
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// lsPorts lists the process's language server ports, newest first.
+func (p *Proc) lsPorts() ([]string, error) {
+	pid := p.cmd.Process.Pid
+	if !p.cfg.ProcessPerSession {
+		port, err := p.listenPort("acp-server", pid)
+		if err != nil {
+			return nil, nil // not started yet
+		}
+		return []string{port}, nil
+	}
+	front, err := p.readLog("acp-front", pid)
+	if err != nil {
+		return nil, err
+	}
+	var ports []string
+	started := startedWorker.FindAllStringSubmatch(front, -1)
+	for i := len(started) - 1; i >= 0; i-- {
+		workerPid, _ := strconv.Atoi(started[i][2])
+		if port, err := p.listenPort("acp-worker", workerPid); err == nil {
+			ports = append(ports, port)
+		}
+	}
+	return ports, nil
 }
 
 // lsPort finds the HTTP port of the language server holding the session.

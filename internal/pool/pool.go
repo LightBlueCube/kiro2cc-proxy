@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agyrelay/internal/agy"
@@ -45,8 +46,11 @@ type Config struct {
 var ErrNoAccount = errors.New("no Antigravity account available")
 
 type Pool struct {
-	cfg      Config
-	log      *slog.Logger
+	cfg             Config
+	log             *slog.Logger
+	turnsPerAccount atomic.Int64
+
+	mu       sync.RWMutex
 	accounts []*Account
 }
 
@@ -59,11 +63,27 @@ type Account struct {
 	workspace string
 	env       []string
 
-	mu       sync.Mutex
-	turns    int
+	mu    sync.Mutex
+	turns int
+	// paused is set by the admin; disabled by a failed sign-in.
+	paused   bool
 	disabled error
+	// removed accounts start no processes.
+	removed  bool
 	cooldown map[string]time.Time
 	procs    map[string]*procSlot
+}
+
+// Status is a point-in-time view of an account.
+type Status struct {
+	Name     string
+	Paused   bool
+	Disabled string
+	// Cooldowns maps quota groups to the end of their cooldown.
+	Cooldowns map[string]time.Time
+	Turns     int
+	// Procs counts live agy processes.
+	Procs int
 }
 
 // procSlot single-flights the start of one (account, profile) process.
@@ -76,42 +96,87 @@ type procSlot struct {
 var accountName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 func New(cfg Config) (*Pool, error) {
-	if len(cfg.Accounts) == 0 {
-		return nil, errors.New("no accounts configured")
-	}
 	p := &Pool{cfg: cfg, log: cfg.Log}
-	seen := map[string]bool{}
+	p.turnsPerAccount.Store(int64(cfg.TurnsPerAccount))
 	for _, ac := range cfg.Accounts {
-		if !accountName.MatchString(ac.Name) || seen[ac.Name] {
-			return nil, fmt.Errorf("invalid or duplicate account name %q", ac.Name)
+		if _, err := p.Add(ac); err != nil {
+			return nil, err
 		}
-		seen[ac.Name] = true
-		home, err := filepath.Abs(ac.Home)
-		if err != nil {
-			return nil, fmt.Errorf("account %s: %w", ac.Name, err)
-		}
-		a := &Account{
-			pool:      p,
-			name:      ac.Name,
-			home:      home,
-			geminiDir: filepath.Join(home, ".gemini"),
-			workspace: filepath.Join(home, "workspace"),
-			env:       ac.Env,
-			cooldown:  map[string]time.Time{},
-			procs:     map[string]*procSlot{},
-		}
-		if err := os.MkdirAll(a.workspace, 0o700); err != nil {
-			return nil, fmt.Errorf("account %s: %w", ac.Name, err)
-		}
-		p.accounts = append(p.accounts, a)
 	}
 	return p, nil
 }
 
-func (p *Pool) Accounts() []*Account { return p.accounts }
+// ValidAccountName reports whether name can name an account (and its
+// directory).
+func ValidAccountName(name string) bool { return accountName.MatchString(name) && len(name) <= 64 }
+
+// Add registers an account and creates its directories.
+func (p *Pool) Add(ac AccountConfig) (*Account, error) {
+	if !ValidAccountName(ac.Name) {
+		return nil, fmt.Errorf("invalid account name %q", ac.Name)
+	}
+	home, err := filepath.Abs(ac.Home)
+	if err != nil {
+		return nil, fmt.Errorf("account %s: %w", ac.Name, err)
+	}
+	a := &Account{
+		pool:      p,
+		name:      ac.Name,
+		home:      home,
+		geminiDir: filepath.Join(home, ".gemini"),
+		workspace: filepath.Join(home, "workspace"),
+		env:       ac.Env,
+		cooldown:  map[string]time.Time{},
+		procs:     map[string]*procSlot{},
+	}
+	if err := os.MkdirAll(a.workspace, 0o700); err != nil {
+		return nil, fmt.Errorf("account %s: %w", ac.Name, err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.accountLocked(ac.Name) != nil {
+		return nil, fmt.Errorf("duplicate account name %q", ac.Name)
+	}
+	p.accounts = append(p.accounts, a)
+	return a, nil
+}
+
+// Remove unregisters an account and kills its processes; turns running
+// there fail. Its directory stays.
+func (p *Pool) Remove(name string) error {
+	p.mu.Lock()
+	a := p.accountLocked(name)
+	if a == nil {
+		p.mu.Unlock()
+		return fmt.Errorf("no account %q", name)
+	}
+	p.accounts = slices.DeleteFunc(p.accounts, func(x *Account) bool { return x == a })
+	p.mu.Unlock()
+	a.mu.Lock()
+	a.removed = true
+	a.mu.Unlock()
+	a.killProcs()
+	return nil
+}
+
+// SetTurnsPerAccount changes the per-account turn cap; turns running
+// above a lowered cap finish normally.
+func (p *Pool) SetTurnsPerAccount(n int) { p.turnsPerAccount.Store(int64(n)) }
+
+func (p *Pool) Accounts() []*Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return slices.Clone(p.accounts)
+}
 
 // Account finds an account by name.
 func (p *Pool) Account(name string) *Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.accountLocked(name)
+}
+
+func (p *Pool) accountLocked(name string) *Account {
 	for _, a := range p.accounts {
 		if a.name == name {
 			return a
@@ -126,7 +191,7 @@ func (p *Pool) Account(name string) *Account {
 // it is healthy and moves to the same fallback when it is not. The caller
 // must Release the slot.
 func (p *Pool) Pick(user, group string, exclude map[string]bool) (*Account, error) {
-	ranked := slices.Clone(p.accounts)
+	ranked := p.Accounts()
 	slices.SortFunc(ranked, func(a, b *Account) int {
 		ra, rb := rendezvous(user, a.name), rendezvous(user, b.name)
 		switch {
@@ -179,7 +244,7 @@ func (a *Account) TryAcquire(group string) error {
 	if err := a.unavailableLocked(group); err != nil {
 		return err
 	}
-	if a.turns >= a.pool.cfg.TurnsPerAccount {
+	if int64(a.turns) >= a.pool.turnsPerAccount.Load() {
 		return errors.New("all turn slots busy")
 	}
 	a.turns++
@@ -202,6 +267,9 @@ func (a *Account) Available(group string) error {
 }
 
 func (a *Account) unavailableLocked(group string) error {
+	if a.paused {
+		return errors.New("paused by the admin")
+	}
 	if a.disabled != nil {
 		return a.disabled
 	}
@@ -230,11 +298,81 @@ func (a *Account) Disable(reason error) {
 	a.pool.log.Error("account disabled", "account", a.name, "reason", reason)
 }
 
+// SignedIn returns a disabled account to rotation after a new sign-in.
+// Its processes are killed so the next turn starts with the new token.
+func (a *Account) SignedIn() {
+	a.mu.Lock()
+	a.disabled = nil
+	a.mu.Unlock()
+	a.killProcs()
+	a.pool.log.Info("account signed in", "account", a.name)
+}
+
+func (a *Account) SetPaused(paused bool) {
+	a.mu.Lock()
+	a.paused = paused
+	a.mu.Unlock()
+}
+
+// Home is the account's HOME directory.
+func (a *Account) Home() string { return a.home }
+
+// Env is the account's extra agy environment.
+func (a *Account) Env() []string { return a.env }
+
+func (a *Account) Status() Status {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	st := Status{Name: a.name, Paused: a.paused, Turns: a.turns, Cooldowns: map[string]time.Time{}}
+	if a.disabled != nil {
+		st.Disabled = a.disabled.Error()
+	}
+	now := time.Now()
+	for group, until := range a.cooldown {
+		if now.Before(until) {
+			st.Cooldowns[group] = until
+		}
+	}
+	for _, slot := range a.procs {
+		if slot.proc != nil && slot.proc.Alive() {
+			st.Procs++
+		}
+	}
+	return st
+}
+
+// LiveProcs returns the account's running agy processes.
+func (a *Account) LiveProcs() []*agy.Proc {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []*agy.Proc
+	for _, slot := range a.procs {
+		if slot.proc != nil && slot.proc.Alive() {
+			out = append(out, slot.proc)
+		}
+	}
+	return out
+}
+
+func (a *Account) killProcs() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, slot := range a.procs {
+		if slot.proc != nil {
+			slot.proc.Kill()
+		}
+	}
+}
+
 // Proc returns the live process for profile, starting it when needed.
 // Concurrent callers share one start.
 func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, error) {
 	for {
 		a.mu.Lock()
+		if a.removed {
+			a.mu.Unlock()
+			return nil, fmt.Errorf("account %s was removed", a.name)
+		}
 		slot := a.procs[profile.Name]
 		if slot != nil && slot.starting != nil {
 			starting := slot.starting
@@ -262,6 +400,10 @@ func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, err
 
 		proc, err := a.startProc(ctx, profile)
 		a.mu.Lock()
+		if err == nil && a.removed {
+			proc.Kill()
+			proc, err = nil, fmt.Errorf("account %s was removed", a.name)
+		}
 		slot.proc, slot.err = proc, err
 		close(slot.starting)
 		slot.starting = nil
@@ -297,14 +439,8 @@ func (a *Account) startProc(ctx context.Context, profile agy.Profile) (*agy.Proc
 
 // Close kills every process of every account.
 func (p *Pool) Close() {
-	for _, a := range p.accounts {
-		a.mu.Lock()
-		for _, slot := range a.procs {
-			if slot.proc != nil {
-				slot.proc.Kill()
-			}
-		}
-		a.mu.Unlock()
+	for _, a := range p.Accounts() {
+		a.killProcs()
 	}
 }
 

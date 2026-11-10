@@ -90,7 +90,7 @@ type result struct {
 func (h *harness) complete(ctx context.Context, user string, req conv.Request) result {
 	h.t.Helper()
 	var r result
-	for ev := range h.gw.Complete(ctx, user, req) {
+	for ev := range h.gw.Complete(ctx, conv.Caller{Name: user}, req) {
 		r.text += ev.Text
 		r.reasoning += ev.Reasoning
 		r.calls = append(r.calls, ev.ToolCalls...)
