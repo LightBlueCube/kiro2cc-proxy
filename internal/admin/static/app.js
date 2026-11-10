@@ -318,6 +318,8 @@ views.settings = container => {
     const ttl = h("input", { value: s.snapshot_ttl, pattern: "[0-9hms.]+" });
     const level = h("select", {}, ["debug", "info", "warn", "error"].map(l => h("option", { value: l, selected: l === s.log_level }, l)));
     const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
+    const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
+    const direct = h("input", { type: "checkbox", checked: s.allow_direct });
 
     const priceRows = h("tbody");
     const number = value => h("input", { type: "number", min: 0, step: "any", value, style: "width:90px" });
@@ -341,6 +343,7 @@ views.settings = container => {
         await api("PUT", "settings", {
           turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, log_level: level.value,
           retention_days: Number(retention.value), prices: [...priceRows.children].map(row => row.read()),
+          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
         });
         toast("Saved");
         await loadGeneral();
@@ -352,9 +355,14 @@ views.settings = container => {
         h("label", {}, "Log level", level),
         h("label", {}, "Keep call records (days)", retention)),
       h("p", { class: "muted" }, `Process per session: ${s.process_per_session ? "on" : "off"} (set in the config file; needs a restart).`),
+      h("h3", {}, "Outbound traffic"),
+      h("div", { class: "row" },
+        h("label", { class: "grow", title: "Carries the traffic of accounts without their own proxy" }, "Fallback HTTP proxy", fallback),
+        h("label", { class: "check" }, direct, "Allow direct connections for accounts with no proxy at all")),
+      h("p", { class: "muted" }, "Every agy connects only to agyrelay's local egress proxy, which forwards through the account's proxy, else the fallback proxy, else directly when allowed. Otherwise the connection is refused and the account is blocked, so a forgotten proxy never turns into a direct connection. Leave direct off unless this server is abroad."),
       h("details", { class: "prices" },
         h("summary", {}, `API list prices (${s.prices.length} models, USD per 1M tokens)`),
-        h("p", { class: "muted" }, "Used for the list-price estimate of each call. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10; gpt-oss-120b has no official price."),
+        h("p", { class: "muted" }, "Used for the list-price estimate of each call. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10; gpt-oss-120b uses Google Vertex's price as listed on OpenRouter. agy reports no cache writes, so they count as plain input."),
         h("datalist", { id: "price-models" }, catalog.map(m => h("option", { value: m.id }))),
         h("div", { class: "table-wrap" }, h("table", {},
           h("thead", {}, h("tr", {}, ["Model", "Input", "Cached input", "Output", ""].map(t => h("th", {}, t)))),
@@ -438,8 +446,8 @@ views.accounts = container => {
     h("button", { type: "submit" }, "Add and sign in"));
 
   function editProxy(a, button) {
-    const value = prompt(`HTTP proxy for ${a.name}, e.g. http://127.0.0.1:7890 (empty = direct).\n`
-      + "Changing it restarts the account's agy; turns running there fail.", a.proxy);
+    const value = prompt(`HTTP proxy for ${a.name}, e.g. http://127.0.0.1:7890 (empty = the fallback in Settings).\n`
+      + "Open connections close and agy reconnects through the new route.", a.proxy);
     if (value === null) return;
     guarded(async () => {
       await api("PUT", `accounts/${encodeURIComponent(a.name)}/proxy`, { proxy: value });
@@ -489,6 +497,7 @@ views.accounts = container => {
   function status(a) {
     if (a.paused) return h("span", { class: "badge warn" }, "paused");
     if (a.disabled) return h("span", { class: "badge bad", title: a.disabled }, "needs sign-in");
+    if (a.blocked) return h("span", { class: "badge bad", title: a.blocked }, "no proxy");
     if (Object.keys(a.cooldowns).length) return h("span", { class: "badge warn" }, "cooling down");
     if (!a.user) return h("span", { class: "badge muted" }, "not checked");
     return h("span", { class: "badge ok" }, "ready");
@@ -514,10 +523,11 @@ views.accounts = container => {
       h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), status(a)),
       a.user ? h("p", {}, `${a.user.email} · ${a.user.tier || a.user.plan}`) : null,
       a.disabled ? h("p", { class: "bad" }, a.disabled) : null,
+      a.blocked ? h("p", { class: "bad" }, a.blocked) : null,
       Object.entries(a.cooldowns).map(([group, until]) => h("p", { class: "warn" }, `${group} quota cooling down for ${fmt.until(until)}`)),
       a.sample_error ? h("p", { class: "bad mono" }, `Quota check failed: ${a.sample_error}`) : null,
       h("p", { class: "muted" }, `${a.turns} turn(s) running · ${a.procs} agy process(es) · quota checked ${a.sampled_at ? fmt.time(a.sampled_at) : "never"}`
-        + ` · proxy: ${a.proxy || "direct"}`
+        + ` · traffic: ${a.route || "unknown"}${a.proxy ? "" : " (no own proxy)"}`
         + (a.env_names.length ? ` · env: ${a.env_names.join(", ")}` : "")),
       quota(a),
       signinPanel(a),

@@ -28,7 +28,8 @@ type AccountConfig struct {
 	Home string
 	// Env is extra environment for the account's agy.
 	Env []string
-	// Proxy is the HTTP proxy for agy's traffic ("" = direct).
+	// Proxy is the HTTP proxy URL agy's traffic goes to (the relay's
+	// egress proxy); "" leaves agy's environment without one.
 	Proxy string
 }
 
@@ -65,12 +66,15 @@ type Account struct {
 	workspace string
 	env       []string
 
-	mu    sync.Mutex
 	proxy string
+
+	mu    sync.Mutex
 	turns int
-	// paused is set by the admin; disabled by a failed sign-in.
+	// paused is set by the admin; disabled by a failed sign-in; blocked
+	// by the control plane (no route for the account's traffic).
 	paused   bool
 	disabled error
+	blocked  error
 	// removed accounts start no processes.
 	removed  bool
 	cooldown map[string]time.Time
@@ -82,6 +86,7 @@ type Status struct {
 	Name     string
 	Paused   bool
 	Disabled string
+	Blocked  string
 	// Cooldowns maps quota groups to the end of their cooldown.
 	Cooldowns map[string]time.Time
 	Turns     int
@@ -277,6 +282,9 @@ func (a *Account) unavailableLocked(group string) error {
 	if a.disabled != nil {
 		return a.disabled
 	}
+	if a.blocked != nil {
+		return a.blocked
+	}
 	if until, ok := a.cooldown[group]; ok {
 		if time.Now().Before(until) {
 			return fmt.Errorf("%s quota cooling down until %s", group, until.Format(time.RFC3339))
@@ -325,23 +333,25 @@ func (a *Account) Home() string { return a.home }
 // last, so they win over same-named extras. agy 1.5.3 sends all its
 // traffic, sign-in included, through them; loopback stays direct.
 func (a *Account) Env() []string {
-	a.mu.Lock()
-	proxy := a.proxy
-	a.mu.Unlock()
-	if proxy == "" {
+	if a.proxy == "" {
 		return a.env
 	}
-	return append(slices.Clip(a.env), "HTTPS_PROXY="+proxy, "HTTP_PROXY="+proxy)
+	return append(slices.Clip(a.env), "HTTPS_PROXY="+a.proxy, "HTTP_PROXY="+a.proxy)
 }
 
-// SetProxy changes the account's proxy. Its processes are killed, so
-// turns running there fail and the next turn starts agy with the proxy.
-func (a *Account) SetProxy(proxy string) {
+// SetBlocked takes the account out of rotation while reason is set (e.g.
+// its traffic has no route); nil returns it.
+func (a *Account) SetBlocked(reason error) {
 	a.mu.Lock()
-	a.proxy = proxy
+	a.blocked = reason
 	a.mu.Unlock()
-	a.killProcs()
-	a.pool.log.Info("account proxy changed", "account", a.name)
+}
+
+// Blocked is the reason set by SetBlocked, or nil.
+func (a *Account) Blocked() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.blocked
 }
 
 func (a *Account) Status() Status {
@@ -350,6 +360,9 @@ func (a *Account) Status() Status {
 	st := Status{Name: a.name, Paused: a.paused, Turns: a.turns, Cooldowns: map[string]time.Time{}}
 	if a.disabled != nil {
 		st.Disabled = a.disabled.Error()
+	}
+	if a.blocked != nil {
+		st.Blocked = a.blocked.Error()
 	}
 	now := time.Now()
 	for group, until := range a.cooldown {

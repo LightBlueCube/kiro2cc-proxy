@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"agyrelay/internal/conv"
+	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
@@ -40,6 +41,12 @@ type Settings struct {
 	RetentionDays int `json:"retention_days"`
 	// Prices are the list prices that estimate each request's API cost.
 	Prices []usage.Price `json:"prices"`
+	// FallbackProxy carries the traffic of accounts without their own
+	// proxy ("" = none).
+	FallbackProxy string `json:"fallback_proxy"`
+	// AllowDirect lets accounts with no proxy at all connect directly
+	// (a server abroad); otherwise their traffic is refused.
+	AllowDirect bool `json:"allow_direct"`
 }
 
 func defaultSettings() Settings {
@@ -61,6 +68,9 @@ func (s Settings) validate() error {
 	}
 	if s.RetentionDays < 1 || s.RetentionDays > 3650 {
 		return errors.New("retention_days must be between 1 and 3650")
+	}
+	if clean, err := cleanProxy(s.FallbackProxy); err != nil || clean != s.FallbackProxy {
+		return errors.New("fallback_proxy must be empty or an http:// URL with a host and port, e.g. http://127.0.0.1:7890")
 	}
 	return usage.ValidatePrices(s.Prices)
 }
@@ -95,6 +105,8 @@ type Config struct {
 	Monitor  *usage.Monitor
 	Recorder *usage.Recorder
 	Budget   *usage.Budget
+	// Egress carries every account's agy traffic.
+	Egress *egress.Server
 	// AgyBin runs sign-ins.
 	AgyBin string
 	// Level is the process log level, changed with the setting.
@@ -123,7 +135,7 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 		return nil, err
 	}
 	for _, a := range accounts {
-		account, err := cfg.Pool.Add(pool.AccountConfig{Name: a.Name, Home: c.accountHome(a.Name), Env: a.Env, Proxy: a.Proxy})
+		account, err := c.addToPool(a.Name, a.Env, a.Proxy)
 		if err != nil {
 			return nil, err
 		}
@@ -145,6 +157,11 @@ func (c *Control) Settings() Settings {
 
 // UpdateSettings validates, stores, and applies s.
 func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
+	clean, err := cleanProxy(s.FallbackProxy)
+	if err != nil {
+		return err
+	}
+	s.FallbackProxy = clean
 	if err := s.validate(); err != nil {
 		return &InputError{err.Error()}
 	}
@@ -158,6 +175,46 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
+	return c.applyRoutes(ctx)
+}
+
+// ErrNoRoute blocks an account whose traffic would have nowhere to go.
+var ErrNoRoute = errors.New("no proxy: set one for the account or a fallback proxy in Settings, or allow direct connections")
+
+// routeFor picks where an account's traffic goes: its own proxy, the
+// fallback proxy, a direct connection when allowed, or nowhere.
+func routeFor(accountProxy string, s Settings) egress.Route {
+	switch {
+	case accountProxy != "":
+		return egress.Route{Proxy: accountProxy}
+	case s.FallbackProxy != "":
+		return egress.Route{Proxy: s.FallbackProxy}
+	case s.AllowDirect:
+		return egress.Route{Direct: true}
+	}
+	return egress.Route{}
+}
+
+// applyRoute sets the account's egress route and blocks the account when
+// it has none.
+func (c *Control) applyRoute(account *pool.Account, accountProxy string) {
+	route := routeFor(accountProxy, c.Settings())
+	c.cfg.Egress.SetRoute(account.Name(), route)
+	if route.Refused() {
+		account.SetBlocked(ErrNoRoute)
+		return
+	}
+	account.SetBlocked(nil)
+}
+
+func (c *Control) applyRoutes(ctx context.Context) error {
+	records, err := c.AccountRecords(ctx)
+	if err != nil {
+		return err
+	}
+	for _, account := range c.cfg.Pool.Accounts() {
+		c.applyRoute(account, records[account.Name()].Proxy)
+	}
 	return nil
 }
 
@@ -206,13 +263,26 @@ func (c *Control) AddAccount(ctx context.Context, name string, env []string, pro
 	if err != nil {
 		return nil, err
 	}
-	account, err := c.cfg.Pool.Add(pool.AccountConfig{Name: name, Home: c.accountHome(name), Env: env, Proxy: proxy})
+	account, err := c.addToPool(name, env, proxy)
 	if err != nil {
 		if rmErr := c.cfg.Store.RemoveAccount(ctx, name); rmErr != nil {
 			c.log.Error("account half-added", "account", name, "err", rmErr)
 		}
 		return nil, err
 	}
+	return account, nil
+}
+
+// addToPool registers the account with the egress proxy and the pool;
+// its agy talks only to the egress proxy, which routes by accountProxy.
+func (c *Control) addToPool(name string, env []string, accountProxy string) (*pool.Account, error) {
+	egressURL := c.cfg.Egress.Register(name)
+	account, err := c.cfg.Pool.Add(pool.AccountConfig{Name: name, Home: c.accountHome(name), Env: env, Proxy: egressURL})
+	if err != nil {
+		c.cfg.Egress.Forget(name)
+		return nil, err
+	}
+	c.applyRoute(account, accountProxy)
 	return account, nil
 }
 
@@ -228,8 +298,9 @@ func (c *Control) SetAccountPaused(ctx context.Context, name string, paused bool
 	return nil
 }
 
-// SetAccountProxy changes the account's proxy ("" = direct) and restarts
-// its agy; turns running there fail.
+// SetAccountProxy changes the account's own proxy ("" = use the fallback
+// route). Open connections close and agy reconnects through the new
+// route; agy keeps running.
 func (c *Control) SetAccountProxy(ctx context.Context, name, proxy string) error {
 	account := c.cfg.Pool.Account(name)
 	if account == nil {
@@ -242,7 +313,7 @@ func (c *Control) SetAccountProxy(ctx context.Context, name, proxy string) error
 	if err := c.cfg.Store.SetAccountProxy(ctx, name, proxy); err != nil {
 		return err
 	}
-	account.SetProxy(proxy)
+	c.applyRoute(account, proxy)
 	return nil
 }
 
@@ -269,7 +340,11 @@ func (c *Control) RemoveAccount(ctx context.Context, name string) error {
 	}
 	c.CancelLogin(name)
 	c.cfg.Monitor.Forget(name)
-	return c.cfg.Pool.Remove(name)
+	if err := c.cfg.Pool.Remove(name); err != nil {
+		return err
+	}
+	c.cfg.Egress.Forget(name)
+	return nil
 }
 
 // AccountRecords returns the stored side of the accounts (env, creation
@@ -338,7 +413,10 @@ func (c *Control) UpdateKey(ctx context.Context, id int64, u store.KeyUpdate) er
 	return c.reloadKeys(ctx)
 }
 
-// KeyUses is every key's quota use over the last week by quota group.
+// Egress is the account's outbound traffic and route.
+func (c *Control) Egress(account string) (egress.Stats, bool) { return c.cfg.Egress.Stats(account) }
+
+// KeyUses is every key's total quota use by quota group.
 func (c *Control) KeyUses(ctx context.Context) (map[string]map[string]usage.Use, error) {
 	return c.cfg.Budget.Uses(ctx, "")
 }

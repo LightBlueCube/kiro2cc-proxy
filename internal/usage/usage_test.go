@@ -19,8 +19,8 @@ func TestPrices(t *testing.T) {
 	if p, ok := priceOf(DefaultPrices, "gemini-4-argon"); !ok || p.Input != 2 {
 		t.Fatalf("argon = %+v %v", p, ok)
 	}
-	if _, ok := priceOf(DefaultPrices, "gpt-oss-120b"); ok {
-		t.Fatal("gpt-oss-120b has a price")
+	if _, ok := priceOf(DefaultPrices, "gpt-oss-120b-medium"); ok {
+		t.Fatal("a model without a price has one")
 	}
 	if err := ValidatePrices(append(slices.Clone(DefaultPrices), Price{Model: "gemini-4-argon"})); err == nil {
 		t.Fatal("a second price for a model passed")

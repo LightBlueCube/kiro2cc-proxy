@@ -22,6 +22,7 @@ import (
 	"agyrelay/internal/admin"
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/control"
+	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/logbuf"
 	"agyrelay/internal/openai"
@@ -121,6 +122,11 @@ func runServe(args []string) error {
 	usageLog := log.With("component", "usage")
 	recorder := usage.NewRecorder(st, settings.Prices, usageLog)
 	budget := usage.NewBudget(st)
+	outbound, err := egress.Start(log.With("component", "egress"))
+	if err != nil {
+		return err
+	}
+	defer outbound.Close()
 	gw, err := gateway.New(gateway.Config{
 		Pool:        accountPool,
 		Bridge:      tools,
@@ -142,7 +148,7 @@ func runServe(args []string) error {
 	go monitor.Run(ctx)
 
 	ctl, err := control.New(ctx, control.Config{
-		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, AgyBin: cfg.AgyBin, Level: level,
+		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, AgyBin: cfg.AgyBin, Level: level,
 		AccountsDir: cfg.accountsDir(), Settings: settings, Log: log.With("component", "control"),
 	})
 	if err != nil {
