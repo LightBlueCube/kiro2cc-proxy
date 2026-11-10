@@ -413,6 +413,36 @@ func (c *Control) UpdateKey(ctx context.Context, id int64, u store.KeyUpdate) er
 	return c.reloadKeys(ctx)
 }
 
+// Sessions lists the gateway's ACP sessions.
+func (c *Control) Sessions() []gateway.SessionInfo { return c.cfg.Gateway.Sessions() }
+
+func (c *Control) CancelTurn(account, sessionID string) error {
+	return notFound(c.cfg.Gateway.CancelTurn(account, sessionID))
+}
+
+func (c *Control) CloseSession(ctx context.Context, account, sessionID string) error {
+	return notFound(c.cfg.Gateway.CloseSession(ctx, account, sessionID))
+}
+
+// notFound turns the gateway's missing-session error into a message the
+// admin sees.
+func notFound(err error) error {
+	if errors.Is(err, gateway.ErrNoSession) {
+		return &InputError{err.Error()}
+	}
+	return err
+}
+
+// RestartAccount kills the account's agy processes.
+func (c *Control) RestartAccount(name string) error {
+	account := c.cfg.Pool.Account(name)
+	if account == nil {
+		return store.ErrNotFound
+	}
+	account.Restart()
+	return nil
+}
+
 // Egress is the account's outbound traffic and route.
 func (c *Control) Egress(account string) (egress.Stats, bool) { return c.cfg.Egress.Stats(account) }
 

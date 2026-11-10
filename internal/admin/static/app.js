@@ -554,6 +554,108 @@ views.accounts = container => {
   return polling(container, 10000, async () => { if (signins.size === 0) await load(); });
 };
 
+// ---- workers ---------------------------------------------------------
+
+const bytes = n => n >= 1 << 30 ? (n / (1 << 30)).toFixed(2) + " GiB" : n >= 1 << 20 ? (n / (1 << 20)).toFixed(0) + " MiB" : (n / 1024).toFixed(0) + " KiB";
+
+// span formats the time from a to b (ISO strings or Dates) as "3m 20s".
+function span(a, b) {
+  const s = Math.max(0, Math.round((new Date(b) - new Date(a)) / 1000));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const hrs = Math.floor(m / 60);
+  return hrs < 48 ? `${hrs}h ${m % 60}m` : `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
+}
+
+views.workers = container => {
+  const cards = h("div");
+  container.append(h("h1", {}, "Workers"), cards);
+
+  const action = (label, cls, confirmText, run) => h("button", { class: cls, onclick: e => {
+    if (confirmText && !confirm(confirmText)) return;
+    guarded(async () => { await run(); await load(); }, e.target);
+  } }, label);
+
+  function processes(a, now) {
+    if (!a.procs.length) return h("p", { class: "muted" }, "No agy running. The next request or quota refresh starts one.");
+    const rows = [];
+    for (const p of a.procs) {
+      rows.push({ kind: p.per_session ? "front" : "agy", pid: p.pid, agent: p.agent, up: span(p.started, now), rss: p.rss_bytes, cpu: p.cpu_seconds, sessions: "", error: p.error });
+      for (const w of p.workers) {
+        rows.push({ kind: `worker ${w.number}`, pid: w.pid, agent: "", up: "", rss: w.rss_bytes, cpu: w.cpu_seconds, sessions: w.sessions.map(id => id.slice(0, 8)).join(", ") });
+      }
+    }
+    const total = rows.reduce((sum, r) => sum + r.rss, 0);
+    return [
+      table([
+        { title: "Process", cell: r => r.kind },
+        { title: "PID", num: true, cell: r => r.pid },
+        { title: "Profile", cell: r => h("span", { class: "mono" }, r.agent) },
+        { title: "Up", cell: r => r.up },
+        { title: "Memory", num: true, cell: r => bytes(r.rss) },
+        { title: "CPU", num: true, cell: r => r.cpu.toFixed(1) + "s" },
+        { title: "Sessions", cell: r => h("span", { class: "mono" }, r.sessions) },
+        { title: "", cell: r => r.error ? h("span", { class: "bad" }, r.error) : "" },
+      ], rows),
+      h("p", { class: "muted" }, `${rows.length} process(es), ${bytes(total)} resident in total.`),
+    ];
+  }
+
+  function sessions(a, now) {
+    const enc = encodeURIComponent(a.name);
+    return table([
+      { title: "Session", cell: s => h("span", { class: "mono", title: s.id }, s.id.slice(0, 8)) },
+      { title: "Key", cell: s => s.key },
+      { title: "Worker", cell: s => s.worker ? `worker ${s.worker}` : s.pid ? "in process" : h("span", { class: "muted" }, "closed") },
+      { title: "State", cell: s => !s.turn ? h("span", { class: "muted" }, "idle")
+          : h("span", { class: s.turn.state.startsWith("waiting") ? "warn" : "ok" }, s.turn.state) },
+      { title: "Model", cell: s => s.turn ? s.turn.model : "" },
+      { title: "Turn", cell: s => !s.turn || !s.turn.started ? "" : s.turn.parked_at
+          ? `${span(s.turn.started, now)} · waiting ${span(s.turn.parked_at, now)}, cancelled in ${span(now, s.turn.park_timeout)}`
+          : span(s.turn.started, now) },
+      { title: "Last used", cell: s => `${span(s.last_used, now)} ago` },
+      { title: "", cell: s => {
+          const path = `workers/${enc}/sessions/${encodeURIComponent(s.id)}`;
+          if (s.turn) return action("Cancel turn", "danger", `Cancel the turn of ${s.key}? Its client gets an error.`, () => api("POST", path + "/cancel"));
+          if (!s.pid) return "";
+          return action("Close", "", "", () => api("POST", path + "/close"));
+        } },
+    ], a.sessions);
+  }
+
+  function egress(a) {
+    const e = a.egress;
+    if (!e) return null;
+    return h("div", {},
+      h("h3", {}, "Outbound"),
+      h("p", {}, `Route: ${e.route} · ${e.open} open · ${fmt.int(e.connections)} connection(s) · ${bytes(e.bytes_out)} out / ${bytes(e.bytes_in)} in`
+        + (e.refused ? ` · ${fmt.int(e.refused)} refused` : "")),
+      e.last_error ? h("p", { class: "bad mono" }, `${fmt.time(e.last_error_at)}: ${e.last_error}`) : null,
+      e.hosts.length ? h("p", { class: "muted mono" }, e.hosts.map(x => `${x.host} ×${x.connections}`).join("  ·  ")) : null);
+  }
+
+  function card(a, now) {
+    const badge = a.paused ? h("span", { class: "badge warn" }, "paused")
+      : a.disabled ? h("span", { class: "badge bad" }, "needs sign-in")
+      : a.blocked ? h("span", { class: "badge bad" }, "no proxy")
+      : h("span", { class: "badge ok" }, `${a.turns} turn(s)`);
+    return h("div", { class: "card" },
+      h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), badge,
+        action("Restart agy", "danger", `Restart ${a.name}'s agy? Its running turns fail; sessions reopen from disk on their next request.`,
+          () => api("POST", `workers/${encodeURIComponent(a.name)}/restart`))),
+      h("h3", {}, "Processes"), processes(a, now),
+      h("h3", {}, "Sessions"), sessions(a, now),
+      egress(a));
+  }
+
+  async function load() {
+    const data = await api("GET", "workers");
+    cards.replaceChildren(...(data.accounts.length ? data.accounts.map(a => card(a, data.now)) : [h("p", { class: "muted" }, "No accounts.")]));
+  }
+  return polling(container, 3000, load);
+};
+
 // ---- calls -----------------------------------------------------------
 
 const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#9333ea", "#ea580c"];

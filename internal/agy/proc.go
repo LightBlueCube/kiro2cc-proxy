@@ -124,6 +124,7 @@ type Proc struct {
 
 	canResume bool
 	version   string
+	started   time.Time
 
 	done    chan struct{}
 	exitErr error
@@ -193,6 +194,7 @@ func StartProc(ctx context.Context, cfg ProcConfig) (*Proc, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("run %s: %w", cfg.Bin, err)
 	}
+	p.started = time.Now()
 	go p.wait(stdout)
 
 	if err := p.initialize(ctx); err != nil {
@@ -276,6 +278,9 @@ func (p *Proc) Err() error {
 }
 
 func (p *Proc) Alive() bool { return p.Err() == nil }
+
+// PID is the process id (the front process under --process-per-session).
+func (p *Proc) PID() int { return p.cmd.Process.Pid }
 
 // Agent is the profile this process runs.
 func (p *Proc) Agent() string { return p.cfg.Agent }

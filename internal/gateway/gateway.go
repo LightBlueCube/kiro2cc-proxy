@@ -91,9 +91,12 @@ type activeTurn struct {
 	// turn is nil while the claim is being prepared.
 	turn   *agy.Turn
 	groups map[string]*callGroup
-	// parked is the group the last response ended on.
+	// parked is the group the last response ended on, since parkedAt.
 	parked    *callGroup
+	parkedAt  time.Time
 	parkTimer *time.Timer
+	// started is when the prompt was launched.
+	started time.Time
 	// consuming is true while a response reads the turn's events.
 	consuming bool
 	finished  bool
@@ -460,7 +463,7 @@ func (g *Gateway) park(at *activeTurn, group *callGroup) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	at.consuming = false
-	at.parked = group
+	at.parked, at.parkedAt = group, time.Now()
 	at.parkTimer = time.AfterFunc(parkTTL, func() {
 		g.mu.Lock()
 		expired := at.parked == group && !at.finished

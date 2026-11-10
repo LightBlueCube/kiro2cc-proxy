@@ -378,6 +378,13 @@ func (a *Account) Status() Status {
 	return st
 }
 
+// Restart kills the account's agy processes; turns running there fail
+// and the next request starts agy again.
+func (a *Account) Restart() {
+	a.killProcs()
+	a.pool.log.Info("account restarted", "account", a.name)
+}
+
 // LiveProcs returns the account's running agy processes.
 func (a *Account) LiveProcs() []*agy.Proc {
 	a.mu.Lock()

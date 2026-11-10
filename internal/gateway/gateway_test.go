@@ -215,6 +215,41 @@ var readTool = conv.ToolSpec{Name: "read", Description: "Read a file", Parameter
 
 func user(text string) conv.Message { return conv.Message{Role: conv.RoleUser, Text: text} }
 
+func TestInspectAndCloseSession(t *testing.T) {
+	h := newHarnessMode(t, 1, nil, true)
+	ctx := context.Background()
+	messages := []conv.Message{user("hello")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first)
+	}
+
+	list := h.gw.Sessions()
+	if len(list) != 1 || list[0].Key != "alice" || list[0].Turn != nil || list[0].PID == 0 {
+		t.Fatalf("sessions = %+v", list)
+	}
+	info, err := h.p.Accounts()[0].LiveProcs()[0].Inspect()
+	if err != nil || !info.PerSession || info.Resources.RSSBytes == 0 || len(info.Workers) != 1 || info.Workers[0].Sessions[0] != list[0].ID {
+		t.Fatalf("inspect = %+v, %v", info, err)
+	}
+	if err := h.gw.CancelTurn("acct0", list[0].ID); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("cancel without a turn = %v", err)
+	}
+
+	if err := h.gw.CloseSession(ctx, "acct0", list[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(h.requests("session/close")); n != 1 || len(h.gw.Sessions()) != 0 {
+		t.Fatalf("close requests = %d, sessions = %+v", n, h.gw.Sessions())
+	}
+	// The conversation continues: the session reopens from disk.
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if second.err != nil || second.text != "reply to: again" || len(h.requests("session/resume")) != 1 {
+		t.Fatalf("after close = %+v, resumes %d", second, len(h.requests("session/resume")))
+	}
+}
+
 func TestKeyLimits(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()
