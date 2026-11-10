@@ -89,6 +89,15 @@ var migrations = []string{
 	CREATE INDEX requests_at ON requests (at);
 	CREATE INDEX requests_key_at ON requests (key_name, at);
 	CREATE INDEX requests_account_at ON requests (account, quota_group, at);`,
+
+	`ALTER TABLE accounts ADD COLUMN proxy TEXT NOT NULL DEFAULT '';
+	ALTER TABLE api_keys ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
+	CREATE TABLE quota_cursors (
+		account TEXT NOT NULL,
+		bucket  TEXT NOT NULL,
+		at      INTEGER NOT NULL,
+		PRIMARY KEY (account, bucket)
+	);`,
 }
 
 // ErrNotFound means the named row does not exist.

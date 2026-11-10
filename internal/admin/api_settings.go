@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"agyrelay/internal/control"
+	"agyrelay/internal/store"
+	"agyrelay/internal/usage"
 )
 
 type settingsView struct {
@@ -45,12 +47,26 @@ func (h *Handler) listModels(w http.ResponseWriter, r *http.Request) {
 }
 
 type keyView struct {
-	ID        int64      `json:"id"`
-	Name      string     `json:"name"`
-	Note      string     `json:"note"`
-	Models    []string   `json:"models"`
-	CreatedAt time.Time  `json:"created_at"`
-	RevokedAt *time.Time `json:"revoked_at"`
+	ID     int64    `json:"id"`
+	Name   string   `json:"name"`
+	Note   string   `json:"note"`
+	Models []string `json:"models"`
+	// Limits and Usage are weekly-quota shares (0.3 = 30%) by quota group.
+	Limits    map[string]float64 `json:"limits"`
+	Usage     map[string]useView `json:"usage"`
+	CreatedAt time.Time          `json:"created_at"`
+	RevokedAt *time.Time         `json:"revoked_at"`
+}
+
+type useView struct {
+	Attributed float64 `json:"attributed"`
+	Estimated  float64 `json:"estimated"`
+}
+
+type keysView struct {
+	Keys []keyView `json:"keys"`
+	// Groups lists the quota groups a limit can name.
+	Groups []string `json:"groups"`
 }
 
 func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
@@ -59,25 +75,41 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "list keys", err)
 		return
 	}
-	out := []keyView{}
+	uses, err := h.control.KeyUses(r.Context())
+	if err != nil {
+		h.internalError(w, "key usage", err)
+		return
+	}
+	out := keysView{Keys: []keyView{}, Groups: usage.Groups}
 	for _, k := range keys {
-		v := keyView{ID: k.ID, Name: k.Name, Note: k.Note, Models: k.Models, CreatedAt: k.CreatedAt}
+		v := keyView{ID: k.ID, Name: k.Name, Note: k.Note, Models: k.Models, Limits: k.Limits, Usage: map[string]useView{}, CreatedAt: k.CreatedAt}
 		if v.Models == nil {
 			v.Models = []string{}
+		}
+		if v.Limits == nil {
+			v.Limits = map[string]float64{}
+		}
+		for group, use := range uses[k.Name] {
+			v.Usage[group] = useView{Attributed: use.Attributed, Estimated: use.Estimated}
 		}
 		if !k.RevokedAt.IsZero() {
 			revoked := k.RevokedAt
 			v.RevokedAt = &revoked
 		}
-		out = append(out, v)
+		out.Keys = append(out.Keys, v)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 type keyRequest struct {
-	Name   string   `json:"name"`
-	Note   string   `json:"note"`
-	Models []string `json:"models"`
+	Name   string             `json:"name"`
+	Note   string             `json:"note"`
+	Models []string           `json:"models"`
+	Limits map[string]float64 `json:"limits"`
+}
+
+func (k keyRequest) update() store.KeyUpdate {
+	return store.KeyUpdate{Note: k.Note, Models: k.Models, Limits: k.Limits}
 }
 
 func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +117,7 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	token, err := h.control.CreateKey(r.Context(), req.Name, req.Note, req.Models)
+	token, err := h.control.CreateKey(r.Context(), req.Name, req.update())
 	if err != nil {
 		h.fail(w, "create key", err)
 		return
@@ -100,14 +132,11 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	var req struct {
-		Note   string   `json:"note"`
-		Models []string `json:"models"`
-	}
+	var req keyRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := h.control.UpdateKey(r.Context(), id, req.Note, req.Models); err != nil {
+	if err := h.control.UpdateKey(r.Context(), id, req.update()); err != nil {
 		h.fail(w, "update key", err)
 		return
 	}

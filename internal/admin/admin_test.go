@@ -58,7 +58,8 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Log: log})
+	budget := usage.NewBudget(st)
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Budget: budget, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func newEnv(t *testing.T) *env {
 	monitor := usage.NewMonitor(usage.MonitorConfig{Store: st, Pool: p, Profile: gateway.IdleProfile(), Log: log})
 	recorder := usage.NewRecorder(st, settings.Prices, log)
 	ctl, err := control.New(context.Background(), control.Config{
-		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, AgyBin: os.Args[0], Level: new(slog.LevelVar),
+		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, AgyBin: os.Args[0], Level: new(slog.LevelVar),
 		AccountsDir: filepath.Join(dir, "accounts"), Settings: settings, Log: log,
 	})
 	if err != nil {
@@ -259,6 +260,86 @@ func TestChangesNeedCSRFAndSameOrigin(t *testing.T) {
 	}
 	if _, ok := e.ctl.Lookup(token); ok {
 		t.Fatal("revoked key still works")
+	}
+}
+
+func TestKeyLimits(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	for _, limits := range []map[string]float64{{"nope": 0.1}, {"gemini": -0.1}, {"gemini": 11}} {
+		if r := c.do("POST", "/admin/api/keys", map[string]any{"name": "bad", "limits": limits}, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("limits %v = %d %s", limits, r.status, r.raw)
+		}
+	}
+	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "limits": map[string]float64{"claude-gpt": 0.3}}, nil)
+	token, _ := r.body["key"].(string)
+	if caller, ok := e.ctl.Lookup(token); !ok || caller.Limits["claude-gpt"] != 0.3 || len(caller.Limits) != 1 {
+		t.Fatalf("lookup = %+v %v (%s)", caller, ok, r.raw)
+	}
+
+	r = c.do("GET", "/admin/api/keys", nil, nil)
+	var list keysView
+	json.Unmarshal([]byte(r.raw), &list)
+	if len(list.Keys) != 1 || list.Keys[0].Limits["claude-gpt"] != 0.3 || len(list.Groups) != 3 {
+		t.Fatalf("keys = %s", r.raw)
+	}
+	if r := c.do("PATCH", "/admin/api/keys/"+itoa(list.Keys[0].ID), map[string]any{"note": "n", "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
+		t.Fatalf("update = %d %s", r.status, r.raw)
+	}
+	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 {
+		t.Fatalf("limits after clearing = %v", caller.Limits)
+	}
+}
+
+func TestAccountProxy(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	for _, proxy := range []string{"socks5://127.0.0.1:7891", "http://127.0.0.1", "127.0.0.1:7890", "http://127.0.0.1:7890/path"} {
+		if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "proxy": proxy}, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("proxy %q = %d %s", proxy, r.status, r.raw)
+		}
+	}
+	if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "proxy": " http://u:secret@127.0.0.1:7890 "}, nil); r.status != http.StatusOK {
+		t.Fatalf("add = %d %s", r.status, r.raw)
+	}
+	proxyOf := func() string {
+		t.Helper()
+		var accounts []accountView
+		json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &accounts)
+		if len(accounts) != 1 {
+			t.Fatalf("accounts = %+v", accounts)
+		}
+		return accounts[0].Proxy
+	}
+	if got := proxyOf(); got != "http://u:xxxxx@127.0.0.1:7890" {
+		t.Fatalf("proxy = %q", got)
+	}
+	// Saving the masked value back keeps the password.
+	if r := c.do("PUT", "/admin/api/accounts/main/proxy", map[string]string{"proxy": "http://u:xxxxx@127.0.0.1:7890"}, nil); r.status != http.StatusOK {
+		t.Fatalf("resave = %d %s", r.status, r.raw)
+	}
+	if records, _ := e.ctl.AccountRecords(context.Background()); records["main"].Proxy != "http://u:secret@127.0.0.1:7890" {
+		t.Fatalf("stored proxy = %q", records["main"].Proxy)
+	}
+	if r := c.do("PUT", "/admin/api/accounts/main/proxy", map[string]string{"proxy": "http://127.0.0.1:7891"}, nil); r.status != http.StatusOK {
+		t.Fatalf("set = %d %s", r.status, r.raw)
+	}
+	if got := proxyOf(); got != "http://127.0.0.1:7891" {
+		t.Fatalf("proxy = %q", got)
+	}
+	if r := c.do("PUT", "/admin/api/accounts/main/proxy", map[string]string{"proxy": ""}, nil); r.status != http.StatusOK || proxyOf() != "" {
+		t.Fatalf("clear = %d %s", r.status, r.raw)
+	}
+	if r := c.do("PUT", "/admin/api/accounts/nobody/proxy", map[string]string{"proxy": ""}, nil); r.status != http.StatusNotFound {
+		t.Fatalf("unknown account = %d", r.status)
 	}
 }
 

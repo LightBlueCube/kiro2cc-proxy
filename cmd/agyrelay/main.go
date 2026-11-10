@@ -120,12 +120,14 @@ func runServe(args []string) error {
 
 	usageLog := log.With("component", "usage")
 	recorder := usage.NewRecorder(st, settings.Prices, usageLog)
+	budget := usage.NewBudget(st)
 	gw, err := gateway.New(gateway.Config{
 		Pool:        accountPool,
 		Bridge:      tools,
 		DataDir:     cfg.DataDir,
 		SnapshotTTL: settings.SnapshotTTLDuration(),
 		Recorder:    recorder,
+		Budget:      budget,
 		Log:         log.With("component", "gateway"),
 	})
 	if err != nil {
@@ -140,7 +142,7 @@ func runServe(args []string) error {
 	go monitor.Run(ctx)
 
 	ctl, err := control.New(ctx, control.Config{
-		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, AgyBin: cfg.AgyBin, Level: level,
+		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, AgyBin: cfg.AgyBin, Level: level,
 		AccountsDir: cfg.accountsDir(), Settings: settings, Log: log.With("component", "control"),
 	})
 	if err != nil {

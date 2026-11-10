@@ -70,6 +70,7 @@ var statusNames = map[conv.ErrorKind]string{
 	conv.ErrForbidden:      "forbidden",
 	conv.ErrUnknownModel:   "unknown_model",
 	conv.ErrQuota:          "quota",
+	conv.ErrKeyLimit:       "key_limit",
 	conv.ErrOverloaded:     "overloaded",
 	conv.ErrUnavailable:    "unavailable",
 	conv.ErrUpstream:       "upstream_error",

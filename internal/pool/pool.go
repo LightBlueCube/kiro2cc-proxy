@@ -26,8 +26,10 @@ type AccountConfig struct {
 	Name string
 	// Home is the account's HOME directory; agy keeps its sign-in below it.
 	Home string
-	// Env is extra environment for the account's agy (e.g. HTTPS_PROXY).
+	// Env is extra environment for the account's agy.
 	Env []string
+	// Proxy is the HTTP proxy for agy's traffic ("" = direct).
+	Proxy string
 }
 
 type Config struct {
@@ -64,6 +66,7 @@ type Account struct {
 	env       []string
 
 	mu    sync.Mutex
+	proxy string
 	turns int
 	// paused is set by the admin; disabled by a failed sign-in.
 	paused   bool
@@ -126,6 +129,7 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 		geminiDir: filepath.Join(home, ".gemini"),
 		workspace: filepath.Join(home, "workspace"),
 		env:       ac.Env,
+		proxy:     ac.Proxy,
 		cooldown:  map[string]time.Time{},
 		procs:     map[string]*procSlot{},
 	}
@@ -317,8 +321,28 @@ func (a *Account) SetPaused(paused bool) {
 // Home is the account's HOME directory.
 func (a *Account) Home() string { return a.home }
 
-// Env is the account's extra agy environment.
-func (a *Account) Env() []string { return a.env }
+// Env is the account's extra agy environment. The proxy variables come
+// last, so they win over same-named extras. agy 1.5.3 sends all its
+// traffic, sign-in included, through them; loopback stays direct.
+func (a *Account) Env() []string {
+	a.mu.Lock()
+	proxy := a.proxy
+	a.mu.Unlock()
+	if proxy == "" {
+		return a.env
+	}
+	return append(slices.Clip(a.env), "HTTPS_PROXY="+proxy, "HTTP_PROXY="+proxy)
+}
+
+// SetProxy changes the account's proxy. Its processes are killed, so
+// turns running there fail and the next turn starts agy with the proxy.
+func (a *Account) SetProxy(proxy string) {
+	a.mu.Lock()
+	a.proxy = proxy
+	a.mu.Unlock()
+	a.killProcs()
+	a.pool.log.Info("account proxy changed", "account", a.name)
+}
 
 func (a *Account) Status() Status {
 	a.mu.Lock()
@@ -428,7 +452,7 @@ func (a *Account) startProc(ctx context.Context, profile agy.Profile) (*agy.Proc
 		Agent:             profile.Name,
 		CloudCodeEndpoint: cfg.CloudCodeEndpoint,
 		ProcessPerSession: cfg.ProcessPerSession,
-		Env:               a.env,
+		Env:               a.Env(),
 		Log:               a.pool.log.With("account", a.name),
 	})
 	if err != nil {

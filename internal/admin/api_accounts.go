@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +20,7 @@ type accountView struct {
 	Name      string               `json:"name"`
 	CreatedAt time.Time            `json:"created_at"`
 	EnvNames  []string             `json:"env_names"`
+	Proxy     string               `json:"proxy"`
 	Paused    bool                 `json:"paused"`
 	Disabled  string               `json:"disabled"`
 	Cooldowns map[string]time.Time `json:"cooldowns"`
@@ -50,6 +53,7 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 				name, _, _ := strings.Cut(kv, "=")
 				v.EnvNames = append(v.EnvNames, name)
 			}
+			v.Proxy = redactProxy(rec.Proxy)
 		}
 		if q, ok := h.monitor.Latest(st.Name); ok {
 			if !q.At.IsZero() {
@@ -64,19 +68,59 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// redactProxy hides a proxy password; stored proxies parse.
+func redactProxy(proxy string) string {
+	if proxy == "" {
+		return ""
+	}
+	u, err := url.Parse(proxy)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return u.Redacted()
+}
+
 func (h *Handler) addAccount(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name string   `json:"name"`
-		Env  []string `json:"env"`
+		Name  string   `json:"name"`
+		Env   []string `json:"env"`
+		Proxy string   `json:"proxy"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if _, err := h.control.AddAccount(r.Context(), strings.TrimSpace(req.Name), req.Env); err != nil {
+	if _, err := h.control.AddAccount(r.Context(), strings.TrimSpace(req.Name), req.Env, req.Proxy); err != nil {
 		h.fail(w, "add account", err)
 		return
 	}
 	h.audit(r, "account_added", req.Name)
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) setAccountProxy(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req struct {
+		Proxy string `json:"proxy"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	records, err := h.control.AccountRecords(r.Context())
+	if err != nil {
+		h.internalError(w, "read account", err)
+		return
+	}
+	// The page shows the proxy with its password masked; sending that back
+	// unchanged keeps the stored password.
+	if current := records[name].Proxy; current != "" && strings.TrimSpace(req.Proxy) == redactProxy(current) {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	if err := h.control.SetAccountProxy(r.Context(), name, req.Proxy); err != nil {
+		h.fail(w, "set account proxy", err)
+		return
+	}
+	h.audit(r, "account_proxy_set", name+" → "+cmp.Or(redactProxy(strings.TrimSpace(req.Proxy)), "direct"))
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 

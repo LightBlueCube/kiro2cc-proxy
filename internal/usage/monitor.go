@@ -34,8 +34,10 @@ type MonitorConfig struct {
 	Pool  *pool.Pool
 	// Profile is the agent profile Refresh starts agy with.
 	Profile agy.Profile
-	// OnSample runs after each stored sample (quota attribution).
-	OnSample func(ctx context.Context, account string, at time.Time)
+	// OnSample runs after each stored sample (quota attribution); busy
+	// reports whether a turn was running or parked on the account when
+	// sampling began.
+	OnSample func(ctx context.Context, account string, at time.Time, busy bool)
 	Log      *slog.Logger
 }
 
@@ -67,7 +69,7 @@ func (m *Monitor) Run(ctx context.Context) {
 			if len(procs) == 0 {
 				continue
 			}
-			m.sample(ctx, account.Name(), procs[0])
+			m.sample(ctx, account, procs[0])
 		}
 	}
 }
@@ -86,12 +88,14 @@ func (m *Monitor) Refresh(ctx context.Context, account *pool.Account) (AccountQu
 		q, _ := m.Latest(account.Name())
 		return q, err
 	}
-	return m.sample(ctx, account.Name(), proc)
+	return m.sample(ctx, account, proc)
 }
 
-func (m *Monitor) sample(ctx context.Context, name string, proc *agy.Proc) (AccountQuota, error) {
+func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.Proc) (AccountQuota, error) {
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
+	name := account.Name()
+	busy := account.Status().Turns > 0
 	user, err := proc.UserStatus(ctx)
 	var groups []agy.QuotaGroup
 	if err == nil {
@@ -118,7 +122,7 @@ func (m *Monitor) sample(ctx context.Context, name string, proc *agy.Proc) (Acco
 		return q, nil
 	}
 	if m.cfg.OnSample != nil {
-		m.cfg.OnSample(ctx, name, q.At)
+		m.cfg.OnSample(ctx, name, q.At, busy)
 	}
 	return q, nil
 }

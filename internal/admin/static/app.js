@@ -174,54 +174,119 @@ function polling(container, interval, render) {
 
 // ---- keys ------------------------------------------------------------
 
+const GROUP_NAMES = { "gemini": "Gemini", "claude-gpt": "Claude + GPT", "argon": "Gemini 4 Argon" };
+const groupName = g => GROUP_NAMES[g] || g;
+
+const LIMIT_HINT = "Limits cap each quota group's weekly quota use over the last 7 days; 100% = one account's whole weekly bucket "
+  + "of that group, and blank = unlimited. Use is the share attributed from quota samples plus an estimate for calls not sampled yet. "
+  + "A turn already running when the key reaches its limit finishes; the key's next request is refused.";
+
+// limitInputs makes one percent field per quota group; blank = unlimited.
+function limitInputs(groups, limits) {
+  const inputs = Object.fromEntries(groups.map(g => [g, h("input", {
+    type: "number", min: 0, max: 1000, step: "any", placeholder: "unlimited", style: "width:110px",
+    value: limits[g] === undefined ? "" : String(+(limits[g] * 100).toFixed(4)),
+  })]));
+  return {
+    nodes: groups.map(g => h("label", {}, `${groupName(g)} limit %`, inputs[g])),
+    read: () => Object.fromEntries(groups.filter(g => inputs[g].value.trim() !== "").map(g => [g, Number(inputs[g].value) / 100])),
+  };
+}
+
+function usageCell(k, groups) {
+  const shown = groups.filter(g => k.limits[g] !== undefined || k.usage[g]);
+  if (!shown.length) return h("span", { class: "muted" }, "unlimited · unused");
+  return shown.map(g => {
+    const u = k.usage[g] || { attributed: 0, estimated: 0 };
+    const used = u.attributed + u.estimated;
+    const limit = k.limits[g];
+    const title = `${fmt.pct(u.attributed, 2)} attributed + ${fmt.pct(u.estimated, 2)} estimated (calls not sampled yet)`;
+    if (limit === undefined) return h("div", { title }, `${groupName(g)}: ${fmt.pct(used, 2)} · unlimited`);
+    const level = used >= limit ? "low" : used >= limit * 0.8 ? "mid" : "";
+    const fill = limit > 0 ? Math.min(100, (used / limit) * 100) : 100;
+    return h("div", { class: "row", title },
+      h("span", { style: "width:120px" }, groupName(g)),
+      h("div", { class: "bar " + level, style: "width:120px" }, h("span", { style: `width:${fill}%` })),
+      h("span", { class: "mono" }, `${fmt.pct(used, 2)} / ${fmt.pct(limit, 1)}`));
+  });
+}
+
 views.keys = container => {
   const created = h("div");
+  const editor = h("div");
   const list = h("div");
   const modelsHint = h("datalist", { id: "model-ids" });
+  let groups = [];
+  let newLimits = null;
 
   const name = h("input", { required: true, maxlength: 64, placeholder: "alice" });
   const note = h("input", { placeholder: "optional" });
   const models = h("input", { list: "model-ids", placeholder: "all models" });
-  const form = h("form", { class: "row", onsubmit: event => {
+  const limitsRow = h("div", { class: "row" });
+  const form = h("form", { onsubmit: event => {
     event.preventDefault();
     guarded(async () => {
-      const data = await api("POST", "keys", { name: name.value, note: note.value, models: splitList(models.value) });
+      const data = await api("POST", "keys", { name: name.value, note: note.value, models: splitList(models.value), limits: newLimits.read() });
       created.replaceChildren(h("div", { class: "card" },
         h("h2", {}, `Key for ${name.value}`),
         h("p", { class: "muted" }, "Copy it now. It is shown only once; the server keeps only its hash."),
         h("div", { class: "secret" }, data.key)));
       name.value = note.value = models.value = "";
+      newLimits = null;
       await load();
     }, event.submitter);
   } },
-    h("label", {}, "Name", name),
-    h("label", { class: "grow" }, "Note", note),
-    h("label", { class: "grow" }, "Allowed models (comma-separated)", models),
+    h("div", { class: "row" },
+      h("label", {}, "Name", name),
+      h("label", { class: "grow" }, "Note", note),
+      h("label", { class: "grow" }, "Allowed models (comma-separated)", models)),
+    limitsRow,
+    h("p", { class: "muted" }, LIMIT_HINT),
     h("button", { type: "submit" }, "Create key"));
 
   async function load() {
-    const [keys, catalog] = await Promise.all([api("GET", "keys"), api("GET", "models")]);
+    const [data, catalog] = await Promise.all([api("GET", "keys"), api("GET", "models")]);
+    groups = data.groups;
+    if (!newLimits) {
+      newLimits = limitInputs(groups, {});
+      limitsRow.replaceChildren(...newLimits.nodes);
+    }
     modelsHint.replaceChildren(...catalog.map(m => h("option", { value: m.id }, m.name)));
     list.replaceChildren(table([
       { title: "Name", cell: k => k.name },
       { title: "Note", cell: k => k.note || h("span", { class: "muted" }, "—") },
       { title: "Models", cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, "all") },
+      { title: "Weekly quota use (7 days) / limit", cell: k => usageCell(k, groups) },
       { title: "Created", cell: k => fmt.time(k.created_at) },
       { title: "", cell: k => k.revoked_at ? `revoked ${fmt.time(k.revoked_at)}` : h("span", { class: "row" },
-          h("button", { onclick: e => editKey(k, e.target) }, "Edit"),
+          h("button", { onclick: () => editKey(k) }, "Edit"),
           h("button", { class: "danger", onclick: e => revoke(k, e.target) }, "Revoke")) },
-    ], keys, k => k.revoked_at ? "revoked" : ""));
+    ], data.keys, k => k.revoked_at ? "revoked" : ""));
   }
 
-  function editKey(k, button) {
-    const newNote = prompt(`Note for ${k.name}`, k.note);
-    if (newNote === null) return;
-    const newModels = prompt(`Allowed models for ${k.name} (comma-separated; empty = all)`, k.models.join(", "));
-    if (newModels === null) return;
-    guarded(async () => {
-      await api("PATCH", `keys/${k.id}`, { note: newNote, models: splitList(newModels) });
-      await load();
-    }, button);
+  function editKey(k) {
+    const noteInput = h("input", { value: k.note });
+    const modelsInput = h("input", { list: "model-ids", value: k.models.join(", "), placeholder: "all models" });
+    const limits = limitInputs(groups, k.limits);
+    const save = event => {
+      event.preventDefault();
+      guarded(async () => {
+        await api("PATCH", `keys/${k.id}`, { note: noteInput.value, models: splitList(modelsInput.value), limits: limits.read() });
+        editor.replaceChildren();
+        toast("Saved");
+        await load();
+      }, event.submitter);
+    };
+    editor.replaceChildren(h("div", { class: "card" },
+      h("h2", {}, `Edit ${k.name}`),
+      h("form", { onsubmit: save },
+        h("div", { class: "row" },
+          h("label", { class: "grow" }, "Note", noteInput),
+          h("label", { class: "grow" }, "Allowed models (comma-separated; empty = all)", modelsInput)),
+        h("div", { class: "row" }, limits.nodes),
+        h("div", { class: "row", style: "margin-top:8px" },
+          h("button", { type: "submit", class: "primary" }, "Save"),
+          h("button", { type: "button", onclick: () => editor.replaceChildren() }, "Cancel")))));
   }
 
   function revoke(k, button) {
@@ -229,7 +294,7 @@ views.keys = container => {
     guarded(async () => { await api("POST", `keys/${k.id}/revoke`); await load(); }, button);
   }
 
-  container.append(h("h1", {}, "API keys"), h("div", { class: "card" }, form, modelsHint), created, h("div", { class: "card" }, list));
+  container.append(h("h1", {}, "API keys"), h("div", { class: "card" }, form, modelsHint), created, editor, h("div", { class: "card" }, list));
   guarded(load);
 };
 
@@ -355,19 +420,31 @@ views.accounts = container => {
   const signins = new Map(); // account name → {url, code}
 
   const name = h("input", { required: true, maxlength: 64, placeholder: "main", pattern: "[A-Za-z0-9][A-Za-z0-9_.\\-]*" });
-  const env = h("textarea", { rows: 1, placeholder: "HTTPS_PROXY=http://127.0.0.1:3128 (optional, one per line)" });
+  const proxy = h("input", { placeholder: "http://127.0.0.1:7890" });
+  const env = h("textarea", { rows: 1, placeholder: "NAME=value (optional, one per line)" });
   const form = h("form", { class: "row", onsubmit: event => {
     event.preventDefault();
     guarded(async () => {
-      await api("POST", "accounts", { name: name.value.trim(), env: env.value.split("\n").map(s => s.trim()).filter(Boolean) });
+      await api("POST", "accounts", { name: name.value.trim(), proxy: proxy.value, env: env.value.split("\n").map(s => s.trim()).filter(Boolean) });
       const added = name.value.trim();
-      name.value = env.value = "";
+      name.value = proxy.value = env.value = "";
       await startSignin(added);
     }, event.submitter);
   } },
     h("label", {}, "Name", name),
+    h("label", { title: "agy's traffic, sign-in included, goes through this HTTP proxy (e.g. mihomo's HTTP port)" }, "HTTP proxy", proxy),
     h("label", { class: "grow" }, "Environment for its agy", env),
     h("button", { type: "submit" }, "Add and sign in"));
+
+  function editProxy(a, button) {
+    const value = prompt(`HTTP proxy for ${a.name}, e.g. http://127.0.0.1:7890 (empty = direct).\n`
+      + "Changing it restarts the account's agy; turns running there fail.", a.proxy);
+    if (value === null) return;
+    guarded(async () => {
+      await api("PUT", `accounts/${encodeURIComponent(a.name)}/proxy`, { proxy: value });
+      await load();
+    }, button);
+  }
 
   async function startSignin(account, button) {
     await guarded(async () => {
@@ -439,12 +516,14 @@ views.accounts = container => {
       Object.entries(a.cooldowns).map(([group, until]) => h("p", { class: "warn" }, `${group} quota cooling down for ${fmt.until(until)}`)),
       a.sample_error ? h("p", { class: "bad mono" }, `Quota check failed: ${a.sample_error}`) : null,
       h("p", { class: "muted" }, `${a.turns} turn(s) running · ${a.procs} agy process(es) · quota checked ${a.sampled_at ? fmt.time(a.sampled_at) : "never"}`
+        + ` · proxy: ${a.proxy || "direct"}`
         + (a.env_names.length ? ` · env: ${a.env_names.join(", ")}` : "")),
       quota(a),
       signinPanel(a),
       h("div", { class: "row", style: "margin-top:12px" },
         signins.has(a.name) ? null : h("button", { onclick: e => startSignin(a.name, e.target) }, a.user || a.disabled ? "Sign in again" : "Sign in"),
         act("Refresh quota", () => api("POST", `accounts/${enc}/refresh`)),
+        h("button", { onclick: e => editProxy(a, e.target) }, "Proxy…"),
         a.paused ? act("Resume", () => api("POST", `accounts/${enc}/resume`)) : act("Pause", () => api("POST", `accounts/${enc}/pause`)),
         h("span", { class: "grow" }),
         h("button", { class: "danger", onclick: e => {
