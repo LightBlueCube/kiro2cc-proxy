@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -101,13 +102,51 @@ func (s Settings) SessionIdleCloseDuration() time.Duration {
 // uses them to build the pool and gateway before New.
 func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
 	s := defaultSettings()
-	if _, err := st.Setting(ctx, settingsKey, &s); err != nil {
+	var raw json.RawMessage
+	found, err := st.Setting(ctx, settingsKey, &raw)
+	if err != nil {
 		return Settings{}, err
+	}
+	if found {
+		if err := decodeSettings(raw, &s); err != nil {
+			return Settings{}, fmt.Errorf("stored settings: %w", err)
+		}
 	}
 	if err := s.validate(); err != nil {
 		return Settings{}, fmt.Errorf("stored settings: %w", err)
 	}
 	return s, nil
+}
+
+// decodeSettings reads stored settings over s. Stored prices replace the
+// defaults whole: json would decode them into the default rows in place,
+// so a row would keep the fields it lacks from whichever default sat at
+// its index. A row saved before cache_write existed takes its model's
+// default cache-write price.
+func decodeSettings(raw []byte, s *Settings) error {
+	var stored struct {
+		Prices []map[string]json.RawMessage `json:"prices"`
+	}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return err
+	}
+	if stored.Prices != nil {
+		s.Prices = nil
+	}
+	if err := json.Unmarshal(raw, s); err != nil {
+		return err
+	}
+
+	for i, row := range stored.Prices {
+		if _, saved := row["cache_write"]; saved {
+			continue
+		}
+		model := s.Prices[i].Model
+		if d := slices.IndexFunc(usage.DefaultPrices, func(p usage.Price) bool { return p.Model == model }); d >= 0 {
+			s.Prices[i].CacheWrite = usage.DefaultPrices[d].CacheWrite
+		}
+	}
+	return nil
 }
 
 // Level is LogLevel as a slog level.
