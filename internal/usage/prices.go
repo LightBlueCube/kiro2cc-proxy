@@ -13,6 +13,10 @@ type Price struct {
 	// Input is uncached prompt tokens; Cached is cache reads.
 	Input  float64 `json:"input"`
 	Cached float64 `json:"cached"`
+	// CacheWrite, when above 0, prices all uncached prompt tokens instead
+	// of Input, as if they were written to the cache; 0 means the model
+	// has no cache-write price.
+	CacheWrite float64 `json:"cache_write"`
 	// Output includes reasoning tokens.
 	Output float64 `json:"output"`
 }
@@ -24,12 +28,17 @@ type Price struct {
 // price, so cache reads cost as much as input.
 //
 // agy reports no cache writes (cachedWriteTokens stays 0 on Claude while
-// later turns read the cache), so writes cost as plain input.
+// later turns read the cache). Measured on Claude Sonnet over three turns,
+// a turn's uncached input matched what the next turn read from the cache
+// within its newest message (29239 vs 29142 tokens), except the first
+// turn, which cached about 12k of 41k. So Claude's uncached input is
+// priced at Anthropic's 5-minute cache-write price (1.25 × input), which
+// overstates first turns.
 var DefaultPrices = []Price{
 	{Model: "gemini-4-argon", Input: 2, Cached: 0.1, Output: 10},
 	{Model: "gemini-3.8-flash", Input: 0.75, Cached: 0.075, Output: 3.75},
-	{Model: "claude-opus-5-5", Input: 4, Cached: 0.2, Output: 20},
-	{Model: "claude-sonnet-5-5", Input: 2, Cached: 0.1, Output: 10},
+	{Model: "claude-opus-5-5", Input: 4, Cached: 0.2, CacheWrite: 5, Output: 20},
+	{Model: "claude-sonnet-5-5", Input: 2, Cached: 0.1, CacheWrite: 2.5, Output: 10},
 	{Model: "gpt-oss-120b", Input: 0.09, Cached: 0.09, Output: 0.36},
 }
 
@@ -40,7 +49,7 @@ func ValidatePrices(prices []Price) error {
 		if strings.TrimSpace(p.Model) == "" {
 			return errors.New("every price needs a model id")
 		}
-		if p.Input < 0 || p.Cached < 0 || p.Output < 0 {
+		if p.Input < 0 || p.Cached < 0 || p.CacheWrite < 0 || p.Output < 0 {
 			return fmt.Errorf("price for %s: prices cannot be negative", p.Model)
 		}
 		if seen[p.Model] {
@@ -63,7 +72,11 @@ func priceOf(prices []Price, model string) (Price, bool) {
 // cost prices the tokens: prompt includes cached.
 func (p Price) cost(prompt, cached, output int64) float64 {
 	uncached := max(prompt-cached, 0)
-	return (float64(uncached)*p.Input + float64(cached)*p.Cached + float64(output)*p.Output) / 1e6
+	uncachedPrice := p.Input
+	if p.CacheWrite > 0 {
+		uncachedPrice = p.CacheWrite
+	}
+	return (float64(uncached)*uncachedPrice + float64(cached)*p.Cached + float64(output)*p.Output) / 1e6
 }
 
 func clonePrices(prices []Price) []Price { return slices.Clone(prices) }

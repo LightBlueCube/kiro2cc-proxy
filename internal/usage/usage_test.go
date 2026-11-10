@@ -30,6 +30,11 @@ func TestPrices(t *testing.T) {
 	if want := 0.6*2 + 0.4*0.1 + 0.1*10; math.Abs(got-want) > 1e-9 {
 		t.Fatalf("cost = %v, want %v", got, want)
 	}
+	// A cache-write price replaces the input price for uncached tokens.
+	got = Price{Input: 2, Cached: 0.1, CacheWrite: 2.5, Output: 10}.cost(1_000_000, 400_000, 100_000)
+	if want := 0.6*2.5 + 0.4*0.1 + 0.1*10; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("cost with cache writes = %v, want %v", got, want)
+	}
 }
 
 func TestRecordAndAttribute(t *testing.T) {

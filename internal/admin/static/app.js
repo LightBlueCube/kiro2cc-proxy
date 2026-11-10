@@ -327,13 +327,13 @@ views.settings = container => {
     const addPriceRow = p => {
       const cells = {
         model: h("input", { value: p.model, list: "price-models", required: true }),
-        input: number(p.input), cached: number(p.cached), output: number(p.output),
+        input: number(p.input), cached: number(p.cached), cache_write: number(p.cache_write), output: number(p.output),
       };
       const row = h("tr", {},
-        ["model", "input", "cached", "output"].map(k => h("td", {}, cells[k])),
+        ["model", "input", "cached", "cache_write", "output"].map(k => h("td", {}, cells[k])),
         h("td", {}, h("button", { type: "button", class: "danger", onclick: () => row.remove() }, "Remove")));
-      row.read = () => ({ model: cells.model.value.trim(),
-        input: Number(cells.input.value), cached: Number(cells.cached.value), output: Number(cells.output.value) });
+      row.read = () => ({ model: cells.model.value.trim(), input: Number(cells.input.value), cached: Number(cells.cached.value),
+        cache_write: Number(cells.cache_write.value), output: Number(cells.output.value) });
       priceRows.append(row);
     };
     s.prices.forEach(addPriceRow);
@@ -365,12 +365,12 @@ views.settings = container => {
       h("p", { class: "muted" }, "Every agy connects only to agyrelay's local egress proxy, which forwards through the account's proxy, else the fallback proxy, else directly when allowed. Otherwise the connection is refused and the account is blocked, so a forgotten proxy never turns into a direct connection. Leave direct off unless this server is abroad."),
       h("details", { class: "prices" },
         h("summary", {}, `API list prices (${s.prices.length} models, USD per 1M tokens)`),
-        h("p", { class: "muted" }, "Used for the list-price estimate of each call. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10; gpt-oss-120b uses Google Vertex's price as listed on OpenRouter. agy reports no cache writes, so they count as plain input."),
+        h("p", { class: "muted" }, "Used for the list-price estimate of each call. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10; gpt-oss-120b uses Google Vertex's price as listed on OpenRouter. agy does not report cache writes: when a model has a cache-write price, all its uncached input is priced at it (close for multi-turn use, high for a first turn); 0 = no cache-write price."),
         h("datalist", { id: "price-models" }, catalog.map(m => h("option", { value: m.id }))),
         h("div", { class: "table-wrap" }, h("table", {},
-          h("thead", {}, h("tr", {}, ["Model", "Input", "Cached input", "Output", ""].map(t => h("th", {}, t)))),
+          h("thead", {}, h("tr", {}, ["Model", "Input", "Cached input", "Cache write", "Output", ""].map(t => h("th", {}, t)))),
           priceRows)),
-        h("button", { type: "button", style: "margin-top:8px", onclick: () => addPriceRow({ model: "", input: 0, cached: 0, output: 0 }) }, "Add price")),
+        h("button", { type: "button", style: "margin-top:8px", onclick: () => addPriceRow({ model: "", input: 0, cached: 0, cache_write: 0, output: 0 }) }, "Add price")),
       h("div", { class: "row", style: "margin-top:12px" },
         h("span", { class: "grow" }),
         h("button", { type: "submit" }, "Save settings")));
