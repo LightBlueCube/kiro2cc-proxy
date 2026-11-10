@@ -18,6 +18,7 @@ import (
 
 	"agyrelay/internal/control"
 	"agyrelay/internal/guard"
+	"agyrelay/internal/logbuf"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
 	"agyrelay/internal/usage"
@@ -33,6 +34,7 @@ type Config struct {
 	Control *control.Control
 	Pool    *pool.Pool
 	Monitor *usage.Monitor
+	Logs    *logbuf.Buffer
 	// ProcessPerSession is shown read-only.
 	ProcessPerSession bool
 	Log               *slog.Logger
@@ -43,6 +45,7 @@ type Handler struct {
 	control           *control.Control
 	pool              *pool.Pool
 	monitor           *usage.Monitor
+	logs              *logbuf.Buffer
 	processPerSession bool
 	log               *slog.Logger
 	loginLimiter      *guard.Limiter
@@ -56,6 +59,7 @@ func New(cfg Config) *Handler {
 		control:           cfg.Control,
 		pool:              cfg.Pool,
 		monitor:           cfg.Monitor,
+		logs:              cfg.Logs,
 		processPerSession: cfg.ProcessPerSession,
 		log:               cfg.Log,
 		loginLimiter:      guard.NewLimiter(loginLimits),
@@ -88,6 +92,13 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/accounts/{name}/signin", h.authed(h.startLogin))
 	h.mux.HandleFunc("POST /admin/api/accounts/{name}/signin/code", h.authed(h.submitLogin))
 	h.mux.HandleFunc("DELETE /admin/api/accounts/{name}/signin", h.authed(h.cancelLogin))
+
+	h.mux.HandleFunc("GET /admin/api/logs", h.authed(h.listLogs))
+	h.mux.HandleFunc("GET /admin/api/logs/stream", h.authed(h.streamLogs))
+
+	h.mux.HandleFunc("GET /admin/api/requests", h.authed(h.listRequests))
+	h.mux.HandleFunc("GET /admin/api/usage", h.authed(h.summarize))
+	h.mux.HandleFunc("GET /admin/api/usage/filters", h.authed(h.filterValues))
 
 	h.mux.HandleFunc("GET /admin/api/models", h.authed(h.listModels))
 	h.mux.HandleFunc("GET /admin/api/keys", h.authed(h.listKeys))

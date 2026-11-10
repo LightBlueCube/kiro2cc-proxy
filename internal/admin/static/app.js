@@ -247,14 +247,36 @@ views.settings = container => {
   container.append(h("h1", {}, "Settings"), general, password, sessions, audit);
 
   async function loadGeneral() {
-    const s = await api("GET", "settings");
+    const [s, catalog] = await Promise.all([api("GET", "settings"), api("GET", "models")]);
     const turns = h("input", { type: "number", min: 1, max: 64, value: s.turns_per_account });
     const ttl = h("input", { value: s.snapshot_ttl, pattern: "[0-9hms.]+" });
     const level = h("select", {}, ["debug", "info", "warn", "error"].map(l => h("option", { value: l, selected: l === s.log_level }, l)));
+    const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
+
+    const priceRows = h("tbody");
+    const number = value => h("input", { type: "number", min: 0, step: "any", value, style: "width:90px" });
+    const addPriceRow = p => {
+      const cells = {
+        model: h("input", { value: p.model, list: "price-models", required: true }),
+        from: h("input", { type: "date", value: p.from }),
+        input: number(p.input), cached: number(p.cached), output: number(p.output),
+      };
+      const row = h("tr", {},
+        ["model", "from", "input", "cached", "output"].map(k => h("td", {}, cells[k])),
+        h("td", {}, h("button", { type: "button", class: "danger", onclick: () => row.remove() }, "Remove")));
+      row.read = () => ({ model: cells.model.value.trim(), from: cells.from.value,
+        input: Number(cells.input.value), cached: Number(cells.cached.value), output: Number(cells.output.value) });
+      priceRows.append(row);
+    };
+    s.prices.forEach(addPriceRow);
+
     const form = h("form", { onsubmit: event => {
       event.preventDefault();
       guarded(async () => {
-        await api("PUT", "settings", { ...s, turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, log_level: level.value });
+        await api("PUT", "settings", {
+          turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, log_level: level.value,
+          retention_days: Number(retention.value), prices: [...priceRows.children].map(row => row.read()),
+        });
         toast("Saved");
         await loadGeneral();
       }, event.submitter);
@@ -262,9 +284,19 @@ views.settings = container => {
       h("div", { class: "row" },
         h("label", {}, "Concurrent turns per account", turns),
         h("label", {}, "Idle session reuse (snapshot TTL)", ttl),
-        h("label", {}, "Log level", level)),
+        h("label", {}, "Log level", level),
+        h("label", {}, "Keep call records (days)", retention)),
       h("p", { class: "muted" }, `Process per session: ${s.process_per_session ? "on" : "off"} (set in the config file; needs a restart).`),
-      h("button", { type: "submit" }, "Save"));
+      h("h3", {}, "API list prices (USD per 1M tokens)"),
+      h("p", { class: "muted" }, "Used for the list-price estimate of each call. A row applies from its date (UTC) until the model's next row; leave the date empty for “always”. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10, including Google's announced increases; gpt-oss-120b has no official price."),
+      h("datalist", { id: "price-models" }, catalog.map(m => h("option", { value: m.id }))),
+      h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, ["Model", "From", "Input", "Cached input", "Output", ""].map(t => h("th", {}, t)))),
+        priceRows)),
+      h("div", { class: "row", style: "margin-top:8px" },
+        h("button", { type: "button", onclick: () => addPriceRow({ model: "", from: "", input: 0, cached: 0, output: 0 }) }, "Add price"),
+        h("span", { class: "grow" }),
+        h("button", { type: "submit" }, "Save settings")));
     general.replaceChildren(h("h2", {}, "General"), form);
   }
 
@@ -432,8 +464,247 @@ views.accounts = container => {
   return polling(container, 10000, async () => { if (signins.size === 0) await load(); });
 };
 
-// ---- placeholders until their phase lands ------------------------------
+// ---- calls -----------------------------------------------------------
 
-for (const name of ["accounts", "calls", "logs"]) {
-  views[name] = views[name] || (container => { container.append(h("h1", {}, name), h("p", { class: "muted" }, "Not available yet.")); });
+const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#9333ea", "#ea580c"];
+
+function cachePct(input, cached) { return input > 0 ? cached / input : null; }
+
+// stackedBars draws one bar per day, stacked by series, as SVG.
+function stackedBars(days, series, valueOf, label) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "chart");
+  const width = 900, height = 180, left = 50, bottom = 20;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const totals = days.map(d => series.reduce((sum, s) => sum + valueOf(d, s), 0));
+  const top = Math.max(...totals, 0) || 1;
+  const make = (tag, attrs, text) => {
+    const node = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    if (text !== undefined) node.textContent = text;
+    svg.append(node);
+    return node;
+  };
+  make("line", { x1: left, y1: height - bottom, x2: width, y2: height - bottom, class: "axis" });
+  make("text", { x: 2, y: 10 }, label(top));
+  make("text", { x: 2, y: height - bottom }, label(0));
+  const slot = (width - left) / Math.max(days.length, 1);
+  const barWidth = Math.max(Math.min(slot * 0.7, 40), 1);
+  days.forEach((day, i) => {
+    let y = height - bottom;
+    const x = left + i * slot + (slot - barWidth) / 2;
+    series.forEach((s, j) => {
+      const v = valueOf(day, s);
+      if (v <= 0) return;
+      const barHeight = (v / top) * (height - bottom - 12);
+      y -= barHeight;
+      make("rect", { x, y, width: barWidth, height: barHeight, fill: PALETTE[j % PALETTE.length] })
+        .append(Object.assign(document.createElementNS(ns, "title"), { textContent: `${day} · ${s}: ${label(v)}` }));
+    });
+    const labelEvery = Math.ceil(days.length / 15);
+    if (i % labelEvery === 0) make("text", { x: x, y: height - 6 }, day.slice(5));
+  });
+  return svg;
 }
+
+views.calls = container => {
+  const state = { range: "7d", key: "", model: "", account: "", metric: "cost" };
+  const filters = h("div", { class: "row" });
+  const totals = h("div", { class: "card" });
+  const chart = h("div", { class: "card" });
+  const byKey = h("div", { class: "card" });
+  const list = h("div", { class: "card" });
+  container.append(h("h1", {}, "Calls"), h("div", { class: "card" }, filters), totals, chart, byKey, list);
+
+  const ranges = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 };
+  const since = () => Date.now() - ranges[state.range] * 86400e3;
+  const query = extra => {
+    const q = new URLSearchParams({ since: String(Math.floor(since())), ...extra });
+    for (const f of ["key", "model", "account"]) if (state[f]) q.set(f, state[f]);
+    return q.toString();
+  };
+
+  async function renderFilters() {
+    const values = await api("GET", "usage/filters?" + new URLSearchParams({ since: String(Math.floor(since())) }));
+    const select = (field, options, all) => h("select", { onchange: e => { state[field] = e.target.value; reload(); } },
+      h("option", { value: "" }, all), options.map(v => h("option", { value: v, selected: v === state[field] }, v)));
+    filters.replaceChildren(
+      h("label", {}, "Range", h("select", { onchange: e => { state.range = e.target.value; reload(); } },
+        Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, "last " + r)))),
+      h("label", {}, "Key", select("key", values.key, "all keys")),
+      h("label", {}, "Model", select("model", values.model, "all models")),
+      h("label", {}, "Account", select("account", values.account, "all accounts")),
+      h("label", {}, "Chart", h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
+        [["cost", "list price"], ["tokens", "tokens (in + out)"], ["quota", "weekly quota"]].map(([v, t]) => h("option", { value: v, selected: v === state.metric }, t)))),
+      h("span", { class: "grow" }),
+      h("button", { onclick: e => guarded(reload, e.target) }, "Refresh"));
+  }
+
+  function renderTotals(sums) {
+    const t = sums.reduce((a, s) => {
+      for (const k of ["requests", "errors", "input", "cached", "output", "reasoning", "cost_usd", "unpriced", "quota_used"]) a[k] = (a[k] || 0) + s[k];
+      return a;
+    }, {});
+    const stat = (label, value, hint) => h("div", { title: hint || "" }, h("div", { class: "muted" }, label), h("div", { style: "font-size:18px;font-weight:600" }, value));
+    totals.replaceChildren(h("div", { class: "row", style: "gap:28px" },
+      stat("Requests", fmt.int(t.requests || 0)),
+      stat("Errors", fmt.int(t.errors || 0)),
+      stat("Input", fmt.compact(t.input)),
+      stat("Cached", fmt.compact(t.cached)),
+      stat("Cache hit", fmt.pct(cachePct(t.input, t.cached))),
+      stat("Output", fmt.compact(t.output)),
+      stat("API list price", fmt.usd(t.cost_usd || 0) + (t.unpriced ? ` (+${t.unpriced} unpriced)` : ""), "What these tokens would cost at the vendors' API list prices (Settings → Prices)"),
+      stat("Weekly quota used", fmt.pct(t.quota_used || 0, 2), "Sum of attributed weekly-quota shares; 100% = one account's whole weekly bucket")));
+  }
+
+  let dayKey = [];
+  // localDay formats a time as the browser's YYYY-MM-DD, like the server's
+  // tz-shifted grouping.
+  const localDay = ms => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  function renderChart() {
+    const days = [];
+    for (let t = since(); localDay(t) <= localDay(Date.now()); t += 86400e3) {
+      if (days[days.length - 1] !== localDay(t)) days.push(localDay(t));
+    }
+    const keys = [...new Set(dayKey.map(s => s.group.split("\x1f")[1]))].sort();
+    const cell = new Map(dayKey.map(s => [s.group, s]));
+    const valueOf = (day, key) => {
+      const s = cell.get(day + "\x1f" + key);
+      if (!s) return 0;
+      return state.metric === "cost" ? s.cost_usd : state.metric === "quota" ? s.quota_used : s.input + s.output;
+    };
+    const label = state.metric === "cost" ? fmt.usd : state.metric === "quota" ? (v => fmt.pct(v, 2)) : fmt.compact;
+    chart.replaceChildren(h("h2", {}, "Per day"),
+      keys.length ? stackedBars(days, keys, valueOf, label) : h("p", { class: "muted" }, "No calls in this range."),
+      h("div", { class: "legend" }, keys.map((k, i) => h("span", {}, h("i", { style: `background:${PALETTE[i % PALETTE.length]}` }), k))));
+  }
+
+  function renderByKey(sums) {
+    byKey.replaceChildren(h("h2", {}, "Per key"), table([
+      { title: "Key", cell: s => s.group },
+      { title: "Requests", num: true, cell: s => fmt.int(s.requests) },
+      { title: "Errors", num: true, cell: s => s.errors ? h("span", { class: "bad" }, fmt.int(s.errors)) : "0" },
+      { title: "Input", num: true, cell: s => fmt.compact(s.input) },
+      { title: "Cached", num: true, cell: s => fmt.compact(s.cached) },
+      { title: "Cache %", num: true, cell: s => fmt.pct(cachePct(s.input, s.cached)) },
+      { title: "Output", num: true, cell: s => fmt.compact(s.output) },
+      { title: "List price", num: true, cell: s => fmt.usd(s.cost_usd) + (s.unpriced ? "*" : "") },
+      { title: "Weekly quota", num: true, cell: s => fmt.pct(s.quota_used, 2) },
+    ], sums));
+  }
+
+  let rows = [];
+  async function loadRows(more) {
+    const before = more && rows.length ? { before: String(rows[rows.length - 1].id) } : {};
+    const page = await api("GET", "requests?" + query({ limit: "100", ...before }));
+    rows = more ? rows.concat(page) : page;
+    list.replaceChildren(h("div", {}, h("h2", {}, "Requests"), table([
+      { title: "Time", cell: r => fmt.time(r.at) },
+      { title: "Key", cell: r => r.key },
+      { title: "Account", cell: r => r.account || "—" },
+      { title: "Model", cell: r => h("span", { title: r.slug }, r.model) },
+      { title: "API", cell: r => r.api + (r.stream ? " ⇢" : "") },
+      { title: "Mode", cell: r => r.mode || "—" },
+      { title: "Status", cell: r => r.status === "ok" ? (r.finish || "ok") : h("span", { class: "bad", title: r.error }, r.status) },
+      { title: "Time", num: true, cell: r => fmt.ms(r.duration_ms) },
+      { title: "TTFT", num: true, cell: r => fmt.ms(r.ttft_ms) },
+      { title: "In", num: true, cell: r => fmt.compact(r.input) },
+      { title: "Cached", num: true, cell: r => fmt.compact(r.cached) },
+      { title: "Cache %", num: true, cell: r => fmt.pct(cachePct(r.input, r.cached)) },
+      { title: "Out", num: true, cell: r => fmt.compact(r.output) },
+      { title: "Reasoning", num: true, cell: r => fmt.compact(r.reasoning) },
+      { title: "List price", num: true, cell: r => fmt.usd(r.cost_usd) },
+      { title: "Quota", num: true, cell: r => r.quota_used === null ? "—" : fmt.pct(r.quota_used, 3) },
+    ], rows),
+    page.length === 100 ? h("button", { style: "margin-top:8px", onclick: e => guarded(() => loadRows(true), e.target) }, "Load more") : null,
+    h("p", { class: "muted" }, "A turn that calls client tools spans several requests; its tokens are counted on the request that ends it. Quota shares appear once the account's quota is sampled again (every 5 minutes while its agy runs).")));
+  }
+
+  async function reload() {
+    const tz = String(-new Date().getTimezoneOffset());
+    const [keySums, dayKeySums] = await Promise.all([api("GET", "usage?" + query({ by: "key", tz })), api("GET", "usage?" + query({ by: "day_key", tz }))]);
+    dayKey = dayKeySums;
+    renderTotals(keySums);
+    renderChart();
+    renderByKey(keySums);
+    await loadRows(false);
+  }
+
+  guarded(async () => { await renderFilters(); await reload(); });
+};
+
+// ---- logs ------------------------------------------------------------
+
+const MAX_LOG_LINES = 5000;
+
+views.logs = container => {
+  const state = { level: "info", component: "", account: "", q: "", live: true };
+  const box = h("div", { class: "logs" });
+  const count = h("span", { class: "muted" });
+  let source = null;
+  let lines = 0;
+
+  const filterInput = (field, placeholder) => h("input", { placeholder, value: state[field],
+    onchange: e => { state[field] = e.target.value.trim(); restart(); } });
+  const level = h("select", { onchange: e => { state.level = e.target.value; restart(); } },
+    ["debug", "info", "warn", "error"].map(l => h("option", { value: l, selected: l === state.level }, l + "+")));
+  const component = h("select", { onchange: e => { state.component = e.target.value; restart(); } },
+    h("option", { value: "" }, "all components"),
+    ["gateway", "pool", "bridge", "usage", "control", "admin"].map(c => h("option", { value: c }, c)));
+  const live = h("input", { type: "checkbox", checked: state.live, onchange: e => { state.live = e.target.checked; restart(); } });
+
+  container.append(h("h1", {}, "Logs"),
+    h("div", { class: "card row" },
+      h("label", {}, "Level", level),
+      h("label", {}, "Component", component),
+      h("label", {}, "Account", filterInput("account", "any")),
+      h("label", { class: "grow" }, "Search", filterInput("q", "text in message or fields")),
+      h("label", { style: "flex-direction:row;align-items:center" }, live, "Follow"),
+      h("button", { onclick: () => { box.replaceChildren(); lines = 0; count.textContent = ""; } }, "Clear"),
+      count),
+    box);
+
+  const params = () => {
+    const q = new URLSearchParams({ level: state.level });
+    for (const f of ["component", "account", "q"]) if (state[f]) q.set(f, state[f]);
+    return q;
+  };
+
+  function append(entries) {
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    for (const e of entries) {
+      const fields = e.attrs.filter(a => a.key !== "component").map(a => `${a.key}=${/\s/.test(a.value) ? JSON.stringify(a.value) : a.value}`).join(" ");
+      box.append(h("div", { class: e.level }, `${fmt.clock(e.time)} ${e.level.padEnd(5)} ${e.attrs.find(a => a.key === "component")?.value || "-"} ${e.message} ${fields}`));
+      lines++;
+    }
+    while (lines > MAX_LOG_LINES) { box.firstChild.remove(); lines--; }
+    count.textContent = `${lines} lines`;
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  function stop() { if (source) { source.close(); source = null; } }
+
+  async function restart() {
+    stop();
+    box.replaceChildren();
+    lines = 0;
+    await guarded(async () => {
+      append(await api("GET", "logs?" + params().toString() + "&limit=1000"));
+      box.scrollTop = box.scrollHeight;
+    });
+    if (!state.live) return;
+    // EventSource sends the session cookie; GET needs no CSRF token.
+    source = new EventSource("/admin/api/logs/stream?" + params().toString());
+    source.onmessage = msg => append([JSON.parse(msg.data)]);
+    source.onerror = () => { count.textContent = "stream interrupted; retrying…"; };
+  }
+
+  restart();
+  return stop;
+};
