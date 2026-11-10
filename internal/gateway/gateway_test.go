@@ -166,7 +166,7 @@ func TestPlainReplyThenWarmDelta(t *testing.T) {
 	if first.err != nil || first.finish != conv.FinishStop || first.text != "reply to: hello" {
 		t.Fatalf("first = %+v", first)
 	}
-	if first.usage == nil || first.usage.PromptTokens != 100 || first.usage.CompletionTokens != 15 {
+	if first.usage == nil || first.usage.PromptTokens != 140 || first.usage.CachedTokens != 40 || first.usage.CompletionTokens != 15 {
 		t.Fatalf("usage = %+v", first.usage)
 	}
 
