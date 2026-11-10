@@ -387,6 +387,49 @@ func TestAccountProxy(t *testing.T) {
 	}
 }
 
+func TestWorkers(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}, nil); r.status != http.StatusOK {
+		t.Fatalf("add = %d %s", r.status, r.raw)
+	}
+	workers := func() accountWorkersView {
+		t.Helper()
+		var v workersView
+		json.Unmarshal([]byte(c.do("GET", "/admin/api/workers", nil, nil).raw), &v)
+		if len(v.Accounts) != 1 {
+			t.Fatalf("workers = %+v", v)
+		}
+		return v.Accounts[0]
+	}
+	if a := workers(); len(a.Procs) != 0 || a.Egress == nil || a.Egress.Route != "direct" {
+		t.Fatalf("idle account = %+v", a)
+	}
+	// A quota refresh starts agy.
+	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("refresh = %d %s", r.status, r.raw)
+	}
+	if a := workers(); len(a.Procs) != 1 || a.Procs[0].PID == 0 || a.Procs[0].RSSBytes == 0 {
+		t.Fatalf("after refresh = %+v", a)
+	}
+	if r := c.do("POST", "/admin/api/workers/main/sessions/nope/cancel", nil, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("cancel unknown = %d %s", r.status, r.raw)
+	}
+	if r := c.do("POST", "/admin/api/workers/main/restart", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("restart = %d %s", r.status, r.raw)
+	}
+	if a := workers(); len(a.Procs) != 0 {
+		t.Fatalf("after restart = %+v", a)
+	}
+	if r := c.do("POST", "/admin/api/workers/nobody/restart", nil, nil); r.status != http.StatusNotFound {
+		t.Fatalf("restart unknown = %d", r.status)
+	}
+}
+
 func TestPasswordChangeSignsOthersOut(t *testing.T) {
 	e := newEnv(t)
 	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {

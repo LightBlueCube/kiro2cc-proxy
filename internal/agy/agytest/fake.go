@@ -231,6 +231,13 @@ func (f *fake) handle(msg rpcMessage) {
 		json.Unmarshal(raw, &steps)
 		f.open(p.SessionID, p, steps)
 		f.reply(msg.ID, map[string]any{})
+	case "session/close":
+		var p sessionParams
+		json.Unmarshal(msg.Params, &p)
+		f.mu.Lock()
+		delete(f.sessions, p.SessionID)
+		f.mu.Unlock()
+		f.reply(msg.ID, map[string]any{})
 	case "session/set_config_option":
 		f.reply(msg.ID, map[string]any{"configOptions": []any{}})
 	case "session/prompt":
