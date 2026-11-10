@@ -70,7 +70,7 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 	}
 	records := &recordLog{}
 	budget := &fakeBudget{used: map[string]float64{}}
-	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Recorder: records, Budget: budget, Log: logger})
+	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +247,25 @@ func TestInspectAndCloseSession(t *testing.T) {
 	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
 	if second.err != nil || second.text != "reply to: again" || len(h.requests("session/resume")) != 1 {
 		t.Fatalf("after close = %+v, resumes %d", second, len(h.requests("session/resume")))
+	}
+
+	// The janitor closes sessions idle past IdleClose and keeps others.
+	h.gw.sweep()
+	if n := len(h.requests("session/close")); n != 1 {
+		t.Fatalf("a fresh session was closed: %d closes", n)
+	}
+	h.gw.SetIdleClose(time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	h.gw.sweep()
+	if n := len(h.requests("session/close")); n != 2 || len(h.gw.Sessions()) != 0 {
+		t.Fatalf("idle close: %d closes, sessions %+v", n, h.gw.Sessions())
+	}
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: second.text}, user("third"))
+	if third := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages}); third.err != nil || third.text != "reply to: third" {
+		t.Fatalf("after idle close = %+v", third)
+	}
+	if n := len(h.requests("session/new")); n != 1 {
+		t.Fatalf("session/new = %d, want 1 (reopened, not replayed)", n)
 	}
 }
 

@@ -316,6 +316,7 @@ views.settings = container => {
     const [s, catalog] = await Promise.all([api("GET", "settings"), api("GET", "models")]);
     const turns = h("input", { type: "number", min: 1, max: 64, value: s.turns_per_account });
     const ttl = h("input", { value: s.snapshot_ttl, pattern: "[0-9hms.]+" });
+    const idleClose = h("input", { value: s.session_idle_close, pattern: "[0-9hms.]+" });
     const level = h("select", {}, ["debug", "info", "warn", "error"].map(l => h("option", { value: l, selected: l === s.log_level }, l)));
     const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
@@ -341,7 +342,7 @@ views.settings = container => {
       event.preventDefault();
       guarded(async () => {
         await api("PUT", "settings", {
-          turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, log_level: level.value,
+          turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
           retention_days: Number(retention.value), prices: [...priceRows.children].map(row => row.read()),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
         });
@@ -352,6 +353,8 @@ views.settings = container => {
       h("div", { class: "row" },
         h("label", {}, "Concurrent turns per account", turns),
         h("label", {}, "Idle session reuse (snapshot TTL)", ttl),
+        h("label", { title: "An idle session is closed in agy after this; under process-per-session its worker (~250 MiB) exits. The conversation's next request reopens it from disk in a few seconds." },
+          "Close idle sessions after", idleClose),
         h("label", {}, "Log level", level),
         h("label", {}, "Keep call records (days)", retention)),
       h("p", { class: "muted" }, `Process per session: ${s.process_per_session ? "on" : "off"} (set in the config file; needs a restart).`),

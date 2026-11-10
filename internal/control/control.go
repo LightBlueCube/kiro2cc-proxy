@@ -34,6 +34,10 @@ type Settings struct {
 	// SnapshotTTL is a Go duration ("24h"): how long an idle session stays
 	// reusable.
 	SnapshotTTL string `json:"snapshot_ttl"`
+	// SessionIdleClose is a Go duration ("5m"): how long a session stays
+	// open in agy without a turn. Closing it frees its worker (~250 MiB);
+	// the conversation's next request reopens it in a few seconds.
+	SessionIdleClose string `json:"session_idle_close"`
 	// LogLevel is debug, info, warn, or error.
 	LogLevel string `json:"log_level"`
 	// RetentionDays bounds how long request records, quota samples, and
@@ -50,7 +54,7 @@ type Settings struct {
 }
 
 func defaultSettings() Settings {
-	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", LogLevel: "info", RetentionDays: 90, Prices: slices.Clone(usage.DefaultPrices)}
+	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, Prices: slices.Clone(usage.DefaultPrices)}
 }
 
 var logLevels = map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError}
@@ -62,6 +66,10 @@ func (s Settings) validate() error {
 	ttl, err := time.ParseDuration(s.SnapshotTTL)
 	if err != nil || ttl < time.Minute {
 		return errors.New("snapshot_ttl must be a duration of at least 1m, e.g. 24h")
+	}
+	idle, err := time.ParseDuration(s.SessionIdleClose)
+	if err != nil || idle < time.Minute {
+		return errors.New("session_idle_close must be a duration of at least 1m, e.g. 5m")
 	}
 	if _, ok := logLevels[s.LogLevel]; !ok {
 		return errors.New("log_level must be debug, info, warn, or error")
@@ -80,6 +88,13 @@ func (s Settings) validate() error {
 func (s Settings) SnapshotTTLDuration() time.Duration {
 	ttl, _ := time.ParseDuration(s.SnapshotTTL)
 	return ttl
+}
+
+// SessionIdleCloseDuration is SessionIdleClose parsed (validated like
+// SnapshotTTL).
+func (s Settings) SessionIdleCloseDuration() time.Duration {
+	idle, _ := time.ParseDuration(s.SessionIdleClose)
+	return idle
 }
 
 // LoadSettings reads the stored settings over the defaults. The process
@@ -173,6 +188,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.mu.Unlock()
 	c.cfg.Pool.SetTurnsPerAccount(s.TurnsPerAccount)
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
+	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
 	return c.applyRoutes(ctx)

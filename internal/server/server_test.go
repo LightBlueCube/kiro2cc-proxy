@@ -63,7 +63,7 @@ func newRelay(t *testing.T) *relay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Log: logger})
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
