@@ -32,6 +32,8 @@ const (
 	TurnParked TurnState = "waiting for tool results"
 	// TurnDetached runs with no client reading it.
 	TurnDetached TurnState = "running unobserved"
+	// TurnClosing is no turn: the idle session is being closed.
+	TurnClosing TurnState = "closing"
 )
 
 type TurnInfo struct {
@@ -76,6 +78,8 @@ func turnInfo(at *activeTurn) *TurnInfo {
 	model, _, _ := strings.Cut(at.choice, "\x00")
 	info := &TurnInfo{Model: model, Started: at.started}
 	switch {
+	case at.closing:
+		info.State = TurnClosing
 	case at.turn == nil:
 		info.State = TurnStarting
 	case at.parked != nil:
@@ -112,21 +116,15 @@ func (g *Gateway) CancelTurn(account, sessionID string) error {
 // --process-per-session ends its worker. Its snapshot stays: the next
 // request of that conversation reopens the session from disk.
 func (g *Gateway) CloseSession(ctx context.Context, account, sessionID string) error {
-	ref := sessionRef(account, sessionID)
 	g.mu.Lock()
-	sess := g.sessions[ref]
-	if sess == nil || sess.turn != nil {
+	sess := g.sessions[sessionRef(account, sessionID)]
+	if sess == nil || sess.turn != nil || !sess.proc.Alive() || !sess.proc.HasSession(sessionID) {
 		g.mu.Unlock()
-		return fmt.Errorf("%w that is idle", ErrNoSession)
+		return fmt.Errorf("%w that is open and idle", ErrNoSession)
 	}
-	delete(g.sessions, ref)
+	claim := g.claimClosingLocked(sess)
 	g.mu.Unlock()
-
-	sess.binding.Close()
-	if !sess.proc.Alive() || !sess.proc.HasSession(sessionID) {
-		return nil
-	}
-	if err := sess.proc.CloseSession(ctx, sessionID); err != nil {
+	if err := g.closeClaimed(ctx, claim); err != nil {
 		return err
 	}
 	g.log.Info("session closed by the admin", "account", account, "session", sessionID)

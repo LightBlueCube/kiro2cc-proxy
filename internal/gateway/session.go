@@ -152,6 +152,15 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 		if sess != nil && sess.turn != nil {
 			old := sess.turn
 			g.mu.Unlock()
+			if old.closing {
+				// Being closed for idleness: wait, then reopen it.
+				select {
+				case <-old.closed:
+					continue
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
 			if old.turn == nil {
 				return nil, errSessionBusy
 			}

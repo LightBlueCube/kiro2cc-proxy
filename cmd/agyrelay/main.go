@@ -132,6 +132,7 @@ func runServe(args []string) error {
 		Bridge:      tools,
 		DataDir:     cfg.DataDir,
 		SnapshotTTL: settings.SnapshotTTLDuration(),
+		IdleClose:   settings.SessionIdleCloseDuration(),
 		Recorder:    recorder,
 		Budget:      budget,
 		Log:         log.With("component", "gateway"),

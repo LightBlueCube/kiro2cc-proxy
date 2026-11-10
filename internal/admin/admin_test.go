@@ -60,7 +60,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	budget := usage.NewBudget(st)
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Budget: budget, Log: log})
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestAccountProxy(t *testing.T) {
 	}
 	settings := func(fallback string, direct bool) reply {
 		t.Helper()
-		s := map[string]any{"turns_per_account": 1, "snapshot_ttl": "24h", "log_level": "info", "retention_days": 90,
+		s := map[string]any{"turns_per_account": 1, "snapshot_ttl": "24h", "session_idle_close": "5m", "log_level": "info", "retention_days": 90,
 			"prices": []any{}, "fallback_proxy": fallback, "allow_direct": direct}
 		return c.do("PUT", "/admin/api/settings", s, nil)
 	}
@@ -484,9 +484,9 @@ func TestSettingsValidation(t *testing.T) {
 	if r := c.do("PUT", "/admin/api/settings", bad, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad settings = %d %s", r.status, r.raw)
 	}
-	good := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "log_level": "debug", "retention_days": 30,
+	good := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30,
 		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
-	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "log_level": "debug", "retention_days": 30,
+	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30,
 		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}, {"model": "m", "input": 2, "cached": 0.1, "output": 2}}}
 	if r := c.do("PUT", "/admin/api/settings", badPrice, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad price = %d %s", r.status, r.raw)

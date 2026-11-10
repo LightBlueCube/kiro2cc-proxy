@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agyrelay/internal/agy"
@@ -26,7 +27,7 @@ const (
 	// defaultQuotaCooldown applies when a quota notice names no reset time.
 	defaultQuotaCooldown = time.Hour
 	maxAttempts          = 3
-	janitorInterval      = 10 * time.Minute
+	janitorInterval      = 30 * time.Second
 )
 
 type Config struct {
@@ -36,6 +37,10 @@ type Config struct {
 	DataDir string
 	// SnapshotTTL bounds how long an idle session stays reusable.
 	SnapshotTTL time.Duration
+	// IdleClose is how long a session stays open in agy without a turn;
+	// then it is closed (under --process-per-session its worker exits) and
+	// the next request of the conversation reopens it from disk.
+	IdleClose time.Duration
 	// Recorder, when set, receives a record of every request.
 	Recorder Recorder
 	// Budget measures key quota use; it must be set when keys have limits.
@@ -58,6 +63,8 @@ type Gateway struct {
 	recorder Recorder
 	budget   Budget
 	stop     chan struct{}
+	// idleClose is a time.Duration.
+	idleClose atomic.Int64
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
 	mu       sync.Mutex
@@ -107,6 +114,9 @@ type activeTurn struct {
 	endSteps int
 	// closed is closed after the settled turn was cleaned up.
 	closed chan struct{}
+	// closing marks a claim held while the idle session is closed in agy;
+	// closed is closed when that is done.
+	closing bool
 }
 
 func newActiveTurn(sess *session) *activeTurn {
@@ -129,9 +139,13 @@ func New(cfg Config) (*Gateway, error) {
 		stop:     make(chan struct{}),
 		sessions: map[string]*session{},
 	}
+	g.idleClose.Store(int64(cfg.IdleClose))
 	go g.janitor()
 	return g, nil
 }
+
+// SetIdleClose changes how long an idle session stays open in agy.
+func (g *Gateway) SetIdleClose(d time.Duration) { g.idleClose.Store(int64(d)) }
 
 // Close stops background work. Running turns end with their processes.
 func (g *Gateway) Close() { close(g.stop) }
@@ -567,8 +581,8 @@ func (g *Gateway) countSteps(at *activeTurn) int {
 	return steps
 }
 
-// janitor evicts idle sessions past the snapshot TTL and sessions of dead
-// processes.
+// janitor closes sessions idle past IdleClose (or the snapshot TTL, if
+// shorter) and drops sessions agy no longer holds.
 func (g *Gateway) janitor() {
 	ticker := time.NewTicker(janitorInterval)
 	defer ticker.Stop()
@@ -578,17 +592,58 @@ func (g *Gateway) janitor() {
 			return
 		case <-ticker.C:
 		}
-		g.mu.Lock()
-		for ref, sess := range g.sessions {
-			idle := sess.turn == nil && time.Since(sess.lastUsed) > g.snaps.ttl()
-			dead := sess.turn == nil && !sess.proc.Alive()
-			if idle || dead {
-				sess.binding.Close()
-				delete(g.sessions, ref)
-			}
-		}
-		g.mu.Unlock()
+		g.sweep()
 	}
+}
+
+// sweep is one janitor pass.
+func (g *Gateway) sweep() {
+	limit := min(time.Duration(g.idleClose.Load()), g.snaps.ttl())
+	var idle []*activeTurn
+	g.mu.Lock()
+	for ref, sess := range g.sessions {
+		if sess.turn != nil {
+			continue
+		}
+		if !sess.proc.Alive() || !sess.proc.HasSession(sess.id) {
+			sess.binding.Close()
+			delete(g.sessions, ref)
+			continue
+		}
+		if time.Since(sess.lastUsed) > limit {
+			idle = append(idle, g.claimClosingLocked(sess))
+		}
+	}
+	g.mu.Unlock()
+	for _, claim := range idle {
+		if err := g.closeClaimed(context.Background(), claim); err != nil {
+			g.log.Warn("closing an idle session failed", "session", claim.sess.id, "err", err)
+			continue
+		}
+		g.log.Debug("idle session closed", "account", claim.sess.account.Name(), "session", claim.sess.id)
+	}
+}
+
+// claimClosingLocked reserves an idle session for closing; requests for
+// it wait until the close is done and then reopen it. It needs g.mu.
+func (g *Gateway) claimClosingLocked(sess *session) *activeTurn {
+	claim := newActiveTurn(sess)
+	claim.closing = true
+	sess.turn = claim
+	return claim
+}
+
+// closeClaimed closes the claimed session in agy and forgets it here;
+// its snapshot stays.
+func (g *Gateway) closeClaimed(ctx context.Context, claim *activeTurn) error {
+	sess := claim.sess
+	err := sess.proc.CloseSession(ctx, sess.id)
+	g.mu.Lock()
+	sess.binding.Close()
+	delete(g.sessions, sess.ref)
+	g.mu.Unlock()
+	close(claim.closed)
+	return err
 }
 
 var errSessionBusy = errors.New("session is starting a turn for another request")
