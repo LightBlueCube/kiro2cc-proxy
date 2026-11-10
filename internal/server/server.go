@@ -30,6 +30,11 @@ func New(keys []Key, handler *openai.Handler) *Server {
 			s.openai.Chat(w, r, user)
 		}
 	})
+	s.mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		if user, ok := s.authenticate(w, r); ok {
+			s.openai.Responses(w, r, user)
+		}
+	})
 	s.mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authenticate(w, r); ok {
 			s.openai.Models(w, r)

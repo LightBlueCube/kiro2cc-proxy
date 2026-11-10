@@ -37,6 +37,10 @@ type Message struct {
 	// ToolCallID and ToolName identify the call a RoleTool message answers.
 	ToolCallID string
 	ToolName   string
+	// Anchors are opaque values the client returned with an assistant
+	// message (Event.Anchor of an earlier response). Codecs carry them
+	// without interpreting them.
+	Anchors []string
 }
 
 // ToolSpec is a client tool offered to the model.
@@ -78,7 +82,10 @@ type Event struct {
 	Text      string
 	Reasoning string
 	ToolCalls []ToolCall
-	Usage     *Usage
+	// Anchor is an opaque value the client should return with this
+	// response's assistant message; it is the last event before Finish.
+	Anchor string
+	Usage  *Usage
 	// Finish ends a successful response.
 	Finish FinishReason
 	// Err ends a failed response.

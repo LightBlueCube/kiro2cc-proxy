@@ -75,6 +75,7 @@ type result struct {
 	text      string
 	reasoning string
 	calls     []conv.ToolCall
+	anchor    string
 	usage     *conv.Usage
 	finish    conv.FinishReason
 	err       *conv.Error
@@ -87,6 +88,9 @@ func (h *harness) complete(ctx context.Context, user string, req conv.Request) r
 		r.text += ev.Text
 		r.reasoning += ev.Reasoning
 		r.calls = append(r.calls, ev.ToolCalls...)
+		if ev.Anchor != "" {
+			r.anchor = ev.Anchor
+		}
 		if ev.Usage != nil {
 			r.usage = ev.Usage
 		}
@@ -296,7 +300,9 @@ func TestDisconnectCancelsTurn(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan result)
-	go func() { done <- h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}}) }()
+	go func() {
+		done <- h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}})
+	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for len(h.requests("session/prompt")) == 0 {
 		if time.Now().After(deadline) {
@@ -311,6 +317,38 @@ func TestDisconnectCancelsTurn(t *testing.T) {
 			t.Fatal("session/cancel never sent")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestAnchorLetsAnotherKeyContinue(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	messages := []conv.Message{user("hello")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil || first.anchor == "" {
+		t.Fatalf("first = %+v", first)
+	}
+	if _, ok := parseAnchor(first.anchor); !ok {
+		t.Fatalf("anchor %q does not parse", first.anchor)
+	}
+
+	// Without the anchor bob cannot reach alice's session.
+	reply := conv.Message{Role: conv.RoleAssistant, Text: first.text, Anchors: []string{"gAAAA-other-provider", "agr1.!!!"}}
+	bob := h.complete(ctx, "bob", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello"), reply, user("more")}})
+	if bob.err != nil || len(h.requests("session/new")) != 2 {
+		t.Fatalf("bob without anchor = %+v, sessions %d", bob, len(h.requests("session/new")))
+	}
+
+	// With it he continues the session warm, wherever the anchor sits.
+	carol := []conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: first.text}, user("again")}
+	carol[0].Anchors = []string{first.anchor}
+	r := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: carol})
+	if r.err != nil || r.text != "reply to: again" {
+		t.Fatalf("carol = %+v", r)
+	}
+	prompts := h.requests("session/prompt")
+	if len(h.requests("session/new")) != 2 || prompts[len(prompts)-1].Params.SessionID != prompts[0].Params.SessionID {
+		t.Fatal("anchored request did not reuse alice's session")
 	}
 }
 

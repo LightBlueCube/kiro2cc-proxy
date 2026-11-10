@@ -1,5 +1,11 @@
-// Package openai implements the OpenAI Chat Completions wire format on top
-// of the protocol-neutral conv model.
+// Package openai implements the OpenAI Chat Completions and Responses wire
+// formats on top of the protocol-neutral conv model.
+//
+// Reasoning travels in the fields clients already round-trip: Chat uses
+// reasoning_content plus OpenRouter-style reasoning_details, Responses uses
+// reasoning items. The gateway's anchor rides as the "encrypted" reasoning
+// data (reasoning.encrypted / encrypted_content); it is not encrypted, the
+// field is only where clients keep opaque reasoning state.
 package openai
 
 import (
@@ -20,13 +26,49 @@ type chatRequest struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options"`
 	ReasoningEffort string `json:"reasoning_effort"`
+	// Reasoning is OpenRouter's reasoning control.
+	Reasoning *struct {
+		Effort  string `json:"effort"`
+		Exclude bool   `json:"exclude"`
+	} `json:"reasoning"`
 }
+
+func (r chatRequest) effort() string {
+	if r.ReasoningEffort == "" && r.Reasoning != nil {
+		return r.Reasoning.Effort
+	}
+	return r.ReasoningEffort
+}
+
+// hideReasoning reports whether the client asked to omit reasoning text.
+// The anchor is still sent: it is state, not reasoning.
+func (r chatRequest) hideReasoning() bool { return r.Reasoning != nil && r.Reasoning.Exclude }
 
 type chatMessage struct {
 	Role       string          `json:"role"`
 	Content    json.RawMessage `json:"content"`
 	ToolCalls  []chatToolCall  `json:"tool_calls"`
 	ToolCallID string          `json:"tool_call_id"`
+	// ReasoningDetails stays raw: other providers' entries have other
+	// shapes and must not fail the request.
+	ReasoningDetails json.RawMessage `json:"reasoning_details"`
+}
+
+// OpenRouter reasoning_details entry types.
+const (
+	detailText      = "reasoning.text"
+	detailEncrypted = "reasoning.encrypted"
+	detailFormat    = "agyrelay-v1"
+)
+
+// reasoningDetail is one reasoning_details entry. Index orders entries of
+// one message; stream deltas with the same index continue an entry.
+type reasoningDetail struct {
+	Type   string `json:"type"`
+	Text   string `json:"text,omitempty"`
+	Data   string `json:"data,omitempty"`
+	Format string `json:"format,omitempty"`
+	Index  int    `json:"index"`
 }
 
 type chatToolCall struct {
@@ -64,7 +106,7 @@ func decodeRequest(req chatRequest) (conv.Request, error) {
 	if req.Model == "" {
 		return conv.Request{}, errors.New("model is required")
 	}
-	out := conv.Request{Model: req.Model, Effort: req.ReasoningEffort}
+	out := conv.Request{Model: req.Model, Effort: req.effort()}
 	for i, tool := range req.Tools {
 		if tool.Type != "function" {
 			return conv.Request{}, fmt.Errorf("tools[%d]: only function tools are supported", i)
@@ -97,7 +139,7 @@ func decodeMessage(m chatMessage, callNames map[string]string) (conv.Message, er
 	case "user":
 		return conv.Message{Role: conv.RoleUser, Text: text, Images: images}, nil
 	case "assistant":
-		msg := conv.Message{Role: conv.RoleAssistant, Text: text}
+		msg := conv.Message{Role: conv.RoleAssistant, Text: text, Anchors: detailAnchors(m.ReasoningDetails)}
 		for j, call := range m.ToolCalls {
 			args, err := decodeArguments(call.Function.Arguments)
 			if err != nil {
@@ -114,6 +156,26 @@ func decodeMessage(m chatMessage, callNames map[string]string) (conv.Message, er
 		return conv.Message{Role: conv.RoleTool, Text: text, Images: images, ToolCallID: m.ToolCallID, ToolName: callNames[m.ToolCallID]}, nil
 	}
 	return conv.Message{}, fmt.Errorf("unsupported role %q", m.Role)
+}
+
+// detailAnchors collects the data of reasoning.encrypted entries. Entries
+// it cannot read belong to someone else and are skipped.
+func detailAnchors(raw json.RawMessage) []string {
+	var entries []json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil {
+		return nil
+	}
+	var anchors []string
+	for _, entry := range entries {
+		var detail struct {
+			Type string `json:"type"`
+			Data string `json:"data"`
+		}
+		if json.Unmarshal(entry, &detail) == nil && detail.Type == detailEncrypted && detail.Data != "" {
+			anchors = append(anchors, detail.Data)
+		}
+	}
+	return anchors
 }
 
 // decodeArguments accepts the string-encoded JSON object; models and
