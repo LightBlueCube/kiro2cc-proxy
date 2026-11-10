@@ -48,7 +48,8 @@ func parseAnchor(value string) (anchor, bool) {
 
 // anchoredSnapshot finds the session named by the request's furthest
 // usable anchor: the request must still contain the anchored prefix, a
-// message must follow it, and the session must not have moved past it.
+// message must follow it, and the session must still hold that position
+// or be able to rewind to it.
 // Where in the transcript the client put the anchor does not matter.
 func (g *Gateway) anchoredSnapshot(t *transcript) (snapshot, bool) {
 	best := snapshot{}
@@ -59,8 +60,8 @@ func (g *Gateway) anchoredSnapshot(t *transcript) (snapshot, bool) {
 			if !ok || a.Count >= len(t.body) || t.hashes[a.Count] != a.Hash || (found && a.Count <= best.Count) {
 				continue
 			}
-			snap, ok := g.snaps.get(a.Account, a.SessionID)
-			if !ok || snap.Count != a.Count || snap.Hash != a.Hash {
+			snap, ok := g.snaps.position(a.Account, a.SessionID, a.Count, a.Hash)
+			if !ok {
 				continue
 			}
 			best, found = snap, true

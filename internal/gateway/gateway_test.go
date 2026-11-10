@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,11 @@ type harness struct {
 // environment per account index.
 func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness {
 	t.Helper()
+	return newHarnessMode(t, accounts, extraEnv, false)
+}
+
+func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSession bool) *harness {
+	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "acp.jsonl")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -55,7 +61,7 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := pool.New(pool.Config{Bin: os.Args[0], Accounts: configs, TurnsPerAccount: 4, Log: logger})
+	p, err := pool.New(pool.Config{Bin: os.Args[0], Accounts: configs, TurnsPerAccount: 4, ProcessPerSession: perSession, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +114,9 @@ type acpRequest struct {
 	Method string `json:"method"`
 	Params struct {
 		SessionID string `json:"sessionId"`
+		// CascadeID and StepIndex are language server parameters.
+		CascadeID string `json:"cascadeId"`
+		StepIndex int    `json:"stepIndex"`
 		Prompt    []struct {
 			Type     string `json:"type"`
 			Text     string `json:"text"`
@@ -118,7 +127,8 @@ type acpRequest struct {
 	} `json:"params"`
 }
 
-// requests returns the logged ACP requests with the given method.
+// requests returns the logged requests with the given method, or all of
+// them for "".
 func (h *harness) requests(method string) []acpRequest {
 	h.t.Helper()
 	file, err := os.Open(h.log)
@@ -137,7 +147,7 @@ func (h *harness) requests(method string) []acpRequest {
 		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
 			h.t.Fatalf("bad log line: %v", err)
 		}
-		if req.Method == method {
+		if method == "" || req.Method == method {
 			out = append(out, req)
 		}
 	}
@@ -357,5 +367,141 @@ func TestUnknownModel(t *testing.T) {
 	r := h.complete(context.Background(), "alice", conv.Request{Model: "nope", Messages: []conv.Message{user("hi")}})
 	if r.err == nil || r.err.Kind != conv.ErrUnknownModel {
 		t.Fatalf("result = %+v", r)
+	}
+}
+
+// assertRewound checks that the last revert kept keep steps of the session
+// and that session/resume followed it before the next prompt.
+func (h *harness) assertRewound(sessionID string, keep int) {
+	h.t.Helper()
+	reverts := h.requests("ls/RevertToCascadeStep")
+	if len(reverts) == 0 {
+		h.t.Fatal("no revert")
+	}
+	last := reverts[len(reverts)-1]
+	if last.Params.CascadeID != sessionID || last.Params.StepIndex != keep-1 {
+		h.t.Fatalf("revert = %+v, want session %s stepIndex %d", last.Params, sessionID, keep-1)
+	}
+	var after []string
+	reverted := false
+	for _, req := range h.requests("") {
+		if req.Method == "ls/RevertToCascadeStep" {
+			reverted, after = true, nil
+			continue
+		}
+		if reverted && strings.HasPrefix(req.Method, "session/") {
+			after = append(after, req.Method)
+		}
+	}
+	if len(after) < 2 || after[0] != "session/resume" {
+		h.t.Fatalf("after revert: %v, want session/resume first", after)
+	}
+}
+
+func TestRegenerateRewindsSession(t *testing.T) {
+	for _, perSession := range []bool{false, true} {
+		t.Run(fmt.Sprintf("perSession=%v", perSession), func(t *testing.T) {
+			h := newHarnessMode(t, 1, nil, perSession)
+			ctx := context.Background()
+			messages := []conv.Message{user("one")}
+			first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+			messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("two"))
+			second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+			if first.err != nil || second.err != nil {
+				t.Fatalf("first = %+v, second = %+v", first, second)
+			}
+
+			// The client regenerates the second reply with another input.
+			retry := append(slices.Clone(messages[:2]), user("@steps"))
+			r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: retry})
+			if r.err != nil || r.text != "steps: 2" {
+				t.Fatalf("regenerated = %+v, want the session rewound to 2 steps", r)
+			}
+			sessionID := h.requests("session/prompt")[0].Params.SessionID
+			h.assertRewound(sessionID, 2)
+			if n := len(h.requests("session/new")); n != 1 {
+				t.Fatalf("session/new count = %d, want 1", n)
+			}
+
+			// The discarded branch's own position is gone; continuing it
+			// rewinds to the shared one again and sends the rest as delta.
+			discarded := append(slices.Clone(messages), conv.Message{Role: conv.RoleAssistant, Text: second.text}, user("three"))
+			if r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: discarded}); r.err != nil {
+				t.Fatal(r.err)
+			}
+			if n := len(h.requests("ls/RevertToCascadeStep")); n != 2 {
+				t.Fatalf("revert count = %d, want 2", n)
+			}
+			h.assertRewound(sessionID, 2)
+			prompts := h.requests("session/prompt")
+			delta := prompts[len(prompts)-1].Params.Prompt[0]
+			if delta.Resource == nil || !strings.Contains(delta.Resource.Text, "two") {
+				t.Fatalf("delta = %+v, want the discarded branch from message 3 on", delta)
+			}
+		})
+	}
+}
+
+func TestRewindToEndOfToolTurn(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	messages := []conv.Message{user(`@tool read {}`)}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, Text: "x"},
+	)
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: second.text})
+	third := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: append(slices.Clone(messages), user("next")), Tools: tools})
+	if first.err != nil || second.err != nil || third.err != nil {
+		t.Fatalf("setup: %+v %+v %+v", first, second, third)
+	}
+
+	// user, planner with the call, tool result, planner with the answer.
+	r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: append(messages, user("@steps")), Tools: tools})
+	if r.err != nil || r.text != "steps: 4" {
+		t.Fatalf("regenerated = %+v", r)
+	}
+	h.assertRewound(h.requests("session/prompt")[0].Params.SessionID, 4)
+}
+
+func TestPositionsKeepOnlyRewindableHistory(t *testing.T) {
+	store, err := openSnapshotStore(filepath.Join(t.TempDir(), "snapshots.json"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(count, steps int) snapshot {
+		return snapshot{User: "u", Account: "a", SessionID: "s", Count: count, Hash: fmt.Sprint("h", count), Steps: steps}
+	}
+	for _, snap := range []snapshot{at(2, 2), at(4, 4), at(5, 0), at(7, 8)} {
+		if err := store.put(snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	counts := func() []int {
+		var out []int
+		for _, snap := range store.bySession[sessionRef("a", "s")] {
+			out = append(out, snap.Count)
+		}
+		return out
+	}
+	if got := counts(); !slices.Equal(got, []int{2, 4, 7}) {
+		t.Fatalf("positions = %v; the parked one is not rewindable", got)
+	}
+
+	if err := store.rewound("a", "s", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.position("a", "s", 4, "h4"); ok {
+		t.Fatal("position past the rewind is still known")
+	}
+	reloaded, err := openSnapshotStore(store.path, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reloaded.position("a", "s", 2, "h2"); !ok || len(reloaded.byPrefix) != 1 {
+		t.Fatalf("reloaded = %+v", reloaded.bySession)
 	}
 }

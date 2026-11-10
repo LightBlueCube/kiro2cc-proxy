@@ -86,6 +86,11 @@ type activeTurn struct {
 	// consuming is true while a response reads the turn's events.
 	consuming bool
 	finished  bool
+	// baseSteps is a lower bound of the session's native steps at launch.
+	baseSteps int
+	// endSteps is the native step count after the turn ended normally, 0
+	// when unknown. It is set before closed is closed.
+	endSteps int
 	// closed is closed after the settled turn was cleaned up.
 	closed chan struct{}
 }
@@ -289,7 +294,7 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 			group := ev.Payload.(*callGroup)
 			reply := conv.Message{Role: conv.RoleAssistant, Text: text.String(), ToolCalls: group.toolCalls()}
 			g.park(at, group)
-			mark := g.record(at, r, &reply)
+			mark := g.record(at, r, &reply, 0)
 			if !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.send(conv.Event{Anchor: mark}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
 				g.log.Info("client left after tool calls; turn stays parked", "session", at.sess.id)
 			}
@@ -344,7 +349,8 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard
 			return nil
 		}
 	}
-	mark := g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()})
+	<-at.closed // endSteps is set
+	mark := g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()}, at.endSteps)
 	if outcome.Usage != nil {
 		if !w.send(conv.Event{Usage: usageFrom(outcome.Usage)}) {
 			return nil
@@ -368,7 +374,7 @@ func (g *Gateway) abandon(at *activeTurn, r *run) *attemptFailure {
 	at.consuming = false
 	g.mu.Unlock()
 	at.turn.Cancel()
-	g.record(at, r, nil)
+	g.record(at, r, nil, 0)
 	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "client disconnected"}}
 }
 
@@ -398,10 +404,11 @@ func usageFrom(u *agy.Usage) *conv.Usage {
 	}
 }
 
-// record stores the session's snapshot: the request's transcript plus the
-// reply agy produced for it (nil when the reply is not reusable). It
-// returns the anchor naming that position.
-func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message) string {
+// record stores the session's latest position: the request's transcript
+// plus the reply agy produced for it (nil when the reply is not reusable),
+// with steps native steps (0 when it cannot be rewound to). It returns the
+// anchor naming that position.
+func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message, steps int) string {
 	count, hash := len(r.t.body), r.t.hashes[len(r.t.body)]
 	if reply != nil {
 		count++
@@ -415,6 +422,7 @@ func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message) string {
 		SystemHash: hashString(r.t.system),
 		Count:      count,
 		Hash:       hash,
+		Steps:      steps,
 	}
 	if err := g.snaps.put(snap); err != nil {
 		g.log.Warn("snapshot not persisted", "err", err)
@@ -455,7 +463,24 @@ func (g *Gateway) watch(at *activeTurn) {
 	if unobserved && outcome.StopReason != agy.StopCancelled {
 		g.forget(at.account.Name(), at.sess.id)
 	}
+	if outcome.Err == nil && outcome.StopReason == agy.StopEndTurn {
+		at.endSteps = g.countSteps(at)
+	}
 	close(at.closed)
+}
+
+// countSteps counts the session's native steps before another turn can
+// claim it; 0 leaves the position unrewindable.
+func (g *Gateway) countSteps(at *activeTurn) int {
+	g.mu.Lock()
+	proc := at.sess.proc
+	g.mu.Unlock()
+	steps, err := proc.StepCount(context.Background(), at.sess.id, at.baseSteps)
+	if err != nil {
+		g.log.Warn("native step count unavailable; position cannot be rewound to", "session", at.sess.id, "err", err)
+		return 0
+	}
+	return steps
 }
 
 // janitor evicts idle sessions past the snapshot TTL and sessions of dead
