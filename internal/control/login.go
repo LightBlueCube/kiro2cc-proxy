@@ -25,6 +25,9 @@ func (c *Control) StartLogin(ctx context.Context, name string) (string, error) {
 	if account == nil {
 		return "", store.ErrNotFound
 	}
+	if err := account.Blocked(); err != nil {
+		return "", &InputError{"cannot sign in: " + err.Error()}
+	}
 	c.CancelLogin(name)
 	login, err := agy.StartLogin(ctx, agy.LoginConfig{
 		Bin:       c.cfg.AgyBin,

@@ -19,13 +19,18 @@ type Price struct {
 
 // DefaultPrices are the vendors' list prices as of 2026-11-10, from
 // ai.google.dev/gemini-api/docs/pricing and
-// platform.claude.com/docs/en/about-claude/pricing. gpt-oss-120b has no
-// official price.
+// platform.claude.com/docs/en/about-claude/pricing. gpt-oss-120b uses
+// Google Vertex's price as OpenRouter lists it, which names no cached
+// price, so cache reads cost as much as input.
+//
+// agy reports no cache writes (cachedWriteTokens stays 0 on Claude while
+// later turns read the cache), so writes cost as plain input.
 var DefaultPrices = []Price{
 	{Model: "gemini-4-argon", Input: 2, Cached: 0.1, Output: 10},
 	{Model: "gemini-3.8-flash", Input: 0.75, Cached: 0.075, Output: 3.75},
 	{Model: "claude-opus-5-5", Input: 4, Cached: 0.2, Output: 20},
 	{Model: "claude-sonnet-5-5", Input: 2, Cached: 0.1, Output: 10},
+	{Model: "gpt-oss-120b", Input: 0.09, Cached: 0.09, Output: 0.36},
 }
 
 // ValidatePrices reports the first malformed entry.

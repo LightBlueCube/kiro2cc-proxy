@@ -18,6 +18,7 @@ import (
 	"agyrelay/internal/agy/agytest"
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/control"
+	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/logbuf"
 	"agyrelay/internal/pool"
@@ -69,8 +70,14 @@ func newEnv(t *testing.T) *env {
 	}
 	monitor := usage.NewMonitor(usage.MonitorConfig{Store: st, Pool: p, Profile: gateway.IdleProfile(), Log: log})
 	recorder := usage.NewRecorder(st, settings.Prices, log)
+	outbound, err := egress.Start(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fake agy makes no outbound connections; let accounts route directly.
+	settings.AllowDirect = true
 	ctl, err := control.New(context.Background(), control.Config{
-		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, AgyBin: os.Args[0], Level: new(slog.LevelVar),
+		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, AgyBin: os.Args[0], Level: new(slog.LevelVar),
 		AccountsDir: filepath.Join(dir, "accounts"), Settings: settings, Log: log,
 	})
 	if err != nil {
@@ -81,6 +88,7 @@ func newEnv(t *testing.T) *env {
 	srv := httptest.NewServer(New(Config{Store: st, Control: ctl, Pool: p, Monitor: monitor, Logs: logs, Log: log}))
 	t.Cleanup(func() {
 		srv.Close()
+		outbound.Close()
 		gw.Close()
 		p.Close()
 		b.Close()
@@ -337,6 +345,42 @@ func TestAccountProxy(t *testing.T) {
 	}
 	if r := c.do("PUT", "/admin/api/accounts/main/proxy", map[string]string{"proxy": ""}, nil); r.status != http.StatusOK || proxyOf() != "" {
 		t.Fatalf("clear = %d %s", r.status, r.raw)
+	}
+
+	// Without its own proxy the account follows the settings: direct when
+	// allowed, the fallback proxy, or blocked.
+	routeOf := func() (string, string) {
+		t.Helper()
+		var accounts []accountView
+		json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &accounts)
+		return accounts[0].Route, accounts[0].Blocked
+	}
+	if route, blocked := routeOf(); route != "direct" || blocked != "" {
+		t.Fatalf("allowed direct: route %q, blocked %q", route, blocked)
+	}
+	settings := func(fallback string, direct bool) reply {
+		t.Helper()
+		s := map[string]any{"turns_per_account": 1, "snapshot_ttl": "24h", "log_level": "info", "retention_days": 90,
+			"prices": []any{}, "fallback_proxy": fallback, "allow_direct": direct}
+		return c.do("PUT", "/admin/api/settings", s, nil)
+	}
+	if r := settings("socks5://127.0.0.1:1", false); r.status != http.StatusBadRequest {
+		t.Fatalf("bad fallback = %d %s", r.status, r.raw)
+	}
+	if r := settings("", false); r.status != http.StatusOK {
+		t.Fatalf("no route = %d %s", r.status, r.raw)
+	}
+	if route, blocked := routeOf(); route != "refused" || !strings.Contains(blocked, "no proxy") {
+		t.Fatalf("no route: route %q, blocked %q", route, blocked)
+	}
+	if r := c.do("POST", "/admin/api/accounts/main/signin", nil, nil); r.status != http.StatusBadRequest || !strings.Contains(r.raw, "no proxy") {
+		t.Fatalf("sign-in without a route = %d %s", r.status, r.raw)
+	}
+	if r := settings("http://127.0.0.1:7899", false); r.status != http.StatusOK {
+		t.Fatalf("fallback = %d %s", r.status, r.raw)
+	}
+	if route, blocked := routeOf(); route != "proxy http://127.0.0.1:7899" || blocked != "" {
+		t.Fatalf("fallback: route %q, blocked %q", route, blocked)
 	}
 	if r := c.do("PUT", "/admin/api/accounts/nobody/proxy", map[string]string{"proxy": ""}, nil); r.status != http.StatusNotFound {
 		t.Fatalf("unknown account = %d", r.status)

@@ -11,18 +11,23 @@ import (
 	"time"
 
 	"agyrelay/internal/agy"
+	"agyrelay/internal/control"
 	"agyrelay/internal/store"
 )
 
 const refreshTimeout = time.Minute
 
 type accountView struct {
-	Name      string               `json:"name"`
-	CreatedAt time.Time            `json:"created_at"`
-	EnvNames  []string             `json:"env_names"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	EnvNames  []string  `json:"env_names"`
+	// Proxy is the account's own proxy; Route is where its traffic goes
+	// now ("proxy http://…", "direct", "refused").
 	Proxy     string               `json:"proxy"`
+	Route     string               `json:"route"`
 	Paused    bool                 `json:"paused"`
 	Disabled  string               `json:"disabled"`
+	Blocked   string               `json:"blocked"`
 	Cooldowns map[string]time.Time `json:"cooldowns"`
 	Turns     int                  `json:"turns"`
 	Procs     int                  `json:"procs"`
@@ -43,7 +48,7 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	for _, account := range h.pool.Accounts() {
 		st := account.Status()
 		v := accountView{
-			Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Cooldowns: st.Cooldowns,
+			Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Cooldowns: st.Cooldowns,
 			Turns: st.Turns, Procs: st.Procs, Login: h.control.LoginPending(st.Name), EnvNames: []string{},
 		}
 		if rec, ok := records[st.Name]; ok {
@@ -54,6 +59,9 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 				v.EnvNames = append(v.EnvNames, name)
 			}
 			v.Proxy = redactProxy(rec.Proxy)
+		}
+		if traffic, ok := h.control.Egress(st.Name); ok {
+			v.Route = traffic.Route
 		}
 		if q, ok := h.monitor.Latest(st.Name); ok {
 			if !q.At.IsZero() {
@@ -120,7 +128,7 @@ func (h *Handler) setAccountProxy(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, "set account proxy", err)
 		return
 	}
-	h.audit(r, "account_proxy_set", name+" → "+cmp.Or(redactProxy(strings.TrimSpace(req.Proxy)), "direct"))
+	h.audit(r, "account_proxy_set", name+" → "+cmp.Or(redactProxy(strings.TrimSpace(req.Proxy)), "none (fallback route)"))
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
@@ -168,11 +176,12 @@ func (h *Handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) startLogin(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	url, err := h.control.StartLogin(r.Context(), name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not found")
-			return
-		}
+	var input *control.InputError
+	switch {
+	case errors.Is(err, store.ErrNotFound) || errors.As(err, &input):
+		h.fail(w, "start sign-in", err)
+		return
+	case err != nil:
 		writeError(w, http.StatusBadGateway, "could not start the sign-in: "+err.Error())
 		return
 	}
