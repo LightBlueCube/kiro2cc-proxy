@@ -41,7 +41,12 @@ func loadConfig(path string) (*config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	base := filepath.Dir(path)
+	// Absolute, because agy runs in account directories and a bare name
+	// would be looked up in PATH.
+	base, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
 	if cfg.DataDir == "" || cfg.AgyBin == "" {
 		return nil, errors.New("data_dir and agy_bin are required")
 	}

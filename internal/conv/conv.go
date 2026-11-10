@@ -56,7 +56,11 @@ type ToolSpec struct {
 
 // Request is one completion request.
 type Request struct {
-	Model string
+	// API names the endpoint ("chat", "responses") and Stream whether the
+	// client streams; both only label records.
+	API    string
+	Stream bool
+	Model  string
 	// Effort is the requested reasoning effort ("" = default).
 	Effort   string
 	Messages []Message

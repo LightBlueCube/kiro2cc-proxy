@@ -30,6 +30,7 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 		}
 		if ok && snap.ToolsKey == toolsKey(r.req.Tools) {
 			if at := g.tryContinue(snap, r); at != nil {
+				r.mode = ModeContinue
 				return at, nil
 			}
 			at, err := g.startWarm(ctx, snap, r)
@@ -87,13 +88,18 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 		}
 		return nil, err
 	}
+	r.mode = ModeWarm
 	if snap.Steps > 0 {
-		if err := g.rewindTo(ctx, at, snap, r.req.Tools); err != nil {
+		rewound, err := g.rewindTo(ctx, at, snap, r.req.Tools)
+		if err != nil {
 			g.releaseClaim(at)
 			if ctx.Err() == nil {
 				g.forget(snap.Account, snap.SessionID)
 			}
 			return nil, err
+		}
+		if rewound {
+			r.mode = ModeRewind
 		}
 	}
 	if err := account.TryAcquire(r.group); err != nil {
@@ -112,26 +118,27 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 }
 
 // rewindTo returns the claimed session to snap's position when turns ran
-// past it: later replies, or what a cancelled turn left.
-func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, tools []conv.ToolSpec) error {
+// past it (later replies, or what a cancelled turn left), and reports
+// whether it did.
+func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, tools []conv.ToolSpec) (bool, error) {
 	g.mu.Lock()
 	proc, binding := at.sess.proc, at.sess.binding
 	g.mu.Unlock()
 	steps, err := proc.StepCount(ctx, snap.SessionID, snap.Steps)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if steps == snap.Steps {
-		return nil
+		return false, nil
 	}
 	if err := proc.Rewind(ctx, snap.SessionID, snap.Steps, sessionSpec(at.sess.account, binding, tools)); err != nil {
-		return err
+		return false, err
 	}
 	g.log.Info("rewound session", "session", snap.SessionID, "steps", steps, "kept", snap.Steps)
 	if err := g.snaps.rewound(snap.Account, snap.SessionID, snap.Count); err != nil {
 		g.log.Warn("snapshot rewind not persisted", "err", err)
 	}
-	return nil
+	return true, nil
 }
 
 // claimSession reserves the snapshot's session for a new turn, cancelling
@@ -221,6 +228,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run) (*activeTurn, *attempt
 		}
 		at, err := g.openSession(ctx, r, account)
 		if err == nil {
+			r.mode = ModeFresh
 			g.launch(at, account, r, freshPrompt(r.t, replayBudget), 0)
 			return at, nil
 		}

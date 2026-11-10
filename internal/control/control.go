@@ -34,10 +34,15 @@ type Settings struct {
 	SnapshotTTL string `json:"snapshot_ttl"`
 	// LogLevel is debug, info, warn, or error.
 	LogLevel string `json:"log_level"`
+	// RetentionDays bounds how long request records, quota samples, and
+	// audit entries are kept.
+	RetentionDays int `json:"retention_days"`
+	// Prices are the list prices that estimate each request's API cost.
+	Prices []usage.Price `json:"prices"`
 }
 
 func defaultSettings() Settings {
-	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", LogLevel: "info"}
+	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", LogLevel: "info", RetentionDays: 90, Prices: slices.Clone(usage.DefaultPrices)}
 }
 
 var logLevels = map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError}
@@ -53,7 +58,10 @@ func (s Settings) validate() error {
 	if _, ok := logLevels[s.LogLevel]; !ok {
 		return errors.New("log_level must be debug, info, warn, or error")
 	}
-	return nil
+	if s.RetentionDays < 1 || s.RetentionDays > 3650 {
+		return errors.New("retention_days must be between 1 and 3650")
+	}
+	return usage.ValidatePrices(s.Prices)
 }
 
 // SnapshotTTLDuration is SnapshotTTL parsed; settings are validated on load
@@ -80,10 +88,11 @@ func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
 func (s Settings) Level() slog.Level { return logLevels[s.LogLevel] }
 
 type Config struct {
-	Store   *store.Store
-	Pool    *pool.Pool
-	Gateway *gateway.Gateway
-	Monitor *usage.Monitor
+	Store    *store.Store
+	Pool     *pool.Pool
+	Gateway  *gateway.Gateway
+	Monitor  *usage.Monitor
+	Recorder *usage.Recorder
 	// AgyBin runs sign-ins.
 	AgyBin string
 	// Level is the process log level, changed with the setting.
@@ -146,7 +155,27 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Pool.SetTurnsPerAccount(s.TurnsPerAccount)
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Level.Set(s.Level())
+	c.cfg.Recorder.SetPrices(s.Prices)
 	return nil
+}
+
+// pruneEvery is how often records past the retention are deleted.
+const pruneEvery = 6 * time.Hour
+
+// RunRetention deletes old records now and then every pruneEvery until ctx
+// ends.
+func (c *Control) RunRetention(ctx context.Context) {
+	for {
+		days := c.Settings().RetentionDays
+		if err := c.cfg.Store.Prune(ctx, time.Now().AddDate(0, 0, -days)); err != nil && ctx.Err() == nil {
+			c.log.Error("pruning old records failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(pruneEvery):
+		}
+	}
 }
 
 // InputError is a request the admin can fix; its message is shown as is.

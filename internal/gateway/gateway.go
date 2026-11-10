@@ -36,16 +36,19 @@ type Config struct {
 	DataDir string
 	// SnapshotTTL bounds how long an idle session stays reusable.
 	SnapshotTTL time.Duration
-	Log         *slog.Logger
+	// Recorder, when set, receives a record of every request.
+	Recorder Recorder
+	Log      *slog.Logger
 }
 
 type Gateway struct {
-	log    *slog.Logger
-	pool   *pool.Pool
-	bridge *bridge.Server
-	snaps  *snapshotStore
-	models *catalog
-	stop   chan struct{}
+	log      *slog.Logger
+	pool     *pool.Pool
+	bridge   *bridge.Server
+	snaps    *snapshotStore
+	models   *catalog
+	recorder Recorder
+	stop     chan struct{}
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
 	mu       sync.Mutex
@@ -109,6 +112,7 @@ func New(cfg Config) (*Gateway, error) {
 		bridge:   cfg.Bridge,
 		snaps:    snaps,
 		models:   newCatalog(),
+		recorder: cfg.Recorder,
 		stop:     make(chan struct{}),
 		sessions: map[string]*session{},
 	}
@@ -133,14 +137,29 @@ func (g *Gateway) Complete(ctx context.Context, caller conv.Caller, req conv.Req
 	go func() {
 		defer close(out)
 		w := &response{ctx: ctx, out: out}
-		if err := g.serve(ctx, caller, req, w); err != nil {
+		rec := Record{At: time.Now(), Key: caller.Name, API: req.API, Stream: req.Stream, Model: req.Model}
+		err := g.serve(ctx, caller, req, w, &rec)
+		if err != nil {
 			w.fail(err)
 		}
+		g.report(rec, w, err)
 	}()
 	return out
 }
 
-func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Request, w *response) *conv.Error {
+func (g *Gateway) report(rec Record, w *response, err *conv.Error) {
+	if g.recorder == nil {
+		return
+	}
+	rec.Duration = time.Since(rec.At)
+	if !w.firstOutput.IsZero() {
+		rec.TimeToFirstOutput = w.firstOutput.Sub(rec.At)
+	}
+	rec.Usage, rec.Finish, rec.Err = w.usage, w.finish, err
+	g.recorder.Record(rec)
+}
+
+func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Request, w *response, rec *Record) *conv.Error {
 	t := newTranscript(req.Messages)
 	if err := validate(req, t); err != nil {
 		return err
@@ -149,6 +168,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if !ok {
 		return &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", req.Model)}
 	}
+	rec.Model, rec.Slug, rec.QuotaGroup = modelID, slug, pool.QuotaGroup(slug)
 	if !caller.Allows(modelID) {
 		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf("this API key may not use model %q", modelID)}
 	}
@@ -159,6 +179,9 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	for attempt := 1; ; attempt++ {
 		at, failure := g.start(ctx, r)
 		if failure == nil {
+			g.mu.Lock()
+			rec.Account, rec.Mode = at.account.Name(), r.mode
+			g.mu.Unlock()
 			failure = g.consume(ctx, at, r, w)
 		}
 		if failure == nil {
@@ -197,6 +220,8 @@ type run struct {
 	exclude map[string]bool
 	// reuse allows continuing or warming a session; a retry replays fresh.
 	reuse bool
+	// mode is how the last attempt started.
+	mode Mode
 }
 
 func (r *run) choice() string { return r.req.Model + "\x00" + r.req.Effort }
@@ -209,21 +234,35 @@ type attemptFailure struct {
 	retry   bool
 }
 
-// response writes one HTTP response's events.
+// response writes one HTTP response's events and notes what it sent.
 type response struct {
 	ctx     context.Context
 	out     chan<- conv.Event
 	emitted bool
+
+	firstOutput time.Time
+	usage       *conv.Usage
+	finish      conv.FinishReason
 }
 
 func (w *response) send(ev conv.Event) bool {
 	select {
 	case w.out <- ev:
-		w.emitted = true
-		return true
 	case <-w.ctx.Done():
 		return false
 	}
+	w.emitted = true
+	output := ev.Text != "" || ev.Reasoning != "" || ev.ToolCalls != nil
+	if output && w.firstOutput.IsZero() {
+		w.firstOutput = time.Now()
+	}
+	if ev.Usage != nil {
+		w.usage = ev.Usage
+	}
+	if ev.Finish != "" {
+		w.finish = ev.Finish
+	}
+	return true
 }
 
 func (w *response) fail(err *conv.Error) {

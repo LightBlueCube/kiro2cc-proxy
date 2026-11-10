@@ -69,6 +69,7 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request, caller conv.Calle
 		WriteError(w, &conv.Error{Kind: conv.ErrInvalidRequest, Message: err.Error()})
 		return
 	}
+	req.API, req.Stream = "chat", wire.Stream
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	events := h.backend.Complete(ctx, caller, req)

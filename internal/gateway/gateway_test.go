@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,10 +32,11 @@ func TestMain(m *testing.M) {
 }
 
 type harness struct {
-	t   *testing.T
-	gw  *Gateway
-	p   *pool.Pool
-	log string
+	t       *testing.T
+	gw      *Gateway
+	p       *pool.Pool
+	log     string
+	records *recordLog
 }
 
 // newHarness runs a gateway on fake agy accounts; extraEnv adds
@@ -65,7 +67,8 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Log: logger})
+	records := &recordLog{}
+	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, Recorder: records, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +77,33 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 		p.Close()
 		b.Close()
 	})
-	return &harness{t: t, gw: gw, p: p, log: logPath}
+	return &harness{t: t, gw: gw, p: p, log: logPath, records: records}
+}
+
+type recordLog struct {
+	mu   sync.Mutex
+	list []Record
+}
+
+func (l *recordLog) Record(r Record) {
+	l.mu.Lock()
+	l.list = append(l.list, r)
+	l.mu.Unlock()
+}
+
+// all waits until n records arrived; they come after the last event.
+func (l *recordLog) all(t *testing.T, n int) []Record {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		l.mu.Lock()
+		got := slices.Clone(l.list)
+		l.mu.Unlock()
+		if len(got) >= n || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 type result struct {
@@ -465,6 +494,45 @@ func TestRewindToEndOfToolTurn(t *testing.T) {
 		t.Fatalf("regenerated = %+v", r)
 	}
 	h.assertRewound(h.requests("session/prompt")[0].Params.SessionID, 4)
+}
+
+func TestRecordsDescribeRequests(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+
+	messages := []conv.Message{user(`@tool read {}`)}
+	first := h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Messages: messages, Tools: tools})
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, Text: "x"})
+	second := h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Messages: messages, Tools: tools})
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: second.text})
+	h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Messages: append(slices.Clone(messages), user("a")), Tools: tools})
+	h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Messages: append(slices.Clone(messages), user("b")), Tools: tools})
+	h.complete(ctx, "alice", conv.Request{API: "chat", Model: "nope", Messages: messages})
+
+	records := h.records.all(t, 5)
+	if len(records) != 5 {
+		t.Fatalf("records = %d", len(records))
+	}
+	wantModes := []Mode{ModeFresh, ModeContinue, ModeWarm, ModeRewind, ""}
+	for i, r := range records {
+		if r.Mode != wantModes[i] || r.Key != "alice" {
+			t.Errorf("record %d: mode %q key %q, want %q", i, r.Mode, r.Key, wantModes[i])
+		}
+	}
+	tool, done := records[0], records[1]
+	if tool.Finish != conv.FinishToolCalls || tool.Usage != nil || tool.Account != "acct0" || tool.Model != model || tool.QuotaGroup != "gemini" {
+		t.Errorf("tool-call record = %+v", tool)
+	}
+	if done.Finish != conv.FinishStop || done.Usage == nil || done.TimeToFirstOutput <= 0 || done.Duration < done.TimeToFirstOutput {
+		t.Errorf("final record = %+v", done)
+	}
+	if bad := records[4]; bad.Err == nil || bad.Err.Kind != conv.ErrUnknownModel || bad.Account != "" {
+		t.Errorf("unknown model record = %+v", bad)
+	}
 }
 
 func TestPositionsKeepOnlyRewindableHistory(t *testing.T) {

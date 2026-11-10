@@ -19,6 +19,7 @@ import (
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/control"
 	"agyrelay/internal/gateway"
+	"agyrelay/internal/logbuf"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
 	"agyrelay/internal/usage"
@@ -66,14 +67,17 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	monitor := usage.NewMonitor(usage.MonitorConfig{Store: st, Pool: p, Profile: gateway.IdleProfile(), Log: log})
+	recorder := usage.NewRecorder(st, settings.Prices, log)
 	ctl, err := control.New(context.Background(), control.Config{
-		Store: st, Pool: p, Gateway: gw, Monitor: monitor, AgyBin: os.Args[0], Level: new(slog.LevelVar),
+		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, AgyBin: os.Args[0], Level: new(slog.LevelVar),
 		AccountsDir: filepath.Join(dir, "accounts"), Settings: settings, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(Config{Store: st, Control: ctl, Pool: p, Monitor: monitor, Log: log}))
+	logs := logbuf.NewBuffer(100)
+	slog.New(logbuf.NewHandler(logs, slog.NewTextHandler(io.Discard, nil), slog.LevelDebug)).With("component", "test").Warn("hello", "account", "main")
+	srv := httptest.NewServer(New(Config{Store: st, Control: ctl, Pool: p, Monitor: monitor, Logs: logs, Log: log}))
 	t.Cleanup(func() {
 		srv.Close()
 		gw.Close()
@@ -312,7 +316,13 @@ func TestSettingsValidation(t *testing.T) {
 	if r := c.do("PUT", "/admin/api/settings", bad, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad settings = %d %s", r.status, r.raw)
 	}
-	good := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "log_level": "debug"}
+	good := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "log_level": "debug", "retention_days": 30,
+		"prices": []map[string]any{{"model": "m", "from": "", "input": 1, "cached": 0.1, "output": 2}}}
+	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "log_level": "debug", "retention_days": 30,
+		"prices": []map[string]any{{"model": "m", "from": "next week", "input": 1, "cached": 0.1, "output": 2}}}
+	if r := c.do("PUT", "/admin/api/settings", badPrice, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("bad price = %d %s", r.status, r.raw)
+	}
 	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK || r.body["turns_per_account"] != float64(3) {
 		t.Fatalf("good settings = %d %s", r.status, r.raw)
 	}
@@ -382,6 +392,44 @@ func TestAccountSignIn(t *testing.T) {
 	}
 	if r := c.do("GET", "/admin/api/accounts", nil, nil); r.raw != "[]\n" {
 		t.Fatalf("after remove = %s", r.raw)
+	}
+}
+
+func TestLogsAndUsageNeedSession(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	anonymous := e.client("203.0.113.5")
+	for _, path := range []string{"/admin/api/logs", "/admin/api/logs/stream", "/admin/api/requests", "/admin/api/usage?by=key", "/admin/api/accounts", "/admin/api/keys"} {
+		if r := anonymous.do("GET", path, nil, nil); r.status != http.StatusUnauthorized {
+			t.Errorf("%s without a session = %d", path, r.status)
+		}
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	r := c.do("GET", "/admin/api/logs?level=warn&component=test&account=main&q=HELLO", nil, nil)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `"message":"hello"`) {
+		t.Fatalf("logs = %d %s", r.status, r.raw)
+	}
+	if r := c.do("GET", "/admin/api/logs?level=error", nil, nil); r.raw != "[]\n" {
+		t.Fatalf("error-level logs = %s", r.raw)
+	}
+
+	ctx := context.Background()
+	cost := 0.5
+	if err := e.st.AddRequest(ctx, store.Request{At: time.Now(), Key: "alice", Account: "main", Model: "m", Status: "ok", Input: 100, Cached: 40, Output: 10, CostUSD: &cost}); err != nil {
+		t.Fatal(err)
+	}
+	r = c.do("GET", "/admin/api/usage?by=day_key&tz=480", nil, nil)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `alice","requests":1`) || !strings.Contains(r.raw, `"cost_usd":0.5`) {
+		t.Fatalf("usage = %d %s", r.status, r.raw)
+	}
+	if r := c.do("GET", "/admin/api/requests?key=alice&limit=10", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"cached":40`) {
+		t.Fatalf("requests = %d %s", r.status, r.raw)
+	}
+	if r := c.do("GET", "/admin/api/usage?by=nothing", nil, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("bad grouping = %d", r.status)
 	}
 }
 

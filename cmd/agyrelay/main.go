@@ -23,12 +23,16 @@ import (
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/control"
 	"agyrelay/internal/gateway"
+	"agyrelay/internal/logbuf"
 	"agyrelay/internal/openai"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/server"
 	"agyrelay/internal/store"
 	"agyrelay/internal/usage"
 )
+
+// logBufferEntries is how many log entries the admin UI can show.
+const logBufferEntries = 10000
 
 const commandUsage = `usage:
   agyrelay serve  -config FILE   run the API server and admin UI
@@ -93,7 +97,9 @@ func runServe(args []string) error {
 	}
 	level := new(slog.LevelVar)
 	level.Set(settings.Level())
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logs := logbuf.NewBuffer(logBufferEntries)
+	stderr := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}) // level gates in logbuf
+	log := slog.New(logbuf.NewHandler(logs, stderr, level))
 
 	tools, err := bridge.Start(log.With("component", "bridge"))
 	if err != nil {
@@ -112,11 +118,14 @@ func runServe(args []string) error {
 	}
 	defer accountPool.Close()
 
+	usageLog := log.With("component", "usage")
+	recorder := usage.NewRecorder(st, settings.Prices, usageLog)
 	gw, err := gateway.New(gateway.Config{
 		Pool:        accountPool,
 		Bridge:      tools,
 		DataDir:     cfg.DataDir,
 		SnapshotTTL: settings.SnapshotTTLDuration(),
+		Recorder:    recorder,
 		Log:         log.With("component", "gateway"),
 	})
 	if err != nil {
@@ -125,22 +134,24 @@ func runServe(args []string) error {
 	defer gw.Close()
 
 	monitor := usage.NewMonitor(usage.MonitorConfig{
-		Store: st, Pool: accountPool, Profile: gateway.IdleProfile(), Log: log.With("component", "usage"),
+		Store: st, Pool: accountPool, Profile: gateway.IdleProfile(),
+		OnSample: usage.NewAttributor(st, usageLog).Attribute, Log: usageLog,
 	})
 	go monitor.Run(ctx)
 
 	ctl, err := control.New(ctx, control.Config{
-		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, AgyBin: cfg.AgyBin, Level: level,
+		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, AgyBin: cfg.AgyBin, Level: level,
 		AccountsDir: cfg.accountsDir(), Settings: settings, Log: log.With("component", "control"),
 	})
 	if err != nil {
 		return err
 	}
+	go ctl.RunRetention(ctx)
 
 	var adminUI http.Handler
 	if cfg.loopbackOnly() {
 		adminUI = admin.New(admin.Config{
-			Store: st, Control: ctl, Pool: accountPool, Monitor: monitor,
+			Store: st, Control: ctl, Pool: accountPool, Monitor: monitor, Logs: logs,
 			ProcessPerSession: *cfg.ProcessPerSession, Log: log.With("component", "admin"),
 		})
 	} else {
