@@ -14,27 +14,29 @@ const (
 )
 
 type requestView struct {
-	ID         int64     `json:"id"`
-	At         time.Time `json:"at"`
-	Key        string    `json:"key"`
-	Account    string    `json:"account"`
-	Model      string    `json:"model"`
-	Slug       string    `json:"slug"`
-	API        string    `json:"api"`
-	Stream     bool      `json:"stream"`
-	Mode       string    `json:"mode"`
-	Status     string    `json:"status"`
-	Error      string    `json:"error"`
-	Finish     string    `json:"finish"`
-	DurationMS int64     `json:"duration_ms"`
-	TTFTMS     *int64    `json:"ttft_ms"`
-	Input      int64     `json:"input"`
-	Cached     int64     `json:"cached"`
-	Output     int64     `json:"output"`
-	Reasoning  int64     `json:"reasoning"`
-	CostUSD    *float64  `json:"cost_usd"`
-	QuotaGroup string    `json:"quota_group"`
-	QuotaUsed  *float64  `json:"quota_used"`
+	ID      int64     `json:"id"`
+	At      time.Time `json:"at"`
+	Key     string    `json:"key"`
+	Account string    `json:"account"`
+	Model   string    `json:"model"`
+	Slug    string    `json:"slug"`
+	API     string    `json:"api"`
+	Stream  bool      `json:"stream"`
+	Mode    string    `json:"mode"`
+	// ReplayReason is set for mode "replay".
+	ReplayReason string   `json:"replay_reason"`
+	Status       string   `json:"status"`
+	Error        string   `json:"error"`
+	Finish       string   `json:"finish"`
+	DurationMS   int64    `json:"duration_ms"`
+	TTFTMS       *int64   `json:"ttft_ms"`
+	Input        int64    `json:"input"`
+	Cached       int64    `json:"cached"`
+	Output       int64    `json:"output"`
+	Reasoning    int64    `json:"reasoning"`
+	CostUSD      *float64 `json:"cost_usd"`
+	QuotaGroup   string   `json:"quota_group"`
+	QuotaUsed    *float64 `json:"quota_used"`
 }
 
 // queryFilter reads key, model, account, and since/until (Unix ms).
@@ -87,7 +89,7 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		v := requestView{
 			ID: row.ID, At: row.At, Key: row.Key, Account: row.Account, Model: row.Model, Slug: row.Slug, API: row.API,
-			Stream: row.Stream, Mode: row.Mode, Status: row.Status, Error: row.Error, Finish: row.Finish,
+			Stream: row.Stream, Mode: row.Mode, ReplayReason: row.ReplayReason, Status: row.Status, Error: row.Error, Finish: row.Finish,
 			DurationMS: row.Duration.Milliseconds(), Input: row.Input, Cached: row.Cached, Output: row.Output,
 			Reasoning: row.Reasoning, CostUSD: row.CostUSD, QuotaGroup: row.QuotaGroup, QuotaUsed: row.QuotaUsed,
 		}

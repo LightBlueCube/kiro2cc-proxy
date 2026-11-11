@@ -120,10 +120,6 @@ const (
 	historyPlaceholder = "[Image in original transcript]"
 )
 
-// replayBudget bounds a fresh prompt in UTF-8 bytes: agy truncates a single
-// USER_INPUT past 192 KB (until the context-unlock patch is ported).
-const replayBudget = 160_000
-
 // renderMessage writes one message as transcript text. Images are numbered
 // from imageBase+1, or replaced by a placeholder when imageBase < 0.
 func renderMessage(m conv.Message, imageBase int) string {
@@ -167,69 +163,38 @@ func nonEmpty(values []string) []string {
 	return out
 }
 
-// renderHistory keeps whole messages newest-first within maxBytes and notes
-// the omission; only an oversized newest tool result may be cut at its head.
-func renderHistory(messages []conv.Message, maxBytes int) string {
+// renderHistory renders every message. Nothing is dropped: the patched agy
+// keeps a whole USER_INPUT (6 MB arrived intact), and a conversation over
+// the model's window fails with context_length_exceeded, on which clients
+// compact, instead of silently losing its oldest part.
+func renderHistory(messages []conv.Message) string {
 	rendered := make([]string, 0, len(messages))
-	roles := make([]conv.Role, 0, len(messages))
 	for _, m := range messages {
 		if text := renderMessage(m, -1); text != "" {
 			rendered = append(rendered, text)
-			roles = append(roles, m.Role)
 		}
 	}
 	if len(rendered) == 0 {
 		return ""
 	}
-	if joined := strings.Join(rendered, "\n\n"); len(joined) <= maxBytes {
-		return "<history>\n" + joined + "\n</history>"
-	}
-	var kept []string
-	used, omitted := 0, 0
-	for i := len(rendered) - 1; i >= 0; i-- {
-		size := len(rendered[i])
-		if len(kept) > 0 {
-			size += 2
-		}
-		if used+size <= maxBytes {
-			kept = append([]string{rendered[i]}, kept...)
-			used += size
-			continue
-		}
-		if len(kept) == 0 && roles[i] == conv.RoleTool && maxBytes > 1024 {
-			kept = append(kept, keepTail(rendered[i], maxBytes))
-		}
-		omitted = i + 1
-		break
-	}
-	if omitted > 0 {
-		kept = append([]string{fmt.Sprintf("[Earlier %d history messages omitted to fit the context replay budget]", omitted)}, kept...)
-	}
-	return "<history>\n" + strings.Join(kept, "\n\n") + "\n</history>"
+	return "<history>\n" + strings.Join(rendered, "\n\n") + "\n</history>"
 }
 
-// keepTail keeps a valid UTF-8 suffix of at most maxBytes behind a marker.
-func keepTail(text string, maxBytes int) string {
-	const marker = "...[Earlier content omitted]...\n"
-	available := maxBytes - len(marker)
-	if available <= 0 {
-		return ""
+// newestInput is where the newest user input begins in body: its last
+// message when that is a user message, else len(body) (no new input, e.g.
+// after tool results). The messages before it are history.
+func newestInput(body []conv.Message) int {
+	if len(body) > 0 && body[len(body)-1].Role == conv.RoleUser {
+		return len(body) - 1
 	}
-	start := max(0, len(text)-available)
-	for start < len(text) && text[start]&0xc0 == 0x80 {
-		start++
-	}
-	return marker + text[start:]
+	return len(body)
 }
 
 // freshPrompt is the whole input for a new session: client system prompt,
-// bounded history, then the newest user input verbatim with its images.
-func freshPrompt(t *transcript, budget int) []agy.ContentBlock {
+// history, then the newest user input verbatim with its images.
+func freshPrompt(t *transcript) []agy.ContentBlock {
 	body := t.body
-	inputStart := len(body)
-	if len(body) > 0 && body[len(body)-1].Role == conv.RoleUser {
-		inputStart = len(body) - 1
-	}
+	inputStart := newestInput(body)
 	live := continuationPrompt
 	var images []conv.Image
 	if inputStart < len(body) {
@@ -244,9 +209,7 @@ func freshPrompt(t *transcript, budget int) []agy.ContentBlock {
 	if t.system != "" {
 		sections = append(sections, "<client-system>\n"+t.system+"\n</client-system>")
 	}
-	fixed := len(strings.Join(append(slices.Clone(sections), live), "\n\n"))
-	historyBudget := max(0, budget-fixed-256)
-	if history := renderHistory(body[:inputStart], historyBudget); history != "" {
+	if history := renderHistory(body[:inputStart]); history != "" {
 		sections = append(sections, history)
 	}
 	sections = append(sections, live)

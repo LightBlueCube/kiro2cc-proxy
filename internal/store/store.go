@@ -109,6 +109,8 @@ var migrations = []string{
 	);
 	INSERT INTO key_usage (key_name, grp, used)
 		SELECT key_name, quota_group, SUM(quota_used) FROM requests WHERE quota_used IS NOT NULL GROUP BY 1, 2;`,
+
+	`ALTER TABLE requests ADD COLUMN replay_reason TEXT NOT NULL DEFAULT '';`,
 }
 
 // ErrNotFound means the named row does not exist.

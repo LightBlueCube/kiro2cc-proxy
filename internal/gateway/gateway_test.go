@@ -701,6 +701,29 @@ func TestRecordsDescribeRequests(t *testing.T) {
 	}
 }
 
+func TestRecordsNameReplayReasons(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	model := "gemini-3.8-flash"
+	first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: []conv.Message{user("hello")}})
+	history := []conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: first.text}, user("again")}
+	// bob holds no snapshot of alice's conversation.
+	h.complete(ctx, "bob", conv.Request{Model: model, Messages: history})
+	// alice's snapshot has no tools.
+	h.complete(ctx, "alice", conv.Request{Model: model, Messages: history, Tools: []conv.ToolSpec{readTool}})
+
+	records := h.records.all(t, 3)
+	want := []struct {
+		mode   Mode
+		reason ReplayReason
+	}{{ModeFresh, ""}, {ModeReplay, ReplayNoSnapshot}, {ModeReplay, ReplayToolsChanged}}
+	for i, r := range records {
+		if r.Err != nil || r.Mode != want[i].mode || r.ReplayReason != want[i].reason {
+			t.Errorf("record %d: mode %q reason %q err %v, want %+v", i, r.Mode, r.ReplayReason, r.Err, want[i])
+		}
+	}
+}
+
 func TestPositionsKeepOnlyRewindableHistory(t *testing.T) {
 	store, err := openSnapshotStore(filepath.Join(t.TempDir(), "snapshots.json"), time.Hour)
 	if err != nil {

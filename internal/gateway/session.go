@@ -23,27 +23,32 @@ import (
 //	                        to a rewindable position) ──────────▶ warm delta
 //	no hit, or warm failed ─────────────────────────────────────▶ fresh replay
 func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailure) {
-	if r.reuse {
-		snap, ok := g.anchoredSnapshot(r.t)
-		if !ok {
-			snap, ok = g.snaps.lookup(r.user, r.t)
-		}
-		if ok && snap.ToolsKey == toolsKey(r.req.Tools) {
-			if at := g.tryContinue(snap, r); at != nil {
-				r.mode = ModeContinue
-				return at, nil
-			}
-			at, err := g.startWarm(ctx, snap, r)
-			if err == nil {
-				return at, nil
-			}
-			if ctx.Err() != nil {
-				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
-			}
-			g.log.Info("warm session unusable; replaying fresh", "session", snap.SessionID, "err", err)
-		}
+	if !r.reuse {
+		return g.startFresh(ctx, r, ReplayRetry)
 	}
-	return g.startFresh(ctx, r)
+	snap, ok := g.anchoredSnapshot(r.t)
+	if !ok {
+		snap, ok = g.snaps.lookup(r.user, r.t)
+	}
+	if !ok {
+		return g.startFresh(ctx, r, ReplayNoSnapshot)
+	}
+	if snap.ToolsKey != toolsKey(r.req.Tools) {
+		return g.startFresh(ctx, r, ReplayToolsChanged)
+	}
+	if at := g.tryContinue(snap, r); at != nil {
+		r.mode = ModeContinue
+		return at, nil
+	}
+	at, err := g.startWarm(ctx, snap, r)
+	if err == nil {
+		return at, nil
+	}
+	if ctx.Err() != nil {
+		return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
+	}
+	g.log.Info("warm session unusable; replaying fresh", "session", snap.SessionID, "err", err)
+	return g.startFresh(ctx, r, ReplayWarmFailed)
 }
 
 // tryContinue hands the client's tool results to a parked turn whose
@@ -235,8 +240,9 @@ func (g *Gateway) reopen(ctx context.Context, sess *session, tools []conv.ToolSp
 }
 
 // startFresh opens a new session on the best account and replays the
-// transcript. Accounts that fail to open one are skipped.
-func (g *Gateway) startFresh(ctx context.Context, r *run) (*activeTurn, *attemptFailure) {
+// transcript; reason says why, when it has history. Accounts that fail to
+// open one are skipped.
+func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (*activeTurn, *attemptFailure) {
 	var lastErr error
 	for {
 		account, err := g.pool.Pick(r.user, r.group, r.exclude)
@@ -249,8 +255,11 @@ func (g *Gateway) startFresh(ctx context.Context, r *run) (*activeTurn, *attempt
 		}
 		at, err := g.openSession(ctx, r, account)
 		if err == nil {
-			r.mode = ModeFresh
-			g.launch(at, account, r, freshPrompt(r.t, replayBudget), 0)
+			r.mode, r.replayReason = ModeFresh, ""
+			if newestInput(r.t.body) > 0 {
+				r.mode, r.replayReason = ModeReplay, reason
+			}
+			g.launch(at, account, r, freshPrompt(r.t), 0)
 			return at, nil
 		}
 		account.Release()

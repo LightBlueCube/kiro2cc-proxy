@@ -10,31 +10,33 @@ import (
 
 // Request is one served API request.
 type Request struct {
-	ID         int64
-	At         time.Time
-	Key        string
-	Account    string
-	Model      string
-	Slug       string
-	API        string
-	Stream     bool
-	Mode       string
-	Status     string
-	Error      string
-	Finish     string
-	Duration   time.Duration
-	TTFT       *time.Duration
-	Input      int64
-	Cached     int64
-	Output     int64
-	Reasoning  int64
-	CostUSD    *float64
-	QuotaGroup string
+	ID      int64
+	At      time.Time
+	Key     string
+	Account string
+	Model   string
+	Slug    string
+	API     string
+	Stream  bool
+	Mode    string
+	// ReplayReason says why a replay-mode request reused no session.
+	ReplayReason string
+	Status       string
+	Error        string
+	Finish       string
+	Duration     time.Duration
+	TTFT         *time.Duration
+	Input        int64
+	Cached       int64
+	Output       int64
+	Reasoning    int64
+	CostUSD      *float64
+	QuotaGroup   string
 	// QuotaUsed is the attributed share of the weekly quota, 0 to 1.
 	QuotaUsed *float64
 }
 
-const requestColumns = `id, at, key_name, account, model, slug, api, stream, mode, status, error, finish,
+const requestColumns = `id, at, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used`
 
 func (s *Store) AddRequest(ctx context.Context, r Request) error {
@@ -42,9 +44,9 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	if r.TTFT != nil {
 		ttft = sql.NullInt64{Int64: r.TTFT.Milliseconds(), Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (at, key_name, account, model, slug, api, stream, mode, status, error, finish,
-		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.At.UnixMilli(), r.Key, r.Account, r.Model, r.Slug, r.API, r.Stream, r.Mode, r.Status, r.Error, r.Finish,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (at, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
+		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.At.UnixMilli(), r.Key, r.Account, r.Model, r.Slug, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
 		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup)
 	return err
 }
@@ -109,7 +111,7 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		var at, duration int64
 		var ttft sql.NullInt64
 		var cost, quota sql.NullFloat64
-		if err := rows.Scan(&r.ID, &at, &r.Key, &r.Account, &r.Model, &r.Slug, &r.API, &r.Stream, &r.Mode, &r.Status, &r.Error, &r.Finish,
+		if err := rows.Scan(&r.ID, &at, &r.Key, &r.Account, &r.Model, &r.Slug, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
 			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota); err != nil {
 			return nil, err
 		}

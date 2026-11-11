@@ -211,7 +211,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		at, failure := g.start(ctx, r)
 		if failure == nil {
 			g.mu.Lock()
-			rec.Account, rec.Mode = at.account.Name(), r.mode
+			rec.Account, rec.Mode, rec.ReplayReason = at.account.Name(), r.mode, r.replayReason
 			g.mu.Unlock()
 			failure = g.consume(ctx, at, r, w)
 		}
@@ -271,8 +271,10 @@ type run struct {
 	exclude map[string]bool
 	// reuse allows continuing or warming a session; a retry replays fresh.
 	reuse bool
-	// mode is how the last attempt started.
-	mode Mode
+	// mode is how the last attempt started; replayReason is set with
+	// ModeReplay.
+	mode         Mode
+	replayReason ReplayReason
 }
 
 func (r *run) choice() string { return r.req.Model + "\x00" + r.req.Effort }
