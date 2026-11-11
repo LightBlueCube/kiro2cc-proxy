@@ -335,13 +335,13 @@ views.keys = container => {
 
 // ---- settings --------------------------------------------------------
 
-// resetButton puts a field back to its default value; it shows while the
-// field differs from it. The change applies on save.
+// resetButton puts a field back to its default value; it is disabled while
+// the field holds the default. The change applies on save.
 function resetButton(input, value) {
   const isBox = input.type === "checkbox";
   const current = () => isBox ? input.checked : input.value;
   const button = h("button", { type: "button", class: "reset", title: `Reset to the default: ${value === "" ? "empty" : value}` }, "↺");
-  const sync = () => { button.hidden = String(current()) === String(value); };
+  const sync = () => { button.disabled = String(current()) === String(value); };
   button.addEventListener("click", () => {
     if (isBox) input.checked = value; else input.value = value;
     sync();
@@ -360,7 +360,7 @@ function rowEditor(fields, rows, defaults, blank, addLabel) {
   const body = h("tbody");
   const read = () => [...body.children].map(tr => tr.read());
   const reset = h("button", { type: "button", class: "reset", title: "Put back the default rows" }, "↺ Defaults");
-  const sync = () => { reset.hidden = JSON.stringify(read()) === JSON.stringify(defaults); };
+  const sync = () => { reset.disabled = JSON.stringify(read()) === JSON.stringify(defaults); };
   const add = row => {
     const inputs = fields.map(f => f.input(row[f.key]));
     const tr = h("tr", {}, inputs.map(i => h("td", {}, i)),
@@ -444,10 +444,11 @@ views.settings = container => {
         h("label", { class: "grow", title: "Carries the traffic of accounts without their own proxy" }, "Fallback HTTP proxy", withReset(fallback, d.fallback_proxy)),
         h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, "Allow direct connections for accounts with no proxy at all"), resetButton(direct, d.allow_direct))),
       h("p", { class: "muted" }, "Every agy connects only to agyrelay's local egress proxy, which forwards through the account's proxy, else the fallback proxy, else directly when allowed. Otherwise the connection is refused and the account is blocked, so a forgotten proxy never turns into a direct connection. Leave direct off unless this server is abroad."),
-      h("h3", {}, "Context windows"),
-      h("p", { class: "muted" }, "A request whose prompt is estimated above its model's window fails with context_length_exceeded before it reaches an account, and clients such as opencode and pi then compact the conversation. Models without a row are left to upstream's limit. The defaults are upstream's limits (gpt-oss: 131072 minus the 32768 output tokens agy reserves). The estimate counts with each model family's tokenizer plus agy's own prompt and tool declarations, and runs above upstream's count: by about 1-2k tokens on Gemini and gpt-oss, and up to 15% on Claude, whose tokenizer is approximated."),
-      windows.node,
-      h("details", { class: "prices" },
+      h("details", { class: "fold" },
+        h("summary", {}, `Context windows (${s.context_windows.length} models, tokens)`),
+        h("p", { class: "muted" }, "A request whose prompt is estimated above its model's window fails with context_length_exceeded before it reaches an account, and clients such as opencode and pi then compact the conversation. Models without a row are left to upstream's limit. The defaults are upstream's limits (gpt-oss: 131072 minus the 32768 output tokens agy reserves). The estimate counts with each model family's tokenizer plus agy's own prompt and tool declarations, and runs above upstream's count: by about 1-2k tokens on Gemini and gpt-oss, and up to 15% on Claude, whose tokenizer is approximated."),
+        windows.node),
+      h("details", { class: "fold" },
         h("summary", {}, `API list prices (${s.prices.length} models, USD per 1M tokens)`),
         h("p", { class: "muted" }, "Used for the list-price estimate of each call. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10; gpt-oss-120b uses Google Vertex's price as listed on OpenRouter. agy does not report cache writes: when a model has a cache-write price, all its uncached input is priced at it (close for multi-turn use, high for a first turn); 0 = no cache-write price."),
         prices.node),

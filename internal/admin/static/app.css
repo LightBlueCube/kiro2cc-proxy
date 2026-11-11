@@ -38,9 +38,12 @@ label.check { flex-direction: row; align-items: center; gap: 6px; align-self: fl
 .picker label.check { padding-bottom: 0; color: var(--fg); font-size: 13px; }
 .term { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 .sub { font-size: 12px; color: var(--muted); }
-.with-reset { display: flex; gap: 4px; align-items: center; }
+.with-reset { display: flex; gap: 4px; align-items: stretch; }
 .with-reset > input, .with-reset > select { flex: 1; }
-button.reset { padding: 2px 7px; color: var(--muted); }
+.row > .with-reset { align-self: flex-end; }
+.with-reset > label.check { align-self: center; padding-bottom: 0; }
+button.reset { padding: 2px 8px; color: var(--muted); }
+button.reset:disabled { opacity: .35; cursor: default; }
 input, select, textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
 textarea { font-family: var(--mono); font-size: 12px; }
 button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
@@ -55,8 +58,8 @@ th { font-size: 12px; color: var(--muted); font-weight: 500; white-space: nowrap
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.revoked td { color: var(--muted); text-decoration: line-through; }
 .table-wrap { overflow-x: auto; }
-details.prices { margin-top: 16px; }
-details.prices > summary { cursor: pointer; font-weight: 600; }
+details.fold { margin-top: 16px; }
+details.fold > summary { cursor: pointer; font-weight: 600; }
 
 .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
 .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
