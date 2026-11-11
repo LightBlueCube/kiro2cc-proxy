@@ -48,11 +48,11 @@ function h(tag, props, ...children) {
 
 let toastTimer;
 function toast(message, bad) {
-  const t = document.getElementById("toast");
-  t.textContent = message;
-  t.className = "show" + (bad ? " bad" : "");
+  const box = document.getElementById("toast");
+  box.textContent = message;
+  box.className = "show" + (bad ? " bad" : "");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.className = ""; }, bad ? 6000 : 2500);
+  toastTimer = setTimeout(() => { box.className = ""; }, bad ? 6000 : 2500);
 }
 
 // guarded runs an async action, reporting failures as a toast.
@@ -62,30 +62,6 @@ async function guarded(action, button) {
   catch (err) { if (err.status !== 401) toast(err.message, true); }
   finally { if (button) button.disabled = false; }
 }
-
-const fmt = {
-  int: n => (n ?? 0).toLocaleString("en-US"),
-  compact: n => {
-    n = n ?? 0;
-    if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + "B";
-    if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + "M";
-    if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(1) + "k";
-    return fmt.int(n);
-  },
-  usd: v => v === null || v === undefined ? "—" : "$" + (v < 0.01 && v > 0 ? v.toFixed(4) : v.toFixed(2)),
-  pct: (v, digits = 1) => v === null || v === undefined ? "—" : (v * 100).toFixed(digits) + "%",
-  time: s => s ? new Date(s).toLocaleString() : "—",
-  clock: s => s ? new Date(s).toLocaleTimeString() : "—",
-  ms: ms => ms === null || ms === undefined ? "—" : ms >= 10000 ? (ms / 1000).toFixed(0) + "s" : ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms",
-  until: s => {
-    const ms = new Date(s) - Date.now();
-    if (ms <= 0) return "now";
-    const m = Math.round(ms / 60000);
-    if (m < 60) return m + "m";
-    const hrs = Math.floor(m / 60);
-    return hrs < 48 ? `${hrs}h ${m % 60}m` : `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
-  },
-};
 
 // term marks a word whose meaning shows on hover.
 const term = (text, hint) => hint ? h("span", { class: "term", title: hint }, text) : text;
@@ -97,12 +73,15 @@ function stack(main, ...lines) {
     lines.filter(l => l !== null && l !== undefined && l !== "").map(l => h("div", { class: "sub" }, l)));
 }
 
+// joined puts the non-empty parts on one line, separated by " · ".
+const joined = (...parts) => parts.filter(Boolean).join(" · ");
+
 // table renders rows; a column's hint explains its title on hover.
 function table(columns, rows, rowClass) {
   return h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {}, h("tr", {}, columns.map(c => h("th", { class: c.num ? "num" : "" }, term(c.title, c.hint))))),
     h("tbody", {}, rows.length === 0
-      ? h("tr", {}, h("td", { colspan: columns.length, class: "muted" }, "Nothing yet."))
+      ? h("tr", {}, h("td", { colspan: columns.length, class: "muted" }, t("common.nothing_yet")))
       : rows.map(row => h("tr", { class: rowClass ? rowClass(row) : "" },
           columns.map(c => h("td", { class: c.num ? "num" : "" }, c.cell(row))))))));
 }
@@ -147,6 +126,19 @@ async function start() {
   route();
 }
 
+// boot loads the UI text before anything is shown; without it the page
+// cannot render, so the failure replaces the page.
+async function boot() {
+  try {
+    await i18n.load();
+  } catch (err) {
+    document.body.textContent = `agyrelay: could not load the UI text (${err.message})`;
+    return;
+  }
+  i18n.apply(document);
+  start();
+}
+
 document.getElementById("login-form").addEventListener("submit", async event => {
   event.preventDefault();
   const input = document.getElementById("login-password");
@@ -169,7 +161,7 @@ document.getElementById("logout").addEventListener("click", () => guarded(async 
 }));
 
 window.addEventListener("hashchange", route);
-window.addEventListener("DOMContentLoaded", start);
+window.addEventListener("DOMContentLoaded", boot);
 
 // polling refreshes a view every interval while it is shown.
 function polling(container, interval, render) {
@@ -185,35 +177,29 @@ function polling(container, interval, render) {
 
 // ---- keys ------------------------------------------------------------
 
-const GROUP_NAMES = { "gemini": "Gemini", "claude-gpt": "Claude + GPT", "argon": "Gemini 4 Argon" };
-const groupName = g => GROUP_NAMES[g] || g;
-
-const LIMIT_HINT = "Limits cap a key's total quota use per quota group since the key was created; it never resets, so raise the limit "
-  + "to allow more. 100% = one account's whole weekly bucket of that group; blank = unlimited. Use is the share attributed from quota "
-  + "samples plus an estimate for calls not sampled yet. A turn already running when the key reaches its limit finishes; the key's "
-  + "next request is refused.";
+const groupName = g => lookup("group", g) || g;
 
 // limitInputs makes one percent field per quota group; blank = unlimited.
 function limitInputs(groups, limits) {
   const inputs = Object.fromEntries(groups.map(g => [g, h("input", {
-    type: "number", min: 0, max: 1000, step: "any", placeholder: "unlimited", style: "width:110px",
+    type: "number", min: 0, max: 1000, step: "any", placeholder: t("keys.limit.placeholder"), style: "width:110px",
     value: limits[g] === undefined ? "" : String(+(limits[g] * 100).toFixed(4)),
   })]));
   return {
-    nodes: groups.map(g => h("label", {}, `${groupName(g)} limit %`, inputs[g])),
+    nodes: groups.map(g => h("label", {}, t("keys.limit.label", { group: groupName(g) }), inputs[g])),
     read: () => Object.fromEntries(groups.filter(g => inputs[g].value.trim() !== "").map(g => [g, Number(inputs[g].value) / 100])),
   };
 }
 
 function usageCell(k, groups) {
   const shown = groups.filter(g => k.limits[g] !== undefined || k.usage[g]);
-  if (!shown.length) return h("span", { class: "muted" }, "unlimited · unused");
+  if (!shown.length) return h("span", { class: "muted" }, t("keys.usage.none"));
   return shown.map(g => {
     const u = k.usage[g] || { attributed: 0, estimated: 0 };
     const used = u.attributed + u.estimated;
     const limit = k.limits[g];
-    const title = `${fmt.pct(u.attributed, 2)} attributed + ${fmt.pct(u.estimated, 2)} estimated (calls not sampled yet)`;
-    if (limit === undefined) return h("div", { title }, `${groupName(g)}: ${fmt.pct(used, 2)} · unlimited`);
+    const title = t("keys.usage.split", { attributed: fmt.pct(u.attributed, 2), estimated: fmt.pct(u.estimated, 2) });
+    if (limit === undefined) return h("div", { title }, t("keys.usage.unlimited", { group: groupName(g), used: fmt.pct(used, 2) }));
     const level = used >= limit ? "low" : used >= limit * 0.8 ? "mid" : "";
     const fill = limit > 0 ? Math.min(100, (used / limit) * 100) : 100;
     return h("div", { class: "row", title },
@@ -232,14 +218,12 @@ function modelPicker(catalog, selected) {
   const boxes = ids.map(id => h("input", { type: "checkbox", value: id, checked: selected.includes(id) }));
   return {
     node: h("div", { class: "picker" },
-      ids.length ? ids.map((id, i) => h("label", { class: "check", title: names[id] ? id : "Not in the current model list" },
+      ids.length ? ids.map((id, i) => h("label", { class: "check", title: names[id] ? id : t("keys.models.not_in_catalog") },
         boxes[i], names[id] ? `${names[id]} ` : "", h("span", { class: "mono" }, id)))
-        : h("span", { class: "muted" }, "No models known yet: add an account first.")),
+        : h("span", { class: "muted" }, t("keys.models.none_known"))),
     read: () => boxes.filter(b => b.checked).map(b => b.value),
   };
 }
-
-const MODELS_HINT = "None checked = every model, including ones added later.";
 
 views.keys = container => {
   const created = h("div");
@@ -250,8 +234,8 @@ views.keys = container => {
   let newLimits = null;
   let newModels = null;
 
-  const name = h("input", { required: true, maxlength: 64, placeholder: "alice" });
-  const note = h("input", { placeholder: "optional" });
+  const name = h("input", { required: true, maxlength: 64, placeholder: t("keys.name.placeholder") });
+  const note = h("input", { placeholder: t("common.optional") });
   const modelsBox = h("div");
   const limitsRow = h("div", { class: "row" });
   const form = h("form", { onsubmit: event => {
@@ -259,8 +243,8 @@ views.keys = container => {
     guarded(async () => {
       const data = await api("POST", "keys", { name: name.value, note: note.value, models: newModels.read(), limits: newLimits.read() });
       created.replaceChildren(h("div", { class: "card" },
-        h("h2", {}, `Key for ${name.value}`),
-        h("p", { class: "muted" }, "Copy it now. It is shown only once; the server keeps only its hash."),
+        h("h2", {}, t("keys.created.title", { name: name.value })),
+        h("p", { class: "muted" }, t("keys.created.note")),
         h("div", { class: "secret" }, data.key)));
       name.value = note.value = "";
       newLimits = newModels = null;
@@ -268,12 +252,12 @@ views.keys = container => {
     }, event.submitter);
   } },
     h("div", { class: "row" },
-      h("label", {}, "Name", name),
-      h("label", { class: "grow" }, "Note", note)),
-    h("div", { class: "field", title: MODELS_HINT }, "Allowed models (none checked = all)", modelsBox),
+      h("label", {}, t("common.name"), name),
+      h("label", { class: "grow" }, t("common.note"), note)),
+    h("div", { class: "field", title: t("keys.models.hint") }, t("keys.models.label"), modelsBox),
     limitsRow,
-    h("p", { class: "muted" }, LIMIT_HINT),
-    h("button", { type: "submit" }, "Create key"));
+    h("p", { class: "muted" }, t("keys.limit.hint")),
+    h("button", { type: "submit" }, t("keys.create")));
 
   async function load() {
     const [data, models] = await Promise.all([api("GET", "keys"), api("GET", "models")]);
@@ -288,14 +272,14 @@ views.keys = container => {
       modelsBox.replaceChildren(newModels.node);
     }
     list.replaceChildren(table([
-      { title: "Name", cell: k => k.name },
-      { title: "Note", cell: k => k.note || h("span", { class: "muted" }, "—") },
-      { title: "Models", cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, "all") },
-      { title: "Quota used (total) / limit", hint: LIMIT_HINT, cell: k => usageCell(k, groups) },
-      { title: "Created", cell: k => fmt.time(k.created_at) },
-      { title: "", cell: k => k.revoked_at ? `revoked ${fmt.time(k.revoked_at)}` : h("span", { class: "row" },
-          h("button", { onclick: () => editKey(k) }, "Edit"),
-          h("button", { class: "danger", onclick: e => revoke(k, e.target) }, "Revoke")) },
+      { title: t("common.name"), cell: k => k.name },
+      { title: t("common.note"), cell: k => k.note || h("span", { class: "muted" }, "—") },
+      { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
+      { title: t("keys.col.usage"), hint: t("keys.limit.hint"), cell: k => usageCell(k, groups) },
+      { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
+      { title: "", cell: k => k.revoked_at ? t("keys.revoked", { time: fmt.time(k.revoked_at) }) : h("span", { class: "row" },
+          h("button", { onclick: () => editKey(k) }, t("keys.edit")),
+          h("button", { class: "danger", onclick: e => revoke(k, e.target) }, t("keys.revoke"))) },
     ], data.keys, k => k.revoked_at ? "revoked" : ""));
   }
 
@@ -308,28 +292,28 @@ views.keys = container => {
       guarded(async () => {
         await api("PATCH", `keys/${k.id}`, { note: noteInput.value, models: models.read(), limits: limits.read() });
         editor.replaceChildren();
-        toast("Saved");
+        toast(t("common.saved"));
         await load();
       }, event.submitter);
     };
     editor.replaceChildren(h("div", { class: "card" },
-      h("h2", {}, `Edit ${k.name}`),
+      h("h2", {}, t("keys.edit.title", { name: k.name })),
       h("form", { onsubmit: save },
         h("div", { class: "row" },
-          h("label", { class: "grow" }, "Note", noteInput)),
-        h("div", { class: "field", title: MODELS_HINT }, "Allowed models (none checked = all)", models.node),
+          h("label", { class: "grow" }, t("common.note"), noteInput)),
+        h("div", { class: "field", title: t("keys.models.hint") }, t("keys.models.label"), models.node),
         h("div", { class: "row" }, limits.nodes),
         h("div", { class: "row", style: "margin-top:8px" },
-          h("button", { type: "submit", class: "primary" }, "Save"),
-          h("button", { type: "button", onclick: () => editor.replaceChildren() }, "Cancel")))));
+          h("button", { type: "submit", class: "primary" }, t("common.save")),
+          h("button", { type: "button", onclick: () => editor.replaceChildren() }, t("common.cancel"))))));
   }
 
   function revoke(k, button) {
-    if (!confirm(`Revoke the key ${k.name}? Clients using it stop working at once.`)) return;
+    if (!confirm(t("keys.revoke.confirm", { name: k.name }))) return;
     guarded(async () => { await api("POST", `keys/${k.id}/revoke`); await load(); }, button);
   }
 
-  container.append(h("h1", {}, "API keys"), h("div", { class: "card" }, form), created, editor, h("div", { class: "card" }, list));
+  container.append(h("h1", {}, t("keys.title")), h("div", { class: "card" }, form), created, editor, h("div", { class: "card" }, list));
   guarded(load);
 };
 
@@ -340,7 +324,7 @@ views.keys = container => {
 function resetButton(input, value) {
   const isBox = input.type === "checkbox";
   const current = () => isBox ? input.checked : input.value;
-  const button = h("button", { type: "button", class: "reset", title: `Reset to the default: ${value === "" ? "empty" : value}` }, "↺");
+  const button = h("button", { type: "button", class: "reset", title: t("settings.reset.title", { value: value === "" ? t("settings.reset.empty") : value }) }, "↺");
   const sync = () => { button.disabled = String(current()) === String(value); };
   button.addEventListener("click", () => {
     if (isBox) input.checked = value; else input.value = value;
@@ -359,12 +343,12 @@ const withReset = (input, value) => h("span", { class: "with-reset" }, input, re
 function rowEditor(fields, rows, defaults, blank, addLabel) {
   const body = h("tbody");
   const read = () => [...body.children].map(tr => tr.read());
-  const reset = h("button", { type: "button", class: "reset", title: "Put back the default rows" }, "↺ Defaults");
+  const reset = h("button", { type: "button", class: "reset", title: t("settings.defaults.title") }, t("settings.defaults"));
   const sync = () => { reset.disabled = JSON.stringify(read()) === JSON.stringify(defaults); };
   const add = row => {
     const inputs = fields.map(f => f.input(row[f.key]));
     const tr = h("tr", {}, inputs.map(i => h("td", {}, i)),
-      h("td", {}, h("button", { type: "button", class: "danger", onclick: () => { tr.remove(); sync(); } }, "Remove")));
+      h("td", {}, h("button", { type: "button", class: "danger", onclick: () => { tr.remove(); sync(); } }, t("common.remove"))));
     tr.read = () => Object.fromEntries(fields.map((f, i) => [f.key, f.read(inputs[i])]));
     tr.addEventListener("input", sync);
     body.append(tr);
@@ -386,7 +370,7 @@ views.settings = container => {
   const password = h("div", { class: "card" });
   const sessions = h("div", { class: "card" });
   const audit = h("div", { class: "card" });
-  container.append(h("h1", {}, "Settings"), general, password, sessions, audit);
+  container.append(h("h1", {}, t("settings.title")), general, password, sessions, audit);
 
   async function loadGeneral() {
     const [s, catalog] = await Promise.all([api("GET", "settings"), api("GET", "models")]);
@@ -398,22 +382,22 @@ views.settings = container => {
     const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
-    const processMode = h("select", {}, [["per_account", "One process per account"], ["per_session", "One worker process per session"]]
+    const processMode = h("select", {}, [["per_account", t("settings.process_mode.per_account")], ["per_session", t("settings.process_mode.per_session")]]
       .map(([value, label]) => h("option", { value, selected: value === s.process_mode }, label)));
 
     const modelInput = value => h("input", { value, list: "settings-models", required: true });
     const number = (min, step) => value => h("input", { type: "number", min, step, value, style: "width:110px" });
     const prices = rowEditor([
-      { key: "model", title: "Model", input: modelInput, read: i => i.value.trim() },
-      { key: "input", title: "Input", input: number(0, "any"), read: i => Number(i.value) },
-      { key: "cached", title: "Cached input", input: number(0, "any"), read: i => Number(i.value) },
-      { key: "cache_write", title: "Cache write", input: number(0, "any"), read: i => Number(i.value) },
-      { key: "output", title: "Output", input: number(0, "any"), read: i => Number(i.value) },
-    ], s.prices, d.prices, { model: "", input: 0, cached: 0, cache_write: 0, output: 0 }, "Add price");
+      { key: "model", title: t("common.model"), input: modelInput, read: i => i.value.trim() },
+      { key: "input", title: t("settings.prices.input"), input: number(0, "any"), read: i => Number(i.value) },
+      { key: "cached", title: t("settings.prices.cached"), input: number(0, "any"), read: i => Number(i.value) },
+      { key: "cache_write", title: t("settings.prices.cache_write"), input: number(0, "any"), read: i => Number(i.value) },
+      { key: "output", title: t("settings.prices.output"), input: number(0, "any"), read: i => Number(i.value) },
+    ], s.prices, d.prices, { model: "", input: 0, cached: 0, cache_write: 0, output: 0 }, t("settings.prices.add"));
     const windows = rowEditor([
-      { key: "model", title: "Model", input: modelInput, read: i => i.value.trim() },
-      { key: "tokens", title: "Context window (tokens)", input: number(1, 1), read: i => Number(i.value) },
-    ], s.context_windows, d.context_windows, { model: "", tokens: 200000 }, "Add window");
+      { key: "model", title: t("common.model"), input: modelInput, read: i => i.value.trim() },
+      { key: "tokens", title: t("settings.windows.tokens"), input: number(1, 1), read: i => Number(i.value) },
+    ], s.context_windows, d.context_windows, { model: "", tokens: 200000 }, t("settings.windows.add"));
 
     const form = h("form", { onsubmit: event => {
       event.preventDefault();
@@ -423,39 +407,37 @@ views.settings = container => {
           retention_days: Number(retention.value), prices: prices.read(), context_windows: windows.read(),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, process_mode: processMode.value,
         });
-        toast("Saved");
+        toast(t("common.saved"));
         await loadGeneral();
       }, event.submitter);
     } },
       h("datalist", { id: "settings-models" }, catalog.map(m => h("option", { value: m.id }, m.name))),
       h("div", { class: "row" },
-        h("label", {}, "Concurrent turns per account", withReset(turns, d.turns_per_account)),
-        h("label", {}, "Idle session reuse (snapshot TTL)", withReset(ttl, d.snapshot_ttl)),
-        h("label", { title: "An idle session is closed in agy after this; under process-per-session its worker (~250 MiB) exits. The conversation's next request reopens it from disk in a few seconds." },
-          "Close idle sessions after", withReset(idleClose, d.session_idle_close)),
-        h("label", {}, "Log level", withReset(level, d.log_level)),
-        h("label", {}, "Keep call records (days)", withReset(retention, d.retention_days))),
+        h("label", {}, t("settings.turns"), withReset(turns, d.turns_per_account)),
+        h("label", {}, t("settings.ttl"), withReset(ttl, d.snapshot_ttl)),
+        h("label", { title: t("settings.idle_close.hint") }, t("settings.idle_close"), withReset(idleClose, d.session_idle_close)),
+        h("label", {}, t("settings.log_level"), withReset(level, d.log_level)),
+        h("label", {}, t("settings.retention"), withReset(retention, d.retention_days))),
       h("div", { class: "row" },
-        h("label", { title: "Per account: one agy process per account and client tool set serves every session; starts sessions faster and uses less memory. Per session: each session gets its own worker process (~250 MiB), isolating sessions from each other." },
-          "Process mode", withReset(processMode, d.process_mode))),
-      h("p", { class: "muted" }, "Changing the mode applies at once: idle agy processes exit, busy ones after their running turns, and conversations reopen in new processes on their next request."),
-      h("h3", {}, "Outbound traffic"),
+        h("label", { title: t("settings.process_mode.hint") }, t("settings.process_mode"), withReset(processMode, d.process_mode))),
+      h("p", { class: "muted" }, t("settings.process_mode.note")),
+      h("h3", {}, t("settings.outbound")),
       h("div", { class: "row" },
-        h("label", { class: "grow", title: "Carries the traffic of accounts without their own proxy" }, "Fallback HTTP proxy", withReset(fallback, d.fallback_proxy)),
-        h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, "Allow direct connections for accounts with no proxy at all"), resetButton(direct, d.allow_direct))),
-      h("p", { class: "muted" }, "Every agy connects only to agyrelay's local egress proxy, which forwards through the account's proxy, else the fallback proxy, else directly when allowed. Otherwise the connection is refused and the account is blocked, so a forgotten proxy never turns into a direct connection. Leave direct off unless this server is abroad."),
+        h("label", { class: "grow", title: t("settings.fallback.hint") }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
+        h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, t("settings.direct")), resetButton(direct, d.allow_direct))),
+      h("p", { class: "muted" }, t("settings.outbound.note")),
       h("details", { class: "fold" },
-        h("summary", {}, `Context windows (${s.context_windows.length} models, tokens)`),
-        h("p", { class: "muted" }, "A request whose prompt is estimated above its model's window fails with context_length_exceeded before it reaches an account, and clients such as opencode and pi then compact the conversation. Models without a row are left to upstream's limit. The defaults are upstream's limits (gpt-oss: 131072 minus the 32768 output tokens agy reserves). The estimate counts with each model family's tokenizer plus agy's own prompt and tool declarations, and runs above upstream's count: by about 1-2k tokens on Gemini and gpt-oss, and up to 15% on Claude, whose tokenizer is approximated."),
+        h("summary", {}, t("settings.windows.summary", { count: s.context_windows.length })),
+        h("p", { class: "muted" }, t("settings.windows.note")),
         windows.node),
       h("details", { class: "fold" },
-        h("summary", {}, `API list prices (${s.prices.length} models, USD per 1M tokens)`),
-        h("p", { class: "muted" }, "Used for the list-price estimate of each call. Input is uncached prompt tokens, output includes reasoning. Defaults are the vendors' published prices as of 2026-11-10; gpt-oss-120b uses Google Vertex's price as listed on OpenRouter. agy does not report cache writes: when a model has a cache-write price, all its uncached input is priced at it (close for multi-turn use, high for a first turn); 0 = no cache-write price."),
+        h("summary", {}, t("settings.prices.summary", { count: s.prices.length })),
+        h("p", { class: "muted" }, t("settings.prices.note")),
         prices.node),
       h("div", { class: "row", style: "margin-top:12px" },
-        h("span", { class: "muted grow" }, "↺ puts a field back to its default; Save applies the changes."),
-        h("button", { type: "submit" }, "Save settings")));
-    general.replaceChildren(h("h2", {}, "General"), form);
+        h("span", { class: "muted grow" }, t("settings.reset_note")),
+        h("button", { type: "submit" }, t("settings.save"))));
+    general.replaceChildren(h("h2", {}, t("settings.general")), form);
   }
 
   function renderPassword() {
@@ -464,39 +446,39 @@ views.settings = container => {
     const again = h("input", { type: "password", autocomplete: "new-password", required: true });
     const form = h("form", { class: "row", onsubmit: event => {
       event.preventDefault();
-      if (next.value !== again.value) { toast("The new passwords differ", true); return; }
+      if (next.value !== again.value) { toast(t("password.differ"), true); return; }
       guarded(async () => {
         const data = await api("POST", "password", { current: current.value, new: next.value });
         csrf = data.csrf;
         current.value = next.value = again.value = "";
-        toast("Password changed; other sessions were signed out");
+        toast(t("password.changed"));
         await loadSessions();
       }, event.submitter);
     } },
-      h("label", {}, "Current", current), h("label", {}, "New (12+ characters)", next), h("label", {}, "New again", again),
-      h("button", { type: "submit" }, "Change password"));
-    password.replaceChildren(h("h2", {}, "Admin password"), form);
+      h("label", {}, t("password.current"), current), h("label", {}, t("password.new"), next), h("label", {}, t("password.again"), again),
+      h("button", { type: "submit" }, t("password.change")));
+    password.replaceChildren(h("h2", {}, t("password.title")), form);
   }
 
   async function loadSessions() {
     const list = await api("GET", "sessions");
-    sessions.replaceChildren(h("h2", {}, "Signed-in browsers"), table([
-      { title: "Last seen", cell: s => fmt.time(s.seen_at) },
-      { title: "IP", cell: s => s.ip },
-      { title: "Browser", cell: s => h("span", { class: "mono" }, s.user_agent) },
-      { title: "Expires", cell: s => fmt.time(s.expires_at) },
-      { title: "", cell: s => s.current ? h("span", { class: "muted" }, "this browser")
-          : h("button", { class: "danger", onclick: e => guarded(async () => { await api("DELETE", `sessions/${s.id}`); await loadSessions(); }, e.target) }, "Sign out") },
+    sessions.replaceChildren(h("h2", {}, t("browsers.title")), table([
+      { title: t("browsers.last_seen"), cell: s => fmt.time(s.seen_at) },
+      { title: t("common.ip"), cell: s => s.ip },
+      { title: t("browsers.browser"), cell: s => h("span", { class: "mono" }, s.user_agent) },
+      { title: t("browsers.expires"), cell: s => fmt.time(s.expires_at) },
+      { title: "", cell: s => s.current ? h("span", { class: "muted" }, t("browsers.this"))
+          : h("button", { class: "danger", onclick: e => guarded(async () => { await api("DELETE", `sessions/${s.id}`); await loadSessions(); }, e.target) }, t("browsers.sign_out")) },
     ], list));
   }
 
   async function loadAudit() {
     const entries = await api("GET", "audit");
-    audit.replaceChildren(h("h2", {}, "Audit log"), table([
-      { title: "Time", cell: e => fmt.time(e.at) },
-      { title: "IP", cell: e => e.ip },
-      { title: "Action", cell: e => h("span", { class: e.action.endsWith("failed") ? "bad" : "" }, e.action) },
-      { title: "Detail", cell: e => e.detail },
+    audit.replaceChildren(h("h2", {}, t("audit.title")), table([
+      { title: t("common.time"), cell: e => fmt.time(e.at) },
+      { title: t("common.ip"), cell: e => e.ip },
+      { title: t("audit.action"), cell: e => h("span", { class: e.action.endsWith("failed") ? "bad" : "" }, e.action) },
+      { title: t("audit.detail"), cell: e => e.detail },
     ], entries));
   }
 
@@ -508,18 +490,22 @@ views.settings = container => {
 
 // ---- accounts --------------------------------------------------------
 
-const BUCKET_WINDOWS = {
-  "5h": "Short-term bucket with a 5-hour window. Requests fail while it is empty, but key limits and the Quota column do not use it",
-  weekly: "Weekly bucket: key limits and the Quota column are shares of it",
-};
+// accountBadge shows why an account is out of rotation, or ready when the
+// account's checks passed.
+function accountBadge(a, ready) {
+  if (a.paused) return h("span", { class: "badge warn" }, t("account.paused"));
+  if (a.disabled) return h("span", { class: "badge bad", title: a.disabled }, t("account.needs_signin"));
+  if (a.blocked) return h("span", { class: "badge bad", title: a.blocked }, t("account.no_proxy"));
+  return ready;
+}
 
 views.accounts = container => {
   const cards = h("div", { class: "grid" });
   const signins = new Map(); // account name → {url, code}
 
-  const name = h("input", { required: true, maxlength: 64, placeholder: "main", pattern: "[A-Za-z0-9][A-Za-z0-9_.\\-]*" });
+  const name = h("input", { required: true, maxlength: 64, placeholder: t("accounts.name.placeholder"), pattern: "[A-Za-z0-9][A-Za-z0-9_.\\-]*" });
   const proxy = h("input", { placeholder: "http://127.0.0.1:7890" });
-  const env = h("textarea", { rows: 1, placeholder: "NAME=value (optional, one per line)" });
+  const env = h("textarea", { rows: 1, placeholder: t("accounts.env.placeholder") });
   const form = h("form", { class: "row", onsubmit: event => {
     event.preventDefault();
     guarded(async () => {
@@ -529,14 +515,13 @@ views.accounts = container => {
       await startSignin(added);
     }, event.submitter);
   } },
-    h("label", {}, "Name", name),
-    h("label", { title: "agy's traffic, sign-in included, goes through this HTTP proxy (e.g. mihomo's HTTP port)" }, "HTTP proxy", proxy),
-    h("label", { class: "grow" }, "Environment for its agy", env),
-    h("button", { type: "submit" }, "Add and sign in"));
+    h("label", {}, t("common.name"), name),
+    h("label", { title: t("accounts.proxy.hint") }, t("accounts.proxy"), proxy),
+    h("label", { class: "grow" }, t("accounts.env"), env),
+    h("button", { type: "submit" }, t("accounts.add")));
 
   function editProxy(a, button) {
-    const value = prompt(`HTTP proxy for ${a.name}, e.g. http://127.0.0.1:7890 (empty = the fallback in Settings).\n`
-      + "Open connections close and agy reconnects through the new route.", a.proxy);
+    const value = prompt(t("accounts.proxy.prompt", { name: a.name }), a.proxy);
     if (value === null) return;
     guarded(async () => {
       await api("PUT", `accounts/${encodeURIComponent(a.name)}/proxy`, { proxy: value });
@@ -557,7 +542,7 @@ views.accounts = container => {
     await guarded(async () => {
       const data = await api("POST", `accounts/${encodeURIComponent(account)}/signin/code`, { code: state.code });
       signins.delete(account);
-      toast(`Signed in as ${data.email}; sampling quota…`);
+      toast(t("accounts.signed_in", { email: data.email }));
       await load();
       setTimeout(() => guarded(load), 8000);
     }, button);
@@ -571,110 +556,85 @@ views.accounts = container => {
   function signinPanel(a) {
     const state = signins.get(a.name);
     if (!state) return null;
-    const code = h("input", { class: "grow", placeholder: "Paste the code or the whole URL of the page you landed on", value: state.code,
+    const code = h("input", { class: "grow", placeholder: t("accounts.signin.code"), value: state.code,
       oninput: e => { state.code = e.target.value; } });
+    const link = h("a", { href: state.url, target: "_blank", rel: "noopener noreferrer" }, t("accounts.signin.link"));
     return h("div", { class: "card" },
-      h("h3", {}, "Sign in"),
+      h("h3", {}, t("accounts.signin.title")),
       h("ol", {},
-        h("li", {}, h("a", { href: state.url, target: "_blank", rel: "noopener noreferrer" }, "Open the Google sign-in"), " and sign in with the account to add."),
-        h("li", {}, "Google sends you to antigravity.google. Copy that page's full URL (or the code it shows) and paste it here.")),
+        h("li", {}, tx("accounts.signin.step1", { link })),
+        h("li", {}, t("accounts.signin.step2"))),
       h("div", { class: "row" }, code,
-        h("button", { class: "primary", onclick: e => submitSignin(a.name, e.target) }, "Finish"),
-        h("button", { onclick: () => cancelSignin(a.name) }, "Cancel")));
+        h("button", { class: "primary", onclick: e => submitSignin(a.name, e.target) }, t("accounts.signin.finish")),
+        h("button", { onclick: () => cancelSignin(a.name) }, t("common.cancel"))));
   }
 
   function status(a) {
-    if (a.paused) return h("span", { class: "badge warn" }, "paused");
-    if (a.disabled) return h("span", { class: "badge bad", title: a.disabled }, "needs sign-in");
-    if (a.blocked) return h("span", { class: "badge bad", title: a.blocked }, "no proxy");
-    if (Object.keys(a.cooldowns).length) return h("span", { class: "badge warn" }, "cooling down");
-    if (!a.user) return h("span", { class: "badge muted" }, "not checked");
-    return h("span", { class: "badge ok" }, "ready");
+    if (Object.keys(a.cooldowns).length) return accountBadge(a, h("span", { class: "badge warn" }, t("account.cooling_down")));
+    if (!a.user) return accountBadge(a, h("span", { class: "badge muted" }, t("account.not_checked")));
+    return accountBadge(a, h("span", { class: "badge ok" }, t("account.ready")));
   }
 
   function quota(a) {
-    if (!a.quota || !a.quota.length) return h("p", { class: "muted" }, a.sample_error ? "" : "No quota sample yet. Refresh to check the account.");
+    if (!a.quota || !a.quota.length) return h("p", { class: "muted" }, a.sample_error ? "" : t("accounts.quota.none"));
     return a.quota.map(g => h("div", {},
       h("h3", { title: g.description || "" }, g.name),
       g.buckets.map(b => {
         const level = b.remaining <= 0.1 ? "low" : b.remaining <= 0.35 ? "mid" : "";
         return h("div", { class: "row", title: b.name },
-          h("span", { class: "muted", style: "width:52px" }, term(b.window, BUCKET_WINDOWS[b.window])),
+          h("span", { class: "muted", style: "width:52px" }, term(b.window, lookup("bucket", b.window))),
           h("div", { class: "bar grow " + level }, h("span", { style: `width:${Math.max(0, Math.min(100, b.remaining * 100))}%` })),
-          h("span", { class: "mono", style: "width:150px;text-align:right" }, `${fmt.pct(b.remaining, 1)} left · ${fmt.until(b.reset_at)}`));
+          h("span", { class: "mono", style: "width:150px;text-align:right" }, t("accounts.quota.left", { left: fmt.pct(b.remaining, 1), reset: fmt.until(b.reset_at) })));
       })));
   }
 
   function card(a) {
     const enc = encodeURIComponent(a.name);
     const act = (label, action, cls) => h("button", { class: cls || "", onclick: e => guarded(async () => { await action(); await load(); }, e.target) }, label);
+    const route = a.route || t("accounts.route_unknown");
     return h("div", { class: "card" },
       h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), status(a)),
       a.user ? h("p", {}, `${a.user.email} · ${a.user.tier || a.user.plan}`) : null,
       a.disabled ? h("p", { class: "bad" }, a.disabled) : null,
       a.blocked ? h("p", { class: "bad" }, a.blocked) : null,
-      Object.entries(a.cooldowns).map(([group, until]) => h("p", { class: "warn" }, `${group} quota cooling down for ${fmt.until(until)}`)),
-      a.sample_error ? h("p", { class: "bad mono" }, `Quota check failed: ${a.sample_error}`) : null,
-      h("p", { class: "muted" }, `${a.turns} turn(s) running · ${a.procs} agy process(es) · quota checked ${a.sampled_at ? fmt.time(a.sampled_at) : "never"}`
-        + ` · traffic: ${a.route || "unknown"}${a.proxy ? "" : " (no own proxy)"}`
-        + (a.env_names.length ? ` · env: ${a.env_names.join(", ")}` : "")),
+      Object.entries(a.cooldowns).map(([group, until]) => h("p", { class: "warn" }, t("accounts.cooldown", { group, time: fmt.until(until) }))),
+      a.sample_error ? h("p", { class: "bad mono" }, t("accounts.sample_error", { error: a.sample_error })) : null,
+      h("p", { class: "muted" }, joined(
+        t("accounts.turns", { count: a.turns }),
+        t("accounts.procs", { count: a.procs }),
+        a.sampled_at ? t("accounts.sampled", { time: fmt.time(a.sampled_at) }) : t("accounts.not_sampled"),
+        a.proxy ? t("accounts.traffic", { route }) : t("accounts.traffic.no_own_proxy", { route }),
+        a.env_names.length ? t("accounts.env_names", { names: a.env_names.join(", ") }) : "")),
       quota(a),
       signinPanel(a),
       h("div", { class: "row", style: "margin-top:12px" },
-        signins.has(a.name) ? null : h("button", { onclick: e => startSignin(a.name, e.target) }, a.user || a.disabled ? "Sign in again" : "Sign in"),
-        act("Refresh quota", () => api("POST", `accounts/${enc}/refresh`)),
-        h("button", { onclick: e => editProxy(a, e.target) }, "Proxy…"),
-        a.paused ? act("Resume", () => api("POST", `accounts/${enc}/resume`)) : act("Pause", () => api("POST", `accounts/${enc}/pause`)),
+        signins.has(a.name) ? null : h("button", { onclick: e => startSignin(a.name, e.target) }, a.user || a.disabled ? t("accounts.signin_again") : t("accounts.signin")),
+        act(t("accounts.refresh"), () => api("POST", `accounts/${enc}/refresh`)),
+        h("button", { onclick: e => editProxy(a, e.target) }, t("accounts.proxy.edit")),
+        a.paused ? act(t("accounts.resume"), () => api("POST", `accounts/${enc}/resume`)) : act(t("accounts.pause"), () => api("POST", `accounts/${enc}/pause`)),
         h("span", { class: "grow" }),
         h("button", { class: "danger", onclick: e => {
-          if (!confirm(`Remove ${a.name}? Its running turns fail. Its files stay on disk, so adding it again under the same name keeps its sign-in.`)) return;
+          if (!confirm(t("accounts.remove.confirm", { name: a.name }))) return;
           guarded(async () => { await api("DELETE", `accounts/${enc}`); await load(); }, e.target);
-        } }, "Remove")));
+        } }, t("common.remove"))));
   }
 
   async function load() {
     const accounts = await api("GET", "accounts");
     for (const a of accounts) if (a.login_pending === false) signins.delete(a.name);
-    cards.replaceChildren(...(accounts.length ? accounts.map(card) : [h("p", { class: "muted" }, "No accounts yet. Add one above.")]));
+    cards.replaceChildren(...(accounts.length ? accounts.map(card) : [h("p", { class: "muted" }, t("accounts.empty"))]));
   }
 
-  container.append(h("h1", {}, "Accounts"), h("div", { class: "card" }, form), cards);
+  container.append(h("h1", {}, t("accounts.title")), h("div", { class: "card" }, form), cards);
   // Re-render on a timer unless a sign-in is being typed.
   return polling(container, 10000, async () => { if (signins.size === 0) await load(); });
 };
 
 // ---- workers ---------------------------------------------------------
 
-const bytes = n => n >= 1 << 30 ? (n / (1 << 30)).toFixed(2) + " GiB" : n >= 1 << 20 ? (n / (1 << 20)).toFixed(0) + " MiB" : (n / 1024).toFixed(0) + " KiB";
-
-// span formats the time from a to b (ISO strings or Dates) as "3m 20s".
-function span(a, b) {
-  const s = Math.max(0, Math.round((new Date(b) - new Date(a)) / 1000));
-  if (s < 60) return s + "s";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const hrs = Math.floor(m / 60);
-  return hrs < 48 ? `${hrs}h ${m % 60}m` : `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
-}
-
-const PROCESS_KINDS = {
-  agy: "One agy process (per account and client tool set) that runs all its sessions",
-  front: "Per-session mode: the front process hands each session to its own worker process",
-  worker: "A worker process of the per-session mode, running the sessions listed",
-};
-
-const TURN_STATES = {
-  idle: "No turn running; the session waits for its conversation's next request",
-  starting: "The turn is being set up: the session is opening, resuming, or rewinding",
-  running: "The model is working and a client is reading the response",
-  "waiting for tool results": "The turn called client tools and waits for the request that carries their results",
-  "running unobserved": "No client is reading the turn, e.g. after its client disconnected; it is being cancelled or handed to the next request",
-  closing: "The idle session is being closed in agy",
-};
-
 views.workers = container => {
   const cards = h("div");
-  container.append(h("h1", {}, "Workers"), cards);
+  container.append(h("h1", {}, t("workers.title")), cards);
 
   const action = (label, cls, confirmText, run) => h("button", { class: cls, onclick: e => {
     if (confirmText && !confirm(confirmText)) return;
@@ -682,49 +642,52 @@ views.workers = container => {
   } }, label);
 
   function processes(a, now) {
-    if (!a.procs.length) return h("p", { class: "muted" }, "No agy running. The next request or quota refresh starts one.");
+    if (!a.procs.length) return h("p", { class: "muted" }, t("workers.no_procs"));
     const rows = [];
     for (const p of a.procs) {
-      rows.push({ kind: p.per_session ? "front" : "agy", pid: p.pid, agent: p.agent, up: span(p.started, now), rss: p.rss_bytes, cpu: p.cpu_seconds, sessions: "", error: p.error });
+      const kind = p.per_session ? "front" : "agy";
+      const label = p.per_session ? t("workers.kind.front") : t("workers.kind.agy");
+      rows.push({ kind, label, pid: p.pid, agent: p.agent, up: fmt.span(p.started, now), rss: p.rss_bytes, cpu: p.cpu_seconds, sessions: "", error: p.error });
       for (const w of p.workers) {
-        rows.push({ kind: `worker ${w.number}`, pid: w.pid, agent: "", up: "", rss: w.rss_bytes, cpu: w.cpu_seconds, sessions: w.sessions.map(id => id.slice(0, 8)).join(", ") });
+        rows.push({ kind: "worker", label: t("workers.kind.worker", { number: w.number }), pid: w.pid, agent: "", up: "", rss: w.rss_bytes, cpu: w.cpu_seconds,
+          sessions: w.sessions.map(id => id.slice(0, 8)).join(", ") });
       }
     }
     const total = rows.reduce((sum, r) => sum + r.rss, 0);
     return [
       table([
-        { title: "Process", cell: r => term(r.kind, PROCESS_KINDS[r.kind.split(" ")[0]]) },
-        { title: "PID", num: true, cell: r => r.pid },
-        { title: "Profile", cell: r => h("span", { class: "mono" }, r.agent) },
-        { title: "Up", cell: r => r.up },
-        { title: "Memory", num: true, cell: r => bytes(r.rss) },
-        { title: "CPU", num: true, cell: r => r.cpu.toFixed(1) + "s" },
-        { title: "Sessions", cell: r => h("span", { class: "mono" }, r.sessions) },
+        { title: t("workers.process"), cell: r => term(r.label, lookup("process", r.kind)) },
+        { title: t("workers.pid"), num: true, cell: r => r.pid },
+        { title: t("workers.profile"), cell: r => h("span", { class: "mono" }, r.agent) },
+        { title: t("workers.up"), cell: r => r.up },
+        { title: t("workers.memory"), num: true, cell: r => fmt.bytes(r.rss) },
+        { title: t("workers.cpu"), num: true, cell: r => fmt.seconds(r.cpu) },
+        { title: t("workers.sessions"), cell: r => h("span", { class: "mono" }, r.sessions) },
         { title: "", cell: r => r.error ? h("span", { class: "bad" }, r.error) : "" },
       ], rows),
-      h("p", { class: "muted" }, `${rows.length} process(es), ${bytes(total)} resident in total.`),
+      h("p", { class: "muted" }, t("workers.procs_total", { count: rows.length, memory: fmt.bytes(total) })),
     ];
   }
 
   function sessions(a, now) {
     const enc = encodeURIComponent(a.name);
-    const where = s => s.worker ? term(`worker ${s.worker}`, PROCESS_KINDS.worker)
-      : s.pid ? term("in process", "Open in the account's agy process")
-      : term("closed", "Closed in agy after being idle; its next request reopens it from disk");
+    const where = s => s.worker ? term(t("workers.kind.worker", { number: s.worker }), lookup("process", "worker"))
+      : s.pid ? term(t("workers.in_process"), t("workers.in_process.hint"))
+      : term(t("workers.closed"), t("workers.closed.hint"));
     const turnTime = s => !s.turn || !s.turn.started ? "" : s.turn.parked_at
-      ? `${span(s.turn.started, now)} · waiting ${span(s.turn.parked_at, now)}, cancelled in ${span(now, s.turn.park_timeout)}`
-      : span(s.turn.started, now);
+      ? t("workers.turn.parked", { elapsed: fmt.span(s.turn.started, now), waiting: fmt.span(s.turn.parked_at, now), left: fmt.span(now, s.turn.park_timeout) })
+      : fmt.span(s.turn.started, now);
     return table([
-      { title: "Session · process", cell: s => stack(h("span", { class: "mono", title: s.id }, s.id.slice(0, 8)), where(s)) },
-      { title: "Key", cell: s => s.key },
-      { title: "State · turn", cell: s => !s.turn ? stack(term("idle", TURN_STATES.idle), `last used ${span(s.last_used, now)} ago`)
-          : stack(h("span", { class: (s.turn.state.startsWith("waiting") ? "warn" : "ok") + " term", title: TURN_STATES[s.turn.state] || "" }, s.turn.state),
-            [s.turn.model, s.turn.model && turnTime(s) ? " · " : "", turnTime(s)]) },
+      { title: t("workers.session"), cell: s => stack(h("span", { class: "mono", title: s.id }, s.id.slice(0, 8)), where(s)) },
+      { title: t("common.key"), cell: s => s.key },
+      { title: t("workers.state"), cell: s => !s.turn ? stack(term(t("workers.idle"), lookup("turn_state", "idle")), t("workers.last_used", { time: fmt.span(s.last_used, now) }))
+          : stack(h("span", { class: (s.turn.state.startsWith("waiting") ? "warn" : "ok") + " term", title: lookup("turn_state", s.turn.state) || "" }, s.turn.state),
+            joined(s.turn.model, turnTime(s))) },
       { title: "", cell: s => {
           const path = `workers/${enc}/sessions/${encodeURIComponent(s.id)}`;
-          if (s.turn) return action("Cancel turn", "danger", `Cancel the turn of ${s.key}? Its client gets an error.`, () => api("POST", path + "/cancel"));
+          if (s.turn) return action(t("workers.cancel_turn"), "danger", t("workers.cancel_turn.confirm", { key: s.key }), () => api("POST", path + "/cancel"));
           if (!s.pid) return "";
-          return action("Close", "", "", () => api("POST", path + "/close"));
+          return action(t("workers.close"), "", "", () => api("POST", path + "/close"));
         } },
     ], a.sessions);
   }
@@ -733,86 +696,48 @@ views.workers = container => {
     const e = a.egress;
     if (!e) return null;
     return h("div", {},
-      h("h3", {}, "Outbound"),
-      h("p", {}, `Route: ${e.route} · ${e.open} open · ${fmt.int(e.connections)} connection(s) · ${bytes(e.bytes_out)} out / ${bytes(e.bytes_in)} in`
-        + (e.refused ? ` · ${fmt.int(e.refused)} refused` : "")),
+      h("h3", {}, t("workers.outbound")),
+      h("p", {}, joined(
+        t("workers.egress.route", { route: e.route }),
+        t("workers.egress.open", { count: e.open }),
+        t("workers.egress.connections", { count: e.connections }),
+        t("workers.egress.bytes", { out: fmt.bytes(e.bytes_out), in: fmt.bytes(e.bytes_in) }),
+        e.refused ? t("workers.egress.refused", { count: e.refused }) : "")),
       e.last_error ? h("p", { class: "bad mono" }, `${fmt.time(e.last_error_at)}: ${e.last_error}`) : null,
       e.hosts.length ? h("p", { class: "muted mono" }, e.hosts.map(x => `${x.host} ×${x.connections}`).join("  ·  ")) : null);
   }
 
   function card(a, now) {
-    const badge = a.paused ? h("span", { class: "badge warn" }, "paused")
-      : a.disabled ? h("span", { class: "badge bad" }, "needs sign-in")
-      : a.blocked ? h("span", { class: "badge bad" }, "no proxy")
-      : h("span", { class: "badge ok" }, `${a.turns} turn(s)`);
+    const badge = accountBadge(a, h("span", { class: "badge ok" }, t("workers.turns", { count: a.turns })));
     return h("div", { class: "card" },
       h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), badge,
-        action("Restart agy", "danger", `Restart ${a.name}'s agy? Its running turns fail; sessions reopen from disk on their next request.`,
+        action(t("workers.restart"), "danger", t("workers.restart.confirm", { name: a.name }),
           () => api("POST", `workers/${encodeURIComponent(a.name)}/restart`))),
-      h("h3", {}, "Processes"), processes(a, now),
-      h("h3", {}, "Sessions"), sessions(a, now),
+      h("h3", {}, t("workers.processes")), processes(a, now),
+      h("h3", {}, t("workers.sessions")), sessions(a, now),
       egress(a));
   }
 
   async function load() {
     const data = await api("GET", "workers");
-    cards.replaceChildren(...(data.accounts.length ? data.accounts.map(a => card(a, data.now)) : [h("p", { class: "muted" }, "No accounts.")]));
+    cards.replaceChildren(...(data.accounts.length ? data.accounts.map(a => card(a, data.now)) : [h("p", { class: "muted" }, t("workers.empty"))]));
   }
   return polling(container, 3000, load);
 };
 
 // ---- calls -----------------------------------------------------------
 
-// How a request reached its agy session.
-const MODES = {
-  continue: "Returned tool results to the turn waiting for them; the same agy turn went on",
-  warm: "Reused the agy session that holds this conversation; only the new messages were sent",
-  rewind: "Rewound an agy session that holds a later version of this conversation (the client edited or dropped messages) to the shared part, then sent the rest",
-  fresh: "A new conversation: a new agy session with nothing to replay",
-  replay: "A new agy session that got the whole history as text, because no session could be reused (see the reason)",
-};
-
-// Request outcomes: finish reasons of successes, then error statuses.
-const STATUSES = {
-  stop: "The model finished its reply",
-  tool_calls: "The reply ended on tool calls for the client to run; the turn waits for their results",
-  length: "The reply hit the output token limit",
-  ok: "Succeeded",
-  context_length: "The prompt is larger than the model's context window (agyrelay's estimate or upstream's error); clients compact the conversation",
-  quota: "The account's quota ran out; tried on another account first when there was one",
-  key_limit: "The API key used up its quota limit",
-  overloaded: "Upstream is over capacity",
-  unavailable: "agyrelay could not serve it: no account free, or an internal check failed",
-  upstream_error: "agy or the model failed; hover the row for the message",
-  invalid_request: "The request was malformed",
-  unauthorized: "Bad or missing API key",
-  forbidden: "The API key may not use this model",
-  unknown_model: "No such model",
-};
-
-const STREAM_HINT = "Streamed (stream: true); without the arrow the client waited for the whole response";
-
-// Why a request with history replayed it into a new session.
-const replayReasons = {
-  no_snapshot: "No session holds this conversation's history: new to the relay, idle past the snapshot TTL, or the history was edited",
-  tools_changed: "The client's tool set differs from the session's",
-  warm_failed: "The session could not be reopened or rewound",
-  retry: "An earlier attempt failed on another account",
-};
-
 const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#9333ea", "#ea580c"];
 
 function cachePct(input, cached) { return input > 0 ? cached / input : null; }
 
-const TOKENS_HINT = "Prompt (input) and output tokens; below, the share of the prompt read from the cache and the output spent on reasoning";
-const COST_HINT = "What the tokens would cost at the vendors' API list prices (Settings), and the share of one account's weekly quota they used";
-
 // tokensCell shows in/out over cache hit and reasoning, for a request or a
 // sum of them.
-function tokensCell(t) {
-  if (!t.input && !t.output) return h("span", { class: "muted" }, "—");
-  return stack(`${fmt.compact(t.input)} in · ${fmt.compact(t.output)} out`,
-    [`${fmt.pct(cachePct(t.input, t.cached))} cached`, t.reasoning ? ` · ${fmt.compact(t.reasoning)} reasoning` : ""]);
+function tokensCell(row) {
+  if (!row.input && !row.output) return h("span", { class: "muted" }, "—");
+  return stack(t("calls.tokens.in_out", { in: fmt.compact(row.input), out: fmt.compact(row.output) }),
+    joined(t("calls.tokens.cached", { pct: fmt.pct(cachePct(row.input, row.cached)) }),
+      row.reasoning ? t("calls.tokens.reasoning", { n: fmt.compact(row.reasoning) }) : ""));
 }
 
 // stackedBars draws one bar per day, stacked by series, as SVG.
@@ -861,7 +786,7 @@ views.calls = container => {
   const chart = h("div", { class: "card" });
   const byKey = h("div", { class: "card" });
   const list = h("div", { class: "card" });
-  container.append(h("h1", {}, "Calls"), h("div", { class: "card" }, filters), totals, chart, byKey, list);
+  container.append(h("h1", {}, t("calls.title")), h("div", { class: "card" }, filters), totals, chart, byKey, list);
 
   const ranges = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 };
   const since = () => Date.now() - ranges[state.range] * 86400e3;
@@ -875,33 +800,35 @@ views.calls = container => {
     const values = await api("GET", "usage/filters?" + new URLSearchParams({ since: String(Math.floor(since())) }));
     const select = (field, options, all) => h("select", { onchange: e => { state[field] = e.target.value; reload(); } },
       h("option", { value: "" }, all), options.map(v => h("option", { value: v, selected: v === state[field] }, v)));
+    const metrics = [["cost", t("calls.metric.cost")], ["tokens", t("calls.metric.tokens")], ["quota", t("calls.metric.quota")]];
     filters.replaceChildren(
-      h("label", {}, "Range", h("select", { onchange: e => { state.range = e.target.value; reload(); } },
-        Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, "last " + r)))),
-      h("label", {}, "Key", select("key", values.key, "all keys")),
-      h("label", {}, "Model", select("model", values.model, "all models")),
-      h("label", {}, "Account", select("account", values.account, "all accounts")),
-      h("label", {}, "Chart", h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
-        [["cost", "list price"], ["tokens", "tokens (in + out)"], ["quota", "weekly quota"]].map(([v, t]) => h("option", { value: v, selected: v === state.metric }, t)))),
+      h("label", {}, t("calls.range"), h("select", { onchange: e => { state.range = e.target.value; reload(); } },
+        Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
+      h("label", {}, t("common.key"), select("key", values.key, t("calls.all_keys"))),
+      h("label", {}, t("common.model"), select("model", values.model, t("calls.all_models"))),
+      h("label", {}, t("common.account"), select("account", values.account, t("calls.all_accounts"))),
+      h("label", {}, t("calls.chart"), h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
+        metrics.map(([v, label]) => h("option", { value: v, selected: v === state.metric }, label)))),
       h("span", { class: "grow" }),
-      h("button", { onclick: e => guarded(reload, e.target) }, "Refresh"));
+      h("button", { onclick: e => guarded(reload, e.target) }, t("common.refresh")));
   }
 
   function renderTotals(sums) {
-    const t = sums.reduce((a, s) => {
+    const sum = sums.reduce((a, s) => {
       for (const k of ["requests", "errors", "input", "cached", "output", "reasoning", "cost_usd", "unpriced", "quota_used"]) a[k] = (a[k] || 0) + s[k];
       return a;
     }, {});
     const stat = (label, value, hint) => h("div", { title: hint || "" }, h("div", { class: "muted" }, label), h("div", { style: "font-size:18px;font-weight:600" }, value));
+    const price = fmt.usd(sum.cost_usd || 0) + (sum.unpriced ? " " + t("calls.total.unpriced", { count: sum.unpriced }) : "");
     totals.replaceChildren(h("div", { class: "row", style: "gap:28px" },
-      stat("Requests", fmt.int(t.requests || 0)),
-      stat("Errors", fmt.int(t.errors || 0)),
-      stat("Input", fmt.compact(t.input)),
-      stat("Cached", fmt.compact(t.cached)),
-      stat("Cache hit", fmt.pct(cachePct(t.input, t.cached))),
-      stat("Output", fmt.compact(t.output)),
-      stat("API list price", fmt.usd(t.cost_usd || 0) + (t.unpriced ? ` (+${t.unpriced} unpriced)` : ""), "What these tokens would cost at the vendors' API list prices (Settings → Prices)"),
-      stat("Weekly quota used", fmt.pct(t.quota_used || 0, 2), "Sum of attributed weekly-quota shares; 100% = one account's whole weekly bucket")));
+      stat(t("common.requests"), fmt.int(sum.requests || 0)),
+      stat(t("calls.total.errors"), fmt.int(sum.errors || 0)),
+      stat(t("calls.total.input"), fmt.compact(sum.input)),
+      stat(t("calls.total.cached"), fmt.compact(sum.cached)),
+      stat(t("calls.total.cache_hit"), fmt.pct(cachePct(sum.input, sum.cached))),
+      stat(t("calls.total.output"), fmt.compact(sum.output)),
+      stat(t("calls.total.price"), price, t("calls.total.price.hint")),
+      stat(t("calls.total.quota"), fmt.pct(sum.quota_used || 0, 2), t("calls.total.quota.hint"))));
   }
 
   let dayKey = [];
@@ -914,8 +841,8 @@ views.calls = container => {
 
   function renderChart() {
     const days = [];
-    for (let t = since(); localDay(t) <= localDay(Date.now()); t += 86400e3) {
-      if (days[days.length - 1] !== localDay(t)) days.push(localDay(t));
+    for (let at = since(); localDay(at) <= localDay(Date.now()); at += 86400e3) {
+      if (days[days.length - 1] !== localDay(at)) days.push(localDay(at));
     }
     const keys = [...new Set(dayKey.map(s => s.group.split("\x1f")[1]))].sort();
     const cell = new Map(dayKey.map(s => [s.group, s]));
@@ -925,19 +852,19 @@ views.calls = container => {
       return state.metric === "cost" ? s.cost_usd : state.metric === "quota" ? s.quota_used : s.input + s.output;
     };
     const label = state.metric === "cost" ? fmt.usd : state.metric === "quota" ? (v => fmt.pct(v, 2)) : fmt.compact;
-    chart.replaceChildren(h("h2", {}, "Per day"),
-      keys.length ? stackedBars(days, keys, valueOf, label) : h("p", { class: "muted" }, "No calls in this range."),
+    chart.replaceChildren(h("h2", {}, t("calls.per_day")),
+      keys.length ? stackedBars(days, keys, valueOf, label) : h("p", { class: "muted" }, t("calls.no_calls")),
       h("div", { class: "legend" }, keys.map((k, i) => h("span", {}, h("i", { style: `background:${PALETTE[i % PALETTE.length]}` }), k))));
   }
 
   function renderByKey(sums) {
-    byKey.replaceChildren(h("h2", {}, "Per key"), table([
-      { title: "Key", cell: s => s.group },
-      { title: "Requests", num: true, cell: s => stack(fmt.int(s.requests), s.errors ? h("span", { class: "bad" }, `${fmt.int(s.errors)} failed`) : null) },
-      { title: "Tokens", num: true, hint: TOKENS_HINT, cell: s => tokensCell(s) },
-      { title: "List price · quota", num: true, hint: COST_HINT, cell: s => stack(
-          [fmt.usd(s.cost_usd), s.unpriced ? term("*", `${s.unpriced} call(s) of models without a price`) : ""],
-          `${fmt.pct(s.quota_used, 2)} quota`) },
+    byKey.replaceChildren(h("h2", {}, t("calls.per_key")), table([
+      { title: t("common.key"), cell: s => s.group },
+      { title: t("common.requests"), num: true, cell: s => stack(fmt.int(s.requests), s.errors ? h("span", { class: "bad" }, t("calls.failed", { count: s.errors })) : null) },
+      { title: t("calls.tokens"), num: true, hint: t("calls.tokens.hint"), cell: s => tokensCell(s) },
+      { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: s => stack(
+          [fmt.usd(s.cost_usd), s.unpriced ? term("*", t("calls.unpriced", { count: s.unpriced })) : ""],
+          t("calls.quota_share", { pct: fmt.pct(s.quota_used, 2) })) },
     ], sums));
   }
 
@@ -946,22 +873,22 @@ views.calls = container => {
     const before = more && rows.length ? { before: String(rows[rows.length - 1].id) } : {};
     const page = await api("GET", "requests?" + query({ limit: "100", ...before }));
     rows = more ? rows.concat(page) : page;
-    list.replaceChildren(h("div", {}, h("h2", {}, "Requests"), table([
-      { title: "Time", hint: "When the request came · total time · time to first output", cell: r => stack(fmt.time(r.at),
-          r.ttft_ms === null ? fmt.ms(r.duration_ms) : `${fmt.ms(r.duration_ms)} · first output ${fmt.ms(r.ttft_ms)}`) },
-      { title: "Key · account · API", cell: r => stack(r.key,
-          [r.account || "no account", " · ", r.api, r.stream ? term(" ⇢", STREAM_HINT) : ""]) },
-      { title: "Model · mode", hint: "The model, and how the request reached its agy session", cell: r => stack(
+    list.replaceChildren(h("div", {}, h("h2", {}, t("calls.requests")), table([
+      { title: t("common.time"), hint: t("calls.time.hint"), cell: r => stack(fmt.time(r.at),
+          r.ttft_ms === null ? fmt.ms(r.duration_ms) : t("calls.time.first_output", { total: fmt.ms(r.duration_ms), first: fmt.ms(r.ttft_ms) })) },
+      { title: t("calls.who"), cell: r => stack(r.key,
+          [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : ""]) },
+      { title: t("calls.model_mode"), hint: t("calls.model_mode.hint"), cell: r => stack(
           h("span", { title: r.slug }, r.model),
-          r.mode ? [term(r.mode, MODES[r.mode]), r.replay_reason ? [" · ", term(r.replay_reason, replayReasons[r.replay_reason])] : ""] : null) },
-      { title: "Status", cell: r => r.status === "ok" ? term(r.finish || "ok", STATUSES[r.finish || "ok"])
-          : h("span", { class: "bad term", title: `${STATUSES[r.status] || r.status}\n\n${r.error}` }, r.status) },
-      { title: "Tokens", num: true, hint: TOKENS_HINT, cell: r => tokensCell(r) },
-      { title: "List price · quota", num: true, hint: COST_HINT, cell: r => !r.input && !r.output ? h("span", { class: "muted" }, "—") : stack(fmt.usd(r.cost_usd),
-          r.quota_used === null ? term("quota pending", "Attributed once the account's quota is sampled again") : `${fmt.pct(r.quota_used, 3)} quota`) },
+          r.mode ? [term(r.mode, lookup("mode", r.mode)), r.replay_reason ? [" · ", term(r.replay_reason, lookup("replay", r.replay_reason))] : ""] : null) },
+      { title: t("calls.status"), cell: r => r.status === "ok" ? term(r.finish || "ok", lookup("status", r.finish || "ok"))
+          : h("span", { class: "bad term", title: `${lookup("status", r.status) || r.status}\n\n${r.error}` }, r.status) },
+      { title: t("calls.tokens"), num: true, hint: t("calls.tokens.hint"), cell: r => tokensCell(r) },
+      { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: r => !r.input && !r.output ? h("span", { class: "muted" }, "—") : stack(fmt.usd(r.cost_usd),
+          r.quota_used === null ? term(t("calls.quota_pending"), t("calls.quota_pending.hint")) : t("calls.quota_share", { pct: fmt.pct(r.quota_used, 3) })) },
     ], rows),
-    page.length === 100 ? h("button", { style: "margin-top:8px", onclick: e => guarded(() => loadRows(true), e.target) }, "Load more") : null,
-    h("p", { class: "muted" }, "A turn that calls client tools spans several requests; its tokens are counted on the request that ends it. Quota shares appear once the account's quota is sampled again (every 5 minutes while its agy runs).")));
+    page.length === 100 ? h("button", { style: "margin-top:8px", onclick: e => guarded(() => loadRows(true), e.target) }, t("calls.load_more")) : null,
+    h("p", { class: "muted" }, t("calls.requests.note"))));
   }
 
   async function reload() {
@@ -993,18 +920,18 @@ views.logs = container => {
   const level = h("select", { onchange: e => { state.level = e.target.value; restart(); } },
     ["debug", "info", "warn", "error"].map(l => h("option", { value: l, selected: l === state.level }, l + "+")));
   const component = h("select", { onchange: e => { state.component = e.target.value; restart(); } },
-    h("option", { value: "" }, "all components"),
+    h("option", { value: "" }, t("logs.all_components")),
     ["gateway", "pool", "bridge", "usage", "control", "admin"].map(c => h("option", { value: c }, c)));
   const live = h("input", { type: "checkbox", checked: state.live, onchange: e => { state.live = e.target.checked; restart(); } });
 
-  container.append(h("h1", {}, "Logs"),
+  container.append(h("h1", {}, t("logs.title")),
     h("div", { class: "card row" },
-      h("label", {}, "Level", level),
-      h("label", {}, "Component", component),
-      h("label", {}, "Account", filterInput("account", "any")),
-      h("label", { class: "grow" }, "Search", filterInput("q", "text in message or fields")),
-      h("label", { style: "flex-direction:row;align-items:center" }, live, "Follow"),
-      h("button", { onclick: () => { box.replaceChildren(); lines = 0; count.textContent = ""; } }, "Clear"),
+      h("label", {}, t("logs.level"), level),
+      h("label", {}, t("logs.component"), component),
+      h("label", {}, t("common.account"), filterInput("account", t("logs.any"))),
+      h("label", { class: "grow" }, t("logs.search"), filterInput("q", t("logs.search.placeholder"))),
+      h("label", { style: "flex-direction:row;align-items:center" }, live, t("logs.follow")),
+      h("button", { onclick: () => { box.replaceChildren(); lines = 0; count.textContent = ""; } }, t("logs.clear")),
       count),
     box);
 
@@ -1022,7 +949,7 @@ views.logs = container => {
       lines++;
     }
     while (lines > MAX_LOG_LINES) { box.firstChild.remove(); lines--; }
-    count.textContent = `${lines} lines`;
+    count.textContent = t("logs.lines", { count: lines });
     if (atBottom) box.scrollTop = box.scrollHeight;
   }
 
@@ -1040,7 +967,7 @@ views.logs = container => {
     // EventSource sends the session cookie; GET needs no CSRF token.
     source = new EventSource("/admin/api/logs/stream?" + params().toString());
     source.onmessage = msg => append([JSON.parse(msg.data)]);
-    source.onerror = () => { count.textContent = "stream interrupted; retrying…"; };
+    source.onerror = () => { count.textContent = t("logs.interrupted"); };
   }
 
   restart();
