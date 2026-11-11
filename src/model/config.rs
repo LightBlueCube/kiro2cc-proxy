@@ -187,10 +187,12 @@ pub struct Config {
 
     /// 分块写入约束的行数上限（issue #46）
     ///
-    /// 请求带 Write / Edit / MultiEdit 工具时，代理在系统提示末尾追加“单次工具调用参数不超过
-    /// N 行”的约束，避免上游对大块工具参数静默约 240s 后重置流。约束会让模型把大写入拆成
-    /// 多轮，每轮重新思考，credits 随之上升。默认 300；调大更省 credits 但更容易撞 240s 重置；
-    /// 0 表示不追加约束。可在 Admin 设置页热修改（仅影响之后的新请求）。
+    /// 仅旧 Amazon Q API（`upstreamApi = generateAssistantResponse`）需要：请求带 Write / Edit /
+    /// MultiEdit 工具时，代理在系统提示末尾追加“单次工具调用参数不超过 N 行”的约束，避免上游
+    /// 对大块工具参数静默约 240s 后重置流。默认的 createResponse 没有这个时间限制，不需要。
+    /// 约束会让模型把大写入拆成多轮，每轮重新思考，credits 随之上升。默认 0（不追加约束）；
+    /// 使用旧 API 时建议 300，调大更省 credits 但更容易撞 240s 重置。可在 Admin 设置页热修改
+    /// （仅影响之后的新请求）。
     #[serde(default = "default_write_chunking_max_lines")]
     pub write_chunking_max_lines: u32,
 
@@ -594,11 +596,11 @@ mod tests {
 
     #[test]
     fn test_write_chunking_max_lines_default_and_override() {
-        assert_eq!(Config::default().write_chunking_max_lines, 300);
+        assert_eq!(Config::default().write_chunking_max_lines, 0);
         let c: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(c.write_chunking_max_lines, 300);
-        let c: Config = serde_json::from_str(r#"{"writeChunkingMaxLines": 0}"#).unwrap();
         assert_eq!(c.write_chunking_max_lines, 0);
+        let c: Config = serde_json::from_str(r#"{"writeChunkingMaxLines": 300}"#).unwrap();
+        assert_eq!(c.write_chunking_max_lines, 300);
         let c: Config = serde_json::from_str(r#"{"writeChunkingMaxLines": 450}"#).unwrap();
         assert_eq!(c.write_chunking_max_lines, 450);
     }

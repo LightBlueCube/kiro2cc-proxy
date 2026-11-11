@@ -126,15 +126,19 @@ pub(super) fn remove_orphaned_tool_uses(
     }
 }
 
-/// 分块写入约束的默认行数上限。
+/// 分块写入约束的默认行数上限：0，即不追加约束。
 ///
-/// 依据（issue #46 实测）：单次写入约 8000 汉字耗时约 215s 仍可成功，约 20000 汉字约 240s
-/// 必定被重置，折算输出速度约 40 token/s。代码按每行约 10~15 token 估算，300 行约 3000~4500
-/// token，生成约需 75~115s，距 240s 仍有 2 倍以上余量；原先的 150 行余量过大，会把
-/// 本可一次写完的内容拆成多轮，每轮都重新思考，credits 随之上升（issue #46 后续评论的实测
-/// 数据：约 ×3）。该估算没有在真实 Claude Code 上验证；中文密集内容每行 token 更多，
-/// 如仍遇到 Reset，可调小 `writeChunkingMaxLines`。
-pub const DEFAULT_WRITE_CHUNKING_MAX_LINES: u32 = 300;
+/// 该约束只有旧 Amazon Q API（`upstreamApi = generateAssistantResponse`）需要：它对大块工具
+/// 参数静默约 240s 后重置流（issue #46）。默认的 createResponse 没有这个时间限制（用户实测
+/// 一次写入一千多行文件不再被重置），追加约束只会让模型把大写入拆成多轮、多花 credits。
+///
+/// 使用旧 API 时建议设为 300，依据（issue #46 实测）：单次写入约 8000 汉字耗时约 215s 仍可
+/// 成功，约 20000 汉字约 240s 必定被重置，折算输出速度约 40 token/s。代码按每行约 10~15
+/// token 估算，300 行约 3000~4500 token，生成约需 75~115s，距 240s 仍有 2 倍以上余量；
+/// 原先的 150 行余量过大，会把本可一次写完的内容拆成多轮，每轮都重新思考，credits 随之上升
+/// （issue #46 后续评论的实测数据：约 ×3）。该估算没有在真实 Claude Code 上验证；中文密集
+/// 内容每行 token 更多，如仍遇到 Reset，可调小 `writeChunkingMaxLines`。
+pub const DEFAULT_WRITE_CHUNKING_MAX_LINES: u32 = 0;
 
 /// 当前生效的分块写入行数上限，0 表示不追加约束。main.rs 启动时按 config 初始化。
 static WRITE_CHUNKING_MAX_LINES: std::sync::atomic::AtomicU32 =

@@ -134,13 +134,23 @@ async fn main() {
             "已开启 Kiro 请求体落盘取证（dumpKiroBody=true）：每个请求体将写入 app/config/kiro-body-dump/，定位问题后请关闭"
         );
     }
+    // 分块写入约束只有旧 Amazon Q API 需要：它对大块工具参数静默约 240s 后重置流
+    let legacy_upstream =
+        config.upstream_api == kiro::endpoint::UpstreamApi::GenerateAssistantResponse;
     if config.write_chunking_max_lines == 0 {
+        if legacy_upstream {
+            tracing::info!(
+                "分块写入约束已关闭（writeChunkingMaxLines=0）：generateAssistantResponse 下大块工具参数可能触发上游约 240s 重置，建议设为 300"
+            );
+        }
+    } else if legacy_upstream {
         tracing::info!(
-            "分块写入约束已关闭（writeChunkingMaxLines=0）：大块工具参数可能触发上游约 240s 重置"
+            "分块写入约束行数上限: {}（writeChunkingMaxLines）",
+            config.write_chunking_max_lines
         );
     } else {
         tracing::info!(
-            "分块写入约束行数上限: {}（writeChunkingMaxLines）",
+            "分块写入约束行数上限: {}（writeChunkingMaxLines）：当前上游 createResponse 没有该时间限制，可设为 0 关闭",
             config.write_chunking_max_lines
         );
     }

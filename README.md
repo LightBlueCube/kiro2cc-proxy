@@ -523,7 +523,7 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `clientTokenPassthrough` | 否 | `false` | 客户端 token 直通：`true` 时返回给客户端的 `usage` 字段 1:1 上报真实值；`false`（默认）时按 `0.6657` 系数缩放展示。适用于按返回用量统计上下文占用的第三方客户端；无论开关状态如何，Claude Code 的 auto-compact 触发时机保持不变。可用环境变量 `CLIENT_TOKEN_PASSTHROUGH` 覆盖 |
 | `modelsOfficialAliases` | 否 | `false` | `true` 时 `/v1/models` 为上游点号模型 ID 追加官方连字符别名（如 `claude-opus-4.6` → `claude-opus-4-6`，4.5 代际再追加带日期的 ID），供按模型列表生成映射的下游网关使用；默认关闭，避免 Claude Code 模型选择器出现重复项。可用环境变量 `MODELS_OFFICIAL_ALIASES` 覆盖 |
 | `outputTokensIncludeThinking` | 否 | `false` | `true` 时返回给客户端的 `output_tokens` 包含 thinking（与 Anthropic 官方口径一致）；`false`（默认）只计可见输出。可用环境变量 `OUTPUT_TOKENS_INCLUDE_THINKING` 覆盖 |
-| `writeChunkingMaxLines` | 否 | `300` | 分块写入约束的行数上限（见常见问题中 `Reset(StreamId(1), INTERNAL_ERROR, Remote)` 一条）：请求带 Write / Edit / MultiEdit 工具时，在系统提示末尾要求单次工具调用的参数不超过约 N 行。调大更省 credits 但更易触发上游约 240s 的流重置，`0` 表示不追加约束。可在 Admin 设置页热修改，仅影响之后的新请求。可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖 |
+| `writeChunkingMaxLines` | 否 | `0` | 分块写入约束的行数上限，**仅旧 Amazon Q API（`upstreamApi` 为 `generateAssistantResponse`）需要**，默认的 `createResponse` 没有该时间限制，保持 `0`（见常见问题中 `Reset(StreamId(1), INTERNAL_ERROR, Remote)` 一条）：请求带 Write / Edit / MultiEdit 工具时，在系统提示末尾要求单次工具调用的参数不超过约 N 行，使用旧 API 时建议 `300`。调大更省 credits 但更易触发上游约 240s 的流重置，`0` 表示不追加约束。可在 Admin 设置页热修改，仅影响之后的新请求。可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖 |
 | `thinkingAsText` | 否 | `false` | 思考内容文本化（仅 Claude Code 客户端）：`true` 时把 thinking 块改写为 markdown 引用文本、逐行流式展示（类似 Kiro CLI；终端入口 `cli` 用 ANSI 变暗斜体样式，Claude Desktop、`local-agent` 等其他入口改用无转义的 Markdown 引用块 + 斜体来近似变暗，避免出现 `[2m` / `[0m` 乱码），解决 CC 默认折叠/隐藏 thinking 导致长推理期间像卡住的问题。**代价：开启后客户端拿不到推理签名，原始思维链无法回传上游，后续轮次的模型看不到自己之前的推理**——回传时「💭 Thinking」标记行、思考正文与时长行整块丢弃（仅当流被中断、缺少时长行时，保守降级为只剥标记行），面板使用日志会把这类轮次标为「文本化思考」。关闭时原生 thinking 块连同签名回传上游。可用环境变量 `THINKING_AS_TEXT` 覆盖 |
 | `debugLogs` | 否 | `false` | DEBUG 日志开关：`true` 时控制台、日志文件（`logFile`）与 Admin「查看日志」页三处同步输出 DEBUG 级别事件，可在 Admin 设置页热切换（无需重启）并写回 config.json；关闭后停止捕获新的 DEBUG，已捕获的记录保留。注意该开关返回/保存的是开关状态而非实际生效档位：设置 `RUST_LOG` 环境变量时，其指令仍优先（开关仅在 `RUST_LOG` 基础上追加全局 `debug` 指令，target 定向指令不受影响）。日志量会显著增加，排障后建议关闭。可用环境变量 `DEBUG_LOGS` 覆盖 |
 
@@ -878,13 +878,15 @@ GPT-5.6 系列的 Kiro 后端 schema 不支持 `additionalModelRequestFields`（
 
 **Q：长生成轮约 4 分钟（~247s）后报 `Server error mid-response`，代理日志出现 `Reset(StreamId(1), INTERNAL_ERROR, Remote)`**
 
+**适用范围**：该问题只出现在旧 Amazon Q API（`upstreamApi` 为 `generateAssistantResponse`）。默认的 `createResponse` 没有这个静默时间限制（我在自己的环境里观察到一次写入一千多行文件不再被重置，未做系统测试），因此下面的分块写入约束默认关闭（`writeChunkingMaxLines` 为 `0`），使用旧 API 时再开启。
+
 这是**上游（Kiro 网关）主动重置 HTTP/2 流**，不是代理超时（代理上游超时为 1000s）。代理收到 Reset 时若已有部分输出，会立即向客户端补发 `overloaded_error`（不会伪装成正常完成），客户端随后自动重试。该问题在**不经代理、直接使用 Kiro CLI 时同样复现**，可确认根因在上游一侧，与代理转发链路和客户端无关。
 
 实测定位到一个可复现的触发条件：**模型一次生成很大的工具调用参数（典型是用 `Write` 一次写入上万字的文件）**。上游不会增量流式输出工具参数，生成期间该流没有任何数据，静默约 240s 后上游以 `RST_STREAM(INTERNAL_ERROR)` 重置（实测写入约 8000 字耗时约 215s 可成功，约 20000 字约 240s 必定失败，且与 thinking adaptive 开关无关；原样重试会再次失败；HTTP/2 PING 保活无效）。纯文本流和 thinking 阶段持续输出，实测 794s 仍正常结束。
 
-代理的处理：请求带 `Write` / `Edit` / `MultiEdit` 任一工具时，会在系统提示末尾追加一条固定的分块写入约束（单次工具调用的参数不超过约 N 行，N 默认 300，由 `writeChunkingMaxLines` 配置：Write 的 `content`、Edit 的 `new_string`、一次 MultiEdit 内所有编辑的合计都按此计；更大内容先用 Write 写开头，再用多次 Edit / Bash 追加，大的 MultiEdit 拆成多次调用），让模型把大改动拆成多次调用。该约束对 Write 的实测使 4 次大文件写入请求全部在约 2 分钟内正常结束（Edit / MultiEdit 部分尚未单独实测）；不改动客户端的工具描述。
+代理的处理：请求带 `Write` / `Edit` / `MultiEdit` 任一工具时，会在系统提示末尾追加一条固定的分块写入约束（单次工具调用的参数不超过约 N 行，启用后 N 由 `writeChunkingMaxLines` 配置（默认关闭，旧 API 建议 300）：Write 的 `content`、Edit 的 `new_string`、一次 MultiEdit 内所有编辑的合计都按此计；更大内容先用 Write 写开头，再用多次 Edit / Bash 追加，大的 MultiEdit 拆成多次调用），让模型把大改动拆成多次调用。该约束对 Write 的实测使 4 次大文件写入请求全部在约 2 分钟内正常结束（Edit / MultiEdit 部分尚未单独实测）；不改动客户端的工具描述。
 
-**取舍（issue #46 后续反馈）**：该约束会让模型把一次大写入拆成多轮，而客户端每轮都携带 `thinking: adaptive`、每轮都会重新思考。用户在自己环境的统计显示，同类任务的 credits 约为无约束时的 3 倍（我没有复现）。因此上限做成了可配置的 `writeChunkingMaxLines`：调大更省 credits，但单次写入更容易撞到约 240s 的重置；调小更稳但更贵；设为 `0` 则完全不追加约束（需自行控制单次写入粒度）。默认值 300 是按 issue 里的实测输出速度（约 8000 汉字 ~215s 可成功、约 20000 汉字 ~240s 必失败）折算的估计，未在真实 Claude Code 上验证；如仍遇到 Reset，请调小。可在 Admin 设置页热修改（仅影响之后的新请求），也可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖。
+**取舍（issue #46 后续反馈）**：该约束会让模型把一次大写入拆成多轮，而客户端每轮都携带 `thinking: adaptive`、每轮都会重新思考。用户在自己环境的统计显示，同类任务的 credits 约为无约束时的 3 倍（我没有复现）。因此上限做成了可配置的 `writeChunkingMaxLines`：调大更省 credits，但单次写入更容易撞到约 240s 的重置；调小更稳但更贵；设为 `0`（默认）则完全不追加约束（需自行控制单次写入粒度）。建议值 300 是按 issue 里的实测输出速度（约 8000 汉字 ~215s 可成功、约 20000 汉字 ~240s 必失败）折算的估计，未在真实 Claude Code 上验证；如仍遇到 Reset，请调小。可在 Admin 设置页热修改（仅影响之后的新请求），也可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖。
 
 仍可能发生的情况：模型不遵从约束，或同一回合并行调用多个写入类工具（各自不超限、但合计生成时间过长，该场景尚未实测）时，仍可能触发同样的重置，此时可手动让模型分段写入，或在 issue 中附上日志（`stream_elapsed_secs` 字段记录流断开时已持续的时长）。注意：这是在本地环境（单账号、Opus 4.6、SOCKS5 出口）的实测结论，issue 作者环境未验证。
 

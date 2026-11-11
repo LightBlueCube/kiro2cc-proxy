@@ -3,8 +3,7 @@
 
 use super::super::history::{convert_assistant_message, merge_assistant_messages};
 use super::super::tools::{
-    DEFAULT_WRITE_CHUNKING_MAX_LINES, remove_orphaned_tool_uses, validate_tool_pairing,
-    write_chunking_system_note,
+    remove_orphaned_tool_uses, validate_tool_pairing, write_chunking_system_note,
 };
 use super::super::websearch::{collect_history_tool_names, create_placeholder_tool};
 use super::{convert_request, convert_request_with_chunking};
@@ -624,18 +623,33 @@ fn request_with_tools(names: &[&str], system: Option<&str>) -> MessagesRequest {
     serde_json::from_value(v).unwrap()
 }
 
-fn default_note() -> String {
-    write_chunking_system_note(DEFAULT_WRITE_CHUNKING_MAX_LINES)
+/// 使用旧 Amazon Q API 时建议的行数上限（约束默认关闭，测试里显式开启）
+const LEGACY_API_CHUNK_LINES: u32 = 300;
+
+fn chunking_note() -> String {
+    write_chunking_system_note(LEGACY_API_CHUNK_LINES)
+}
+
+#[test]
+fn test_chunking_is_off_by_default() {
+    // 默认不追加约束：该约束只有旧 Amazon Q API 需要
+    let req = request_with_tools(&["Write", "Edit"], Some("Follow the user request."));
+    let serialized =
+        serde_json::to_string(&convert_request(&req).unwrap().conversation_state).unwrap();
+    assert!(serialized.contains("Follow the user request."));
+    assert!(!serialized.contains("service aborts any single tool call"));
 }
 
 #[test]
 fn test_write_tool_request_gets_chunking_note_in_system_only() {
     for name in ["Write", "write"] {
         let req = request_with_tools(&[name, "Read"], Some("Follow the user request."));
-        let state = convert_request(&req).unwrap().conversation_state;
+        let state = convert_request_with_chunking(&req, LEGACY_API_CHUNK_LINES)
+            .unwrap()
+            .conversation_state;
         let serialized = serde_json::to_string(&state).unwrap();
         assert!(serialized.contains("Follow the user request."));
-        assert!(serialized.contains(&default_note()), "{name}");
+        assert!(serialized.contains(&chunking_note()), "{name}");
 
         // 工具描述保持客户端原文，不被代理追加
         let tools = &state
@@ -654,15 +668,19 @@ fn test_edit_and_multiedit_only_requests_get_chunking_note() {
     // 只带 Edit / MultiEdit（无 Write）的请求同样受行数约束，名称不区分大小写
     for name in ["Edit", "edit", "MultiEdit", "multiedit"] {
         let req = request_with_tools(&[name, "Read"], Some("Follow the user request."));
-        let serialized =
-            serde_json::to_string(&convert_request(&req).unwrap().conversation_state).unwrap();
-        assert!(serialized.contains(&default_note()), "{name}");
+        let serialized = serde_json::to_string(
+            &convert_request_with_chunking(&req, LEGACY_API_CHUNK_LINES)
+                .unwrap()
+                .conversation_state,
+        )
+        .unwrap();
+        assert!(serialized.contains(&chunking_note()), "{name}");
     }
 }
 
 #[test]
 fn test_chunking_note_names_all_editing_tools() {
-    let note = default_note();
+    let note = chunking_note();
     for needle in ["300 lines", "Write", "Edit new_string", "MultiEdit"] {
         assert!(note.contains(needle), "{needle}");
     }
@@ -690,6 +708,31 @@ fn test_chunking_disabled_with_zero_lines() {
 }
 
 #[test]
+fn test_zero_limit_leaves_system_history_untouched() {
+    let history_json = |tool: &str, system: Option<&str>, lines: u32| {
+        let req = request_with_tools(&[tool], system);
+        let state = convert_request_with_chunking(&req, lines)
+            .unwrap()
+            .conversation_state;
+        serde_json::to_string(&state.history).unwrap()
+    };
+
+    // 0：带不带 Write 工具，承载系统提示的历史完全一致；没有客户端系统提示时也不凭空生成
+    assert_eq!(
+        history_json("Write", Some("S"), 0),
+        history_json("Read", Some("S"), 0)
+    );
+    assert_eq!(history_json("Write", None, 0), "[]");
+
+    // 对照：开启后历史确实不同
+    assert_ne!(
+        history_json("Write", Some("S"), LEGACY_API_CHUNK_LINES),
+        history_json("Read", Some("S"), LEGACY_API_CHUNK_LINES)
+    );
+    assert_ne!(history_json("Write", None, LEGACY_API_CHUNK_LINES), "[]");
+}
+
+#[test]
 fn test_chunking_note_in_request_reflects_custom_limit() {
     let req = request_with_tools(&["Write"], Some("Follow the user request."));
     let serialized = serde_json::to_string(
@@ -699,41 +742,48 @@ fn test_chunking_note_in_request_reflects_custom_limit() {
     )
     .unwrap();
     assert!(serialized.contains(&write_chunking_system_note(450)));
-    assert!(!serialized.contains(&default_note()));
+    assert!(!serialized.contains(&chunking_note()));
 }
 
 #[test]
 fn test_write_tool_request_without_client_system_still_gets_note() {
     let req = request_with_tools(&["Write"], None);
-    let serialized =
-        serde_json::to_string(&convert_request(&req).unwrap().conversation_state).unwrap();
-    assert!(serialized.contains(&default_note()));
+    let serialized = serde_json::to_string(
+        &convert_request_with_chunking(&req, LEGACY_API_CHUNK_LINES)
+            .unwrap()
+            .conversation_state,
+    )
+    .unwrap();
+    assert!(serialized.contains(&chunking_note()));
 }
 
 #[test]
 fn test_request_without_editing_tool_has_no_chunking_note() {
     let req = request_with_tools(&["Read", "Bash", "Grep"], Some("Follow the user request."));
-    let serialized =
-        serde_json::to_string(&convert_request(&req).unwrap().conversation_state).unwrap();
-    assert!(!serialized.contains(&default_note()));
+    let serialized = serde_json::to_string(
+        &convert_request_with_chunking(&req, LEGACY_API_CHUNK_LINES)
+            .unwrap()
+            .conversation_state,
+    )
+    .unwrap();
+    assert!(!serialized.contains(&chunking_note()));
 }
 
 #[test]
 fn test_chunking_note_is_deterministic_across_requests() {
     // 常量注入：相同输入两次转换的序列化结果一致，不破坏 prompt cache 前缀
-    let a = serde_json::to_string(
-        &convert_request(&request_with_tools(&["Write"], Some("S")))
+    let convert = || {
+        serde_json::to_string(
+            &convert_request_with_chunking(
+                &request_with_tools(&["Write"], Some("S")),
+                LEGACY_API_CHUNK_LINES,
+            )
             .unwrap()
             .conversation_state,
-    )
-    .unwrap();
-    let b = serde_json::to_string(
-        &convert_request(&request_with_tools(&["Write"], Some("S")))
-            .unwrap()
-            .conversation_state,
-    )
-    .unwrap();
-    assert_eq!(a, b);
+        )
+        .unwrap()
+    };
+    assert_eq!(convert(), convert());
 }
 
 #[test]
