@@ -122,7 +122,7 @@ func runServe(args []string) error {
 	accountPool, err := pool.New(pool.Config{
 		Bin:               agyBin,
 		TurnsPerAccount:   settings.TurnsPerAccount,
-		ProcessPerSession: *cfg.ProcessPerSession,
+		ProcessPerSession: settings.PerSession(),
 		Log:               log.With("component", "pool"),
 	})
 	if err != nil {
@@ -176,8 +176,7 @@ func runServe(args []string) error {
 	var adminUI http.Handler
 	if cfg.loopbackOnly() {
 		adminUI = admin.New(admin.Config{
-			Store: st, Control: ctl, Pool: accountPool, Monitor: monitor, Logs: logs,
-			ProcessPerSession: *cfg.ProcessPerSession, Log: log.With("component", "admin"),
+			Store: st, Control: ctl, Pool: accountPool, Monitor: monitor, Logs: logs, Log: log.With("component", "admin"),
 		})
 	} else {
 		log.Warn("admin UI disabled: it needs a loopback listen address behind a TLS tunnel or proxy", "listen", cfg.Listen)

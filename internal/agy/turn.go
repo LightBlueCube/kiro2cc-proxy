@@ -104,6 +104,11 @@ func (p *Proc) RunTurn(spec TurnSpec) *Turn {
 		natives:   map[string]string{},
 		done:      make(chan struct{}),
 	}
+	p.turnStarted()
+	go func() {
+		<-t.done
+		p.turnEnded()
+	}()
 	go t.run(spec)
 	return t
 }

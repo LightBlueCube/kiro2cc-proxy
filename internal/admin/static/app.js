@@ -321,6 +321,8 @@ views.settings = container => {
     const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
+    const processMode = h("select", {}, [["per_account", "One process per account"], ["per_session", "One worker process per session"]]
+      .map(([value, label]) => h("option", { value, selected: value === s.process_mode }, label)));
 
     const priceRows = h("tbody");
     const number = value => h("input", { type: "number", min: 0, step: "any", value, style: "width:90px" });
@@ -344,7 +346,7 @@ views.settings = container => {
         await api("PUT", "settings", {
           turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
           retention_days: Number(retention.value), prices: [...priceRows.children].map(row => row.read()),
-          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
+          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, process_mode: processMode.value,
         });
         toast("Saved");
         await loadGeneral();
@@ -357,7 +359,10 @@ views.settings = container => {
           "Close idle sessions after", idleClose),
         h("label", {}, "Log level", level),
         h("label", {}, "Keep call records (days)", retention)),
-      h("p", { class: "muted" }, `Process per session: ${s.process_per_session ? "on" : "off"} (set in the config file; needs a restart).`),
+      h("div", { class: "row" },
+        h("label", { title: "Per account: one agy process per account and client tool set serves every session; starts sessions faster and uses less memory. Per session: each session gets its own worker process (~250 MiB), isolating sessions from each other." },
+          "Process mode", processMode)),
+      h("p", { class: "muted" }, "Changing the mode applies at once: idle agy processes exit, busy ones after their running turns, and conversations reopen in new processes on their next request."),
       h("h3", {}, "Outbound traffic"),
       h("div", { class: "row" },
         h("label", { class: "grow", title: "Carries the traffic of accounts without their own proxy" }, "Fallback HTTP proxy", fallback),

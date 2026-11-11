@@ -53,11 +53,24 @@ type Settings struct {
 	// AllowDirect lets accounts with no proxy at all connect directly
 	// (a server abroad); otherwise their traffic is refused.
 	AllowDirect bool `json:"allow_direct"`
+	// ProcessMode is ProcessPerAccount or ProcessPerSession.
+	ProcessMode string `json:"process_mode"`
 }
 
+// Process modes. Per account, one agy process per account and client tool
+// set serves every session; per session, a front process gives each
+// session its own worker process (--process-per-session).
+const (
+	ProcessPerAccount = "per_account"
+	ProcessPerSession = "per_session"
+)
+
 func defaultSettings() Settings {
-	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, Prices: slices.Clone(usage.DefaultPrices)}
+	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, Prices: slices.Clone(usage.DefaultPrices), ProcessMode: ProcessPerAccount}
 }
+
+// PerSession reports whether ProcessMode is ProcessPerSession.
+func (s Settings) PerSession() bool { return s.ProcessMode == ProcessPerSession }
 
 var logLevels = map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError}
 
@@ -78,6 +91,9 @@ func (s Settings) validate() error {
 	}
 	if s.RetentionDays < 1 || s.RetentionDays > 3650 {
 		return errors.New("retention_days must be between 1 and 3650")
+	}
+	if s.ProcessMode != ProcessPerAccount && s.ProcessMode != ProcessPerSession {
+		return errors.New("process_mode must be per_account or per_session")
 	}
 	if clean, err := cleanProxy(s.FallbackProxy); err != nil || clean != s.FallbackProxy {
 		return errors.New("fallback_proxy must be empty or an http:// URL with a host and port, e.g. http://127.0.0.1:7890")
@@ -230,6 +246,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.settings = s
 	c.mu.Unlock()
 	c.cfg.Pool.SetTurnsPerAccount(s.TurnsPerAccount)
+	c.cfg.Pool.SetProcessPerSession(s.PerSession())
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
 	c.cfg.Level.Set(s.Level())

@@ -269,6 +269,53 @@ func TestInspectAndCloseSession(t *testing.T) {
 	}
 }
 
+func TestProcessModeSwitchRetiresProcesses(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	messages := []conv.Message{user("hello")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first)
+	}
+	old := h.p.Accounts()[0].LiveProcs()[0]
+
+	// bob's turn runs while the mode changes.
+	bobCtx, cancelBob := context.WithCancel(ctx)
+	bobDone := make(chan result)
+	go func() {
+		bobDone <- h.complete(bobCtx, "bob", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.ContainsFunc(h.gw.Sessions(), func(s SessionInfo) bool { return s.Key == "bob" && s.Turn != nil }) {
+		if time.Now().After(deadline) {
+			t.Fatal("bob's turn never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	h.p.SetProcessPerSession(true)
+	if !old.Alive() {
+		t.Fatal("a process with a running turn must live until the turn ends")
+	}
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if second.err != nil || second.text != "reply to: again" || len(h.requests("session/resume")) != 1 {
+		t.Fatalf("after switch = %+v, resumes %d", second, len(h.requests("session/resume")))
+	}
+	procs := h.p.Accounts()[0].LiveProcs()
+	if len(procs) != 1 || procs[0] == old || !procs[0].PerSession() {
+		t.Fatalf("procs after switch = %v", procs)
+	}
+
+	cancelBob()
+	<-bobDone
+	select {
+	case <-old.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retired process outlived its last turn")
+	}
+}
+
 func TestKeyLimits(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()

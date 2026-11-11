@@ -10,13 +10,8 @@ import (
 	"agyrelay/internal/usage"
 )
 
-type settingsView struct {
-	control.Settings
-	ProcessPerSession bool `json:"process_per_session"`
-}
-
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, settingsView{Settings: h.control.Settings(), ProcessPerSession: h.processPerSession})
+	writeJSON(w, http.StatusOK, h.control.Settings())
 }
 
 func (h *Handler) putSettings(w http.ResponseWriter, r *http.Request) {
