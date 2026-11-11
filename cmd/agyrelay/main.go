@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/term"
 
 	"agyrelay/internal/admin"
+	"agyrelay/internal/agybin"
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/control"
 	"agyrelay/internal/egress"
@@ -37,7 +39,8 @@ const logBufferEntries = 10000
 
 const commandUsage = `usage:
   agyrelay serve  -config FILE   run the API server and admin UI
-  agyrelay passwd -config FILE   set the admin password (signs every admin out)`
+  agyrelay passwd -config FILE   set the admin password (signs every admin out)
+  agyrelay check-agy BIN         report whether an agy executable is pinned and patchable`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -50,6 +53,8 @@ func main() {
 		err = runServe(os.Args[2:])
 	case "passwd":
 		err = runPasswd(os.Args[2:])
+	case "check-agy":
+		err = runCheckAgy(os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, commandUsage)
 		os.Exit(2)
@@ -102,6 +107,11 @@ func runServe(args []string) error {
 	stderr := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}) // level gates in logbuf
 	log := slog.New(logbuf.NewHandler(logs, stderr, level))
 
+	agyBin, err := deriveAgy(cfg, log)
+	if err != nil {
+		return err
+	}
+
 	tools, err := bridge.Start(log.With("component", "bridge"))
 	if err != nil {
 		return err
@@ -109,7 +119,7 @@ func runServe(args []string) error {
 	defer tools.Close()
 
 	accountPool, err := pool.New(pool.Config{
-		Bin:               cfg.AgyBin,
+		Bin:               agyBin,
 		TurnsPerAccount:   settings.TurnsPerAccount,
 		ProcessPerSession: *cfg.ProcessPerSession,
 		Log:               log.With("component", "pool"),
@@ -149,7 +159,7 @@ func runServe(args []string) error {
 	go monitor.Run(ctx)
 
 	ctl, err := control.New(ctx, control.Config{
-		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, AgyBin: cfg.AgyBin, Level: level,
+		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, AgyBin: agyBin, Level: level,
 		AccountsDir: cfg.accountsDir(), Settings: settings, Log: log.With("component", "control"),
 	})
 	if err != nil {
@@ -188,6 +198,48 @@ func runServe(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// deriveAgy returns the patched agy to run. The relay never runs an
+// unpatched agy: any failed check stops startup.
+func deriveAgy(cfg *config, log *slog.Logger) (string, error) {
+	path, report, err := agybin.Derive(cfg.AgyBin, cfg.derivedAgyDir())
+	if report != nil {
+		for _, s := range report.Sites {
+			if s.Err != nil {
+				log.Error("agy patch failed", "patch", s.Patch, "function", s.Function, "matches", s.Matches,
+					"agy_version", report.Version(), "agy_sha256", report.SHA256, "err", s.Err)
+			}
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("refusing to start with agy %s: %w", cfg.AgyBin, err)
+	}
+	// The check held the whole executable (~250 MB) in memory.
+	debug.FreeOSMemory()
+	log.Info("agy patched", "agy_version", report.Version(), "agy_sha256", report.SHA256, "derived", path)
+	return path, nil
+}
+
+// runCheckAgy reports, for an agy upgrade, whether each patch site still
+// matches exactly once. It exits non-zero unless the build would start.
+func runCheckAgy(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: agyrelay check-agy BIN")
+	}
+	report, err := agybin.Check(args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("sha256  %s\nversion %s\n", report.SHA256, report.Version())
+	for _, s := range report.Sites {
+		status := "ok"
+		if s.Err != nil {
+			status = s.Err.Error()
+		}
+		fmt.Printf("%-18s %-3d %s\n    %s\n", s.Patch, s.Matches, status, s.Function)
+	}
+	return report.Err()
 }
 
 // runPasswd reads the new password twice: hidden from a terminal, or as

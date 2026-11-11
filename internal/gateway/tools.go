@@ -14,30 +14,22 @@ import (
 // Bridge-internal tools. They are listed next to the client's tools but
 // answered by the gateway; the client never sees them.
 const (
-	pollToolName     = "bridge_poll_result"
 	parallelToolName = "parallel"
 	maxParallelCalls = 16
 )
 
-var pollToolSchema = json.RawMessage(`{"type":"object","properties":{"callId":{"type":"string","description":"The callId from the STILL RUNNING notice."}},"required":["callId"],"additionalProperties":false}`)
-
 var parallelToolSchema = json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"calls":{"type":"array","minItems":1,"maxItems":%d,"items":{"type":"object","properties":{"name":{"type":"string","minLength":1},"arguments":{"type":"object","additionalProperties":true}},"required":["name"],"additionalProperties":false}}},"required":["calls"],"additionalProperties":false}`, maxParallelCalls))
 
-const pollToolDescription = "Wait for the result of a client tool that is still running. Call it with the callId from a STILL RUNNING notice until it returns the result."
+const parallelToolDescription = "Run 1-16 independent client tools in one batch. The client runs them and returns the results in input order. Do not use for dependent or conflicting work or nested parallel calls."
 
-const parallelToolDescription = "Run 1-16 independent client tools in one batch. The client runs them and returns the results in input order. Do not use for dependent or conflicting work, nested parallel calls, or bridge_poll_result."
+func isInternalTool(name string) bool { return name == parallelToolName }
 
-func isInternalTool(name string) bool { return name == pollToolName || name == parallelToolName }
-
-// bridgeTools lists the client's tools plus the internal ones.
+// bridgeTools lists the client's tools plus the internal one.
 func bridgeTools(tools []conv.ToolSpec) []bridge.Tool {
-	out := make([]bridge.Tool, 0, len(tools)+2)
+	out := make([]bridge.Tool, 0, len(tools)+1)
 	for _, tool := range tools {
 		out = append(out, bridge.Tool{Name: tool.Name, Description: tool.Description, InputSchema: normalizeSchema(tool.Parameters)})
 	}
-	out = append(out,
-		bridge.Tool{Name: pollToolName, Description: pollToolDescription, InputSchema: pollToolSchema},
-	)
 	if len(tools) > 0 {
 		out = append(out, bridge.Tool{Name: parallelToolName, Description: parallelToolDescription, InputSchema: parallelToolSchema})
 	}
@@ -50,7 +42,7 @@ func IdleProfile() agy.Profile { return profileFor(nil) }
 
 // profileFor is the agent profile whose eager tool list matches tools.
 func profileFor(tools []conv.ToolSpec) agy.Profile {
-	names := []string{pollToolName}
+	var names []string
 	for _, tool := range tools {
 		names = append(names, tool.Name)
 	}
@@ -73,7 +65,7 @@ func toolPolicy(tools []conv.ToolSpec) string {
 	return strings.Join([]string{
 		fmt.Sprintf("The client's tools in this session, served by the %s MCP server (you call them as mcp_%s_<name>; the transcript names them without the prefix):", agy.BridgeServer, agy.BridgeServer),
 		strings.Join(names, ", "),
-		fmt.Sprintf("For two or more independent, non-conflicting client tool calls, use %s once with {calls: [{name, arguments}, ...]} instead of issuing them sequentially. Never nest %s or put %s inside it.", parallelToolName, parallelToolName, pollToolName),
+		fmt.Sprintf("For two or more independent, non-conflicting client tool calls, use %s once with {calls: [{name, arguments}, ...]} instead of issuing them sequentially. Never nest %s.", parallelToolName, parallelToolName),
 	}, "\n")
 }
 
