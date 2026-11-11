@@ -81,6 +81,8 @@ func (c *config) dbPath() string { return filepath.Join(c.DataDir, "agyrelay.db"
 
 func (c *config) accountsDir() string { return filepath.Join(c.DataDir, "accounts") }
 
+func (c *config) derivedAgyDir() string { return filepath.Join(c.DataDir, "agy-derived") }
+
 func resolve(base, path string) string {
 	if filepath.IsAbs(path) {
 		return path

@@ -5,19 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/conv"
 )
-
-// agy times out an MCP tools/call after 180 s. A call still waiting for the
-// client at toolCallWait returns STILL RUNNING and the model switches to
-// bridge_poll_result, which waits up to the same time per poll.
-const toolCallWait = 150 * time.Second
 
 var errTurnEnded = errors.New("the Antigravity turn ended before the client returned this tool result")
 
@@ -29,8 +22,7 @@ type pendingCall struct {
 }
 
 // callGroup is one MCP tools/call from agy: a single client tool, or a
-// parallel batch expanded into several client tool calls. The group's id is
-// the callId bridge_poll_result takes.
+// parallel batch expanded into several client tool calls.
 //
 //	agy ──tools/call──▶ callGroup ──Inject──▶ response: tool_calls
 //	agy ◀──result───── settle ◀──── next request: tool messages
@@ -148,9 +140,6 @@ type sessionTools struct {
 }
 
 func (h sessionTools) Call(ctx context.Context, name string, args json.RawMessage) (bridge.Result, error) {
-	if name == pollToolName {
-		return h.poll(ctx, args)
-	}
 	g := h.g
 	g.mu.Lock()
 	at := h.sess.turn
@@ -167,49 +156,20 @@ func (h sessionTools) Call(ctx context.Context, name string, args json.RawMessag
 	// Under g.mu so the group is registered before a consumer sees it.
 	at.turn.Inject(group)
 	g.mu.Unlock()
-	return await(ctx, at, group, true)
+	return await(ctx, at, group)
 }
 
-func (h sessionTools) poll(ctx context.Context, args json.RawMessage) (bridge.Result, error) {
-	var input struct {
-		CallID string `json:"callId"`
-	}
-	_ = json.Unmarshal(args, &input)
-	h.g.mu.Lock()
-	at := h.sess.turn
-	var group *callGroup
-	if at != nil {
-		group = at.groups[input.CallID]
-	}
-	h.g.mu.Unlock()
-	if group == nil {
-		return bridge.Result{Text: fmt.Sprintf("Unknown callId %q: only callIds from a STILL RUNNING notice can be polled.", input.CallID), IsError: true}, nil
-	}
-	return await(ctx, at, group, false)
-}
-
-// await blocks an MCP call until the client answers the group, or returns
-// STILL RUNNING after toolCallWait. The turn's inactivity guard pauses
+// await blocks an MCP call until the client answers the group or the turn
+// ends; parkTTL ends a turn whose client never answers, well inside the
+// patched agy's 24 h MCP timeout. The turn's inactivity guard pauses
 // meanwhile: the model produces nothing while it waits for a tool.
-func await(ctx context.Context, at *activeTurn, group *callGroup, initial bool) (bridge.Result, error) {
+func await(ctx context.Context, at *activeTurn, group *callGroup) (bridge.Result, error) {
 	at.turn.Park()
 	defer at.turn.Unpark()
-	timer := time.NewTimer(toolCallWait)
-	defer timer.Stop()
 	select {
 	case <-group.done:
 		return group.result, group.err
-	case <-timer.C:
-		return stillRunning(group.id, initial), nil
 	case <-ctx.Done():
 		return bridge.Result{}, ctx.Err()
 	}
-}
-
-func stillRunning(callID string, initial bool) bridge.Result {
-	action := fmt.Sprintf("The client tool is still executing. Call %s again with callId %q until it returns the result.", pollToolName, callID)
-	if initial {
-		action = fmt.Sprintf("The client tool is still executing. Call %s with callId %q until it returns the result. Do not call other tools or end your turn while it is running.", pollToolName, callID)
-	}
-	return bridge.Result{Text: "STILL RUNNING\n" + action}
 }
