@@ -32,6 +32,7 @@ import (
 	"agyrelay/internal/pool"
 	"agyrelay/internal/server"
 	"agyrelay/internal/store"
+	"agyrelay/internal/tokens"
 	"agyrelay/internal/usage"
 )
 
@@ -143,15 +144,21 @@ func runServe(args []string) error {
 		return err
 	}
 	defer cloudCode.Close()
+	tokenizers, err := tokens.Load()
+	if err != nil {
+		return fmt.Errorf("load tokenizers: %w", err)
+	}
 	gw, err := gateway.New(gateway.Config{
-		Pool:        accountPool,
-		Bridge:      tools,
-		DataDir:     cfg.DataDir,
-		SnapshotTTL: settings.SnapshotTTLDuration(),
-		IdleClose:   settings.SessionIdleCloseDuration(),
-		Recorder:    recorder,
-		Budget:      budget,
-		Log:         log.With("component", "gateway"),
+		Pool:           accountPool,
+		Bridge:         tools,
+		DataDir:        cfg.DataDir,
+		SnapshotTTL:    settings.SnapshotTTLDuration(),
+		IdleClose:      settings.SessionIdleCloseDuration(),
+		Recorder:       recorder,
+		Budget:         budget,
+		Tokens:         tokenizers,
+		ContextWindows: settings.ContextWindows,
+		Log:            log.With("component", "gateway"),
 	})
 	if err != nil {
 		return err

@@ -21,6 +21,7 @@ import (
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/conv"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/tokens"
 )
 
 func TestMain(m *testing.M) {
@@ -30,6 +31,8 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+var testTokens = sync.OnceValues(tokens.Load)
 
 type harness struct {
 	t       *testing.T
@@ -70,7 +73,11 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 	}
 	records := &recordLog{}
 	budget := &fakeBudget{used: map[string]float64{}}
-	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Log: logger})
+	set, err := testTokens()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Tokens: set, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,6 +349,67 @@ func TestKeyLimits(t *testing.T) {
 	h.budget.err = errors.New("disk on fire")
 	if r := h.completeAs(ctx, alice, req); r.err == nil || r.err.Kind != conv.ErrUnavailable {
 		t.Fatalf("budget failure: %+v", r.err)
+	}
+}
+
+func TestContextWindow(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	long := strings.Repeat("word ", 2000)
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(long)}}
+
+	h.gw.SetContextWindows([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 2000}})
+	r := h.complete(ctx, "alice", req)
+	if r.err == nil || r.err.Kind != conv.ErrContextLength || !strings.Contains(r.err.Message, "maximum context length is 2000 tokens") {
+		t.Fatalf("over the window: %+v", r.err)
+	}
+	if n := len(h.requests("session/prompt")); n != 0 {
+		t.Fatalf("prompts = %d, want 0 (the refused request reaches no agy)", n)
+	}
+
+	// Under the window, and without one, the request runs.
+	h.gw.SetContextWindows([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 10000}})
+	if r := h.complete(ctx, "alice", req); r.err != nil {
+		t.Fatalf("under the window: %+v", r.err)
+	}
+	h.gw.SetContextWindows(nil)
+	if r := h.complete(ctx, "bob", req); r.err != nil {
+		t.Fatalf("no window: %+v", r.err)
+	}
+}
+
+func TestPromptEstimate(t *testing.T) {
+	set, err := testTokens()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newPromptEstimator(set)
+	messages := []conv.Message{{Role: conv.RoleSystem, Text: "be brief"}, user("hello"),
+		{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "read", Arguments: json.RawMessage(`{"path":"a.go"}`)}}},
+		{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "read", Text: strings.Repeat("package main\n", 100)},
+		{Role: conv.RoleUser, Text: "look", Images: []conv.Image{{Data: "AAAA", MimeType: "image/png"}}}}
+	req := conv.Request{Messages: messages, Tools: []conv.ToolSpec{{Name: "read", Description: "Read a file", Parameters: json.RawMessage(`{"type":"object"}`)}}}
+	tr := newTranscript(messages)
+
+	gemma := set.For("gemini-3.8-flash")
+	want := agyPromptTokens + gemma.Image("AAAA") + toolsetTokens + toolDeclarationTokens
+	for _, text := range []string{"<client-system>\nbe brief\n</client-system>", renderMessage(messages[1], -1), renderMessage(messages[2], -1),
+		renderMessage(messages[3], -1), renderMessage(messages[4], -1), "read\nRead a file\n{\"type\":\"object\"}"} {
+		n, err := gemma.Count(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want += n
+	}
+	for range 2 { // the second estimate comes from the cache
+		got, err := e.estimate("gemini-3.8-flash", req, tr)
+		if err != nil || got != want {
+			t.Fatalf("estimate = %d, %v; want %d", got, err, want)
+		}
+	}
+	claude, err := e.estimate("claude-opus-5-5", req, tr)
+	if err != nil || claude <= want {
+		t.Fatalf("claude estimate = %d, %v; want above gemini's %d", claude, err, want)
 	}
 }
 

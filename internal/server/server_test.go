@@ -20,6 +20,7 @@ import (
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/openai"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/tokens"
 )
 
 func TestMain(m *testing.M) {
@@ -63,7 +64,11 @@ func newRelay(t *testing.T) *relay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Log: logger})
+	set, err := tokens.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Tokens: set, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}

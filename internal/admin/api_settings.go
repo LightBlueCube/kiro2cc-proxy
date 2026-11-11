@@ -10,8 +10,14 @@ import (
 	"agyrelay/internal/usage"
 )
 
+// settingsView is the settings with their defaults, for the UI's resets.
+type settingsView struct {
+	control.Settings
+	Defaults control.Settings `json:"defaults"`
+}
+
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.control.Settings())
+	writeJSON(w, http.StatusOK, settingsView{Settings: h.control.Settings(), Defaults: control.DefaultSettings()})
 }
 
 func (h *Handler) putSettings(w http.ResponseWriter, r *http.Request) {

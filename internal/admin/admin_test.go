@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,8 +25,11 @@ import (
 	"agyrelay/internal/logbuf"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
+	"agyrelay/internal/tokens"
 	"agyrelay/internal/usage"
 )
+
+var testTokens = sync.OnceValues(tokens.Load)
 
 func TestMain(m *testing.M) {
 	if os.Getenv(agytest.EnvRun) == "1" {
@@ -61,7 +65,11 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	budget := usage.NewBudget(st)
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Log: log})
+	set, err := testTokens()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Tokens: set, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,8 +3,10 @@ package control
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"agyrelay/internal/gateway"
 	"agyrelay/internal/store"
 )
 
@@ -43,5 +45,36 @@ func TestLoadSettingsPrices(t *testing.T) {
 		if got[model] != w {
 			t.Errorf("%s cache_write = %v, want %v", model, got[model], w)
 		}
+	}
+	if len(s.ContextWindows) != len(gateway.DefaultContextWindows) {
+		t.Fatalf("context windows = %+v, want the defaults when none are stored", s.ContextWindows)
+	}
+}
+
+func TestLoadSettingsContextWindows(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "agyrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// Stored windows replace the defaults whole, including an empty list.
+	for _, stored := range [][]gateway.ContextWindow{{{Model: "test-model", Tokens: 5000}}, {}} {
+		if err := st.SetSetting(context.Background(), settingsKey, map[string]any{"context_windows": stored}); err != nil {
+			t.Fatal(err)
+		}
+		s, err := LoadSettings(context.Background(), st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(s.ContextWindows, stored) {
+			t.Fatalf("context windows = %+v, want %+v", s.ContextWindows, stored)
+		}
+	}
+
+	bad := DefaultSettings()
+	bad.ContextWindows = []gateway.ContextWindow{{Model: "m", Tokens: 0}}
+	if err := bad.validate(); err == nil {
+		t.Fatal("a zero window passed")
 	}
 }

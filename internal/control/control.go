@@ -47,6 +47,8 @@ type Settings struct {
 	RetentionDays int `json:"retention_days"`
 	// Prices are the list prices that estimate each request's API cost.
 	Prices []usage.Price `json:"prices"`
+	// ContextWindows cap each model's estimated prompt.
+	ContextWindows []gateway.ContextWindow `json:"context_windows"`
 	// FallbackProxy carries the traffic of accounts without their own
 	// proxy ("" = none).
 	FallbackProxy string `json:"fallback_proxy"`
@@ -65,8 +67,10 @@ const (
 	ProcessPerSession = "per_session"
 )
 
-func defaultSettings() Settings {
-	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, Prices: slices.Clone(usage.DefaultPrices), ProcessMode: ProcessPerAccount}
+// DefaultSettings are the settings before the admin changes any.
+func DefaultSettings() Settings {
+	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90,
+		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows), ProcessMode: ProcessPerAccount}
 }
 
 // PerSession reports whether ProcessMode is ProcessPerSession.
@@ -98,6 +102,9 @@ func (s Settings) validate() error {
 	if clean, err := cleanProxy(s.FallbackProxy); err != nil || clean != s.FallbackProxy {
 		return errors.New("fallback_proxy must be empty or an http:// URL with a host and port, e.g. http://127.0.0.1:7890")
 	}
+	if err := gateway.ValidateContextWindows(s.ContextWindows); err != nil {
+		return err
+	}
 	return usage.ValidatePrices(s.Prices)
 }
 
@@ -118,7 +125,7 @@ func (s Settings) SessionIdleCloseDuration() time.Duration {
 // LoadSettings reads the stored settings over the defaults. The process
 // uses them to build the pool and gateway before New.
 func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
-	s := defaultSettings()
+	s := DefaultSettings()
 	var raw json.RawMessage
 	found, err := st.Setting(ctx, settingsKey, &raw)
 	if err != nil {
@@ -135,20 +142,24 @@ func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
 	return s, nil
 }
 
-// decodeSettings reads stored settings over s. Stored prices replace the
+// decodeSettings reads stored settings over s. Stored lists replace the
 // defaults whole: json would decode them into the default rows in place,
 // so a row would keep the fields it lacks from whichever default sat at
-// its index. A row saved before cache_write existed takes its model's
-// default cache-write price.
+// its index. A price row saved before cache_write existed takes its
+// model's default cache-write price.
 func decodeSettings(raw []byte, s *Settings) error {
 	var stored struct {
-		Prices []map[string]json.RawMessage `json:"prices"`
+		Prices         []map[string]json.RawMessage `json:"prices"`
+		ContextWindows json.RawMessage              `json:"context_windows"`
 	}
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		return err
 	}
 	if stored.Prices != nil {
 		s.Prices = nil
+	}
+	if stored.ContextWindows != nil {
+		s.ContextWindows = nil
 	}
 	if err := json.Unmarshal(raw, s); err != nil {
 		return err
@@ -249,6 +260,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Pool.SetProcessPerSession(s.PerSession())
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
+	c.cfg.Gateway.SetContextWindows(s.ContextWindows)
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
 	return c.applyRoutes(ctx)
