@@ -104,6 +104,8 @@ type ErrorKind int
 
 const (
 	ErrInvalidRequest ErrorKind = iota + 1
+	// ErrContextLength means the conversation exceeds the model's window.
+	ErrContextLength
 	ErrUnauthorized
 	ErrForbidden
 	ErrUnknownModel

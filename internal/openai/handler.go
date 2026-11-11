@@ -318,6 +318,9 @@ func statusFor(kind conv.ErrorKind) (int, string) {
 	switch kind {
 	case conv.ErrInvalidRequest:
 		return http.StatusBadRequest, "invalid_request_error"
+	case conv.ErrContextLength:
+		// OpenAI's code; clients compact the conversation on it.
+		return http.StatusBadRequest, "context_length_exceeded"
 	case conv.ErrUnauthorized:
 		return http.StatusUnauthorized, "invalid_api_key"
 	case conv.ErrForbidden:
@@ -336,7 +339,11 @@ func statusFor(kind conv.ErrorKind) (int, string) {
 
 func errorBody(err *conv.Error) map[string]any {
 	_, code := statusFor(err.Kind)
-	return map[string]any{"error": map[string]any{"message": err.Message, "type": code, "code": code}}
+	errType := code
+	if err.Kind == conv.ErrContextLength {
+		errType = "invalid_request_error" // as OpenAI types it
+	}
+	return map[string]any{"error": map[string]any{"message": err.Message, "type": errType, "code": code}}
 }
 
 // WriteError writes err as an OpenAI error response.

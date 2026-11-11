@@ -31,6 +31,9 @@ type AccountConfig struct {
 	// Proxy is the HTTP proxy URL agy's traffic goes to (the relay's
 	// egress proxy); "" leaves agy's environment without one.
 	Proxy string
+	// CloudCodeEndpoint, when set, is the account's loopback Cloud Code
+	// proxy.
+	CloudCodeEndpoint string
 }
 
 type Config struct {
@@ -39,9 +42,6 @@ type Config struct {
 	// TurnsPerAccount caps concurrent turns (running or parked) per account.
 	TurnsPerAccount   int
 	ProcessPerSession bool
-	// CloudCodeEndpoint, when set, routes agy's Cloud Code traffic through
-	// a loopback proxy.
-	CloudCodeEndpoint string
 	Log               *slog.Logger
 }
 
@@ -66,7 +66,8 @@ type Account struct {
 	workspace string
 	env       []string
 
-	proxy string
+	proxy             string
+	cloudCodeEndpoint string
 
 	mu    sync.Mutex
 	turns int
@@ -128,15 +129,16 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 		return nil, fmt.Errorf("account %s: %w", ac.Name, err)
 	}
 	a := &Account{
-		pool:      p,
-		name:      ac.Name,
-		home:      home,
-		geminiDir: filepath.Join(home, ".gemini"),
-		workspace: filepath.Join(home, "workspace"),
-		env:       ac.Env,
-		proxy:     ac.Proxy,
-		cooldown:  map[string]time.Time{},
-		procs:     map[string]*procSlot{},
+		pool:              p,
+		name:              ac.Name,
+		home:              home,
+		geminiDir:         filepath.Join(home, ".gemini"),
+		workspace:         filepath.Join(home, "workspace"),
+		env:               ac.Env,
+		proxy:             ac.Proxy,
+		cloudCodeEndpoint: ac.CloudCodeEndpoint,
+		cooldown:          map[string]time.Time{},
+		procs:             map[string]*procSlot{},
 	}
 	if err := os.MkdirAll(a.workspace, 0o700); err != nil {
 		return nil, fmt.Errorf("account %s: %w", ac.Name, err)
@@ -473,7 +475,7 @@ func (a *Account) startProc(ctx context.Context, profile agy.Profile) (*agy.Proc
 		GeminiDir:         a.geminiDir,
 		Workdir:           a.workspace,
 		Agent:             profile.Name,
-		CloudCodeEndpoint: cfg.CloudCodeEndpoint,
+		CloudCodeEndpoint: a.cloudCodeEndpoint,
 		ProcessPerSession: cfg.ProcessPerSession,
 		Env:               a.Env(),
 		Log:               a.pool.log.With("account", a.name),

@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"agyrelay/internal/cloudcode"
 	"agyrelay/internal/conv"
 	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
@@ -161,6 +162,9 @@ type Config struct {
 	Budget   *usage.Budget
 	// Egress carries every account's agy traffic.
 	Egress *egress.Server
+	// CloudCode carries every account's Cloud Code API calls, through
+	// Egress.
+	CloudCode *cloudcode.Server
 	// AgyBin runs sign-ins.
 	AgyBin string
 	// Level is the process log level, changed with the setting.
@@ -328,12 +332,19 @@ func (c *Control) AddAccount(ctx context.Context, name string, env []string, pro
 	return account, nil
 }
 
-// addToPool registers the account with the egress proxy and the pool;
-// its agy talks only to the egress proxy, which routes by accountProxy.
+// addToPool registers the account with the egress and Cloud Code proxies
+// and the pool; its agy talks only to them, and egress routes by
+// accountProxy.
 func (c *Control) addToPool(name string, env []string, accountProxy string) (*pool.Account, error) {
 	egressURL := c.cfg.Egress.Register(name)
-	account, err := c.cfg.Pool.Add(pool.AccountConfig{Name: name, Home: c.accountHome(name), Env: env, Proxy: egressURL})
+	endpoint, err := c.cfg.CloudCode.Register(name, egressURL)
 	if err != nil {
+		c.cfg.Egress.Forget(name)
+		return nil, err
+	}
+	account, err := c.cfg.Pool.Add(pool.AccountConfig{Name: name, Home: c.accountHome(name), Env: env, Proxy: egressURL, CloudCodeEndpoint: endpoint})
+	if err != nil {
+		c.cfg.CloudCode.Forget(name)
 		c.cfg.Egress.Forget(name)
 		return nil, err
 	}
@@ -398,6 +409,7 @@ func (c *Control) RemoveAccount(ctx context.Context, name string) error {
 	if err := c.cfg.Pool.Remove(name); err != nil {
 		return err
 	}
+	c.cfg.CloudCode.Forget(name)
 	c.cfg.Egress.Forget(name)
 	return nil
 }

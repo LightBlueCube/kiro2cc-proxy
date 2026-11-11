@@ -446,6 +446,14 @@ func TestQuotaNoticeWithoutFallbackIs429(t *testing.T) {
 	}
 }
 
+func TestModelOverflowIsContextLengthError(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	r := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@overflow")}})
+	if r.err == nil || r.err.Kind != conv.ErrContextLength || r.err.Message != agytest.OverflowError || r.text != "" {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
 func TestDisconnectCancelsTurn(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx, cancel := context.WithCancel(context.Background())
