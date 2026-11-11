@@ -7,14 +7,15 @@
 <title>agyrelay</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="app.css">
+<script src="i18n.js" defer></script>
 <script src="app.js" defer></script>
 </head>
 <body>
 <div id="login" hidden>
   <form id="login-form" class="card login-card">
     <h1>agyrelay</h1>
-    <label>Admin password<input id="login-password" type="password" autocomplete="current-password" required autofocus></label>
-    <button type="submit">Sign in</button>
+    <label><span data-i18n="login.password"></span><input id="login-password" type="password" autocomplete="current-password" required autofocus></label>
+    <button type="submit" data-i18n="login.submit"></button>
     <p id="login-error" class="error" role="alert"></p>
   </form>
 </div>
@@ -22,14 +23,14 @@
   <header>
     <span class="brand">agyrelay</span>
     <nav id="tabs">
-      <a href="#accounts">Accounts</a>
-      <a href="#workers">Workers</a>
-      <a href="#calls">Calls</a>
-      <a href="#logs">Logs</a>
-      <a href="#keys">Keys</a>
-      <a href="#settings">Settings</a>
+      <a href="#accounts" data-i18n="nav.accounts"></a>
+      <a href="#workers" data-i18n="nav.workers"></a>
+      <a href="#calls" data-i18n="nav.calls"></a>
+      <a href="#logs" data-i18n="nav.logs"></a>
+      <a href="#keys" data-i18n="nav.keys"></a>
+      <a href="#settings" data-i18n="nav.settings"></a>
     </nav>
-    <button id="logout" class="link">Sign out</button>
+    <button id="logout" class="link" data-i18n="nav.sign_out"></button>
   </header>
   <main id="view"></main>
 </div>
