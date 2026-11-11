@@ -20,10 +20,12 @@ import (
 //	  "agy_bin": "/opt/agy-1.5.3/antigravity"
 //	}
 type config struct {
-	Listen            string `json:"listen"`
-	DataDir           string `json:"data_dir"`
-	AgyBin            string `json:"agy_bin"`
-	ProcessPerSession *bool  `json:"process_per_session"`
+	Listen  string `json:"listen"`
+	DataDir string `json:"data_dir"`
+	AgyBin  string `json:"agy_bin"`
+	// MovedProcessPerSession names the old option only to say where it
+	// went.
+	MovedProcessPerSession *bool `json:"process_per_session"`
 }
 
 const defaultListen = "127.0.0.1:8787"
@@ -50,14 +52,13 @@ func loadConfig(path string) (*config, error) {
 	if cfg.DataDir == "" || cfg.AgyBin == "" {
 		return nil, errors.New("data_dir and agy_bin are required")
 	}
+	if cfg.MovedProcessPerSession != nil {
+		return nil, fmt.Errorf("%s: process_per_session is now the process mode in the admin UI's settings; remove it from the file", path)
+	}
 	cfg.DataDir = resolve(base, cfg.DataDir)
 	cfg.AgyBin = resolve(base, cfg.AgyBin)
 	if cfg.Listen == "" {
 		cfg.Listen = defaultListen
-	}
-	if cfg.ProcessPerSession == nil {
-		enabled := true
-		cfg.ProcessPerSession = &enabled
 	}
 	return &cfg, nil
 }

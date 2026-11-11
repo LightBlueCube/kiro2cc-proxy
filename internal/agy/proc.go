@@ -134,6 +134,10 @@ type Proc struct {
 	listeners  map[string]func(json.RawMessage)
 	suppressed map[string]bool
 	live       map[string]bool
+	// turns counts turns not yet settled; a retiring process is killed
+	// when it reaches 0.
+	turns    int
+	retiring bool
 }
 
 // StartProc spawns agy and completes the initialize handshake.
@@ -284,6 +288,44 @@ func (p *Proc) PID() int { return p.cmd.Process.Pid }
 
 // Agent is the profile this process runs.
 func (p *Proc) Agent() string { return p.cfg.Agent }
+
+// PerSession reports whether the process runs --process-per-session.
+func (p *Proc) PerSession() bool { return p.cfg.ProcessPerSession }
+
+// Retire kills the process once its running turns (parked ones included)
+// have ended. Its sessions must be reopened elsewhere.
+func (p *Proc) Retire() {
+	p.mu.Lock()
+	p.retiring = true
+	idle := p.turns == 0
+	p.mu.Unlock()
+	if idle {
+		p.Kill()
+	}
+}
+
+// Retiring reports whether Retire was called.
+func (p *Proc) Retiring() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.retiring
+}
+
+func (p *Proc) turnStarted() {
+	p.mu.Lock()
+	p.turns++
+	p.mu.Unlock()
+}
+
+func (p *Proc) turnEnded() {
+	p.mu.Lock()
+	p.turns--
+	retired := p.retiring && p.turns == 0
+	p.mu.Unlock()
+	if retired {
+		p.Kill()
+	}
+}
 
 // Kill terminates the process group: SIGTERM, then SIGKILL after a grace.
 func (p *Proc) Kill() {

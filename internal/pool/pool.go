@@ -40,7 +40,8 @@ type Config struct {
 	Bin      string
 	Accounts []AccountConfig
 	// TurnsPerAccount caps concurrent turns (running or parked) per account.
-	TurnsPerAccount   int
+	TurnsPerAccount int
+	// ProcessPerSession is the initial process mode (SetProcessPerSession).
 	ProcessPerSession bool
 	Log               *slog.Logger
 }
@@ -52,6 +53,7 @@ type Pool struct {
 	cfg             Config
 	log             *slog.Logger
 	turnsPerAccount atomic.Int64
+	perSession      atomic.Bool
 
 	mu       sync.RWMutex
 	accounts []*Account
@@ -107,6 +109,7 @@ var accountName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 func New(cfg Config) (*Pool, error) {
 	p := &Pool{cfg: cfg, log: cfg.Log}
 	p.turnsPerAccount.Store(int64(cfg.TurnsPerAccount))
+	p.perSession.Store(cfg.ProcessPerSession)
 	for _, ac := range cfg.Accounts {
 		if _, err := p.Add(ac); err != nil {
 			return nil, err
@@ -173,6 +176,20 @@ func (p *Pool) Remove(name string) error {
 // SetTurnsPerAccount changes the per-account turn cap; turns running
 // above a lowered cap finish normally.
 func (p *Pool) SetTurnsPerAccount(n int) { p.turnsPerAccount.Store(int64(n)) }
+
+// SetProcessPerSession switches the process mode. New processes use the
+// new mode at once; the old ones retire: idle ones exit now, busy ones
+// after their running turns. Their sessions reopen in the new processes.
+func (p *Pool) SetProcessPerSession(on bool) {
+	if p.perSession.Swap(on) == on {
+		return
+	}
+	retired := 0
+	for _, a := range p.Accounts() {
+		retired += a.retireProcs()
+	}
+	p.log.Info("process mode changed", "per_session", on, "retired", retired)
+}
 
 func (p *Pool) Accounts() []*Account {
 	p.mu.RLock()
@@ -413,6 +430,22 @@ func (a *Account) killProcs() {
 	}
 }
 
+// retireProcs retires the account's processes and forgets them, so the
+// next Proc starts one in the current mode. It returns how many retired.
+func (a *Account) retireProcs() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	retired := 0
+	for name, slot := range a.procs {
+		if slot.proc != nil {
+			slot.proc.Retire()
+			delete(a.procs, name)
+			retired++
+		}
+	}
+	return retired
+}
+
 // Proc returns the live process for profile, starting it when needed.
 // Concurrent callers share one start.
 func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, error) {
@@ -439,9 +472,14 @@ func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, err
 			}
 			continue
 		}
-		if slot != nil && slot.proc != nil && slot.proc.Alive() {
+		current := slot != nil && slot.proc != nil && slot.proc.Alive() && slot.proc.PerSession() == a.pool.perSession.Load()
+		if current {
 			a.mu.Unlock()
 			return slot.proc, nil
+		}
+		if slot != nil && slot.proc != nil && slot.proc.Alive() {
+			// Started in the old mode while the mode changed.
+			slot.proc.Retire()
 		}
 		slot = &procSlot{starting: make(chan struct{})}
 		a.procs[profile.Name] = slot
@@ -476,7 +514,7 @@ func (a *Account) startProc(ctx context.Context, profile agy.Profile) (*agy.Proc
 		Workdir:           a.workspace,
 		Agent:             profile.Name,
 		CloudCodeEndpoint: a.cloudCodeEndpoint,
-		ProcessPerSession: cfg.ProcessPerSession,
+		ProcessPerSession: a.pool.perSession.Load(),
 		Env:               a.Env(),
 		Log:               a.pool.log.With("account", a.name),
 	})

@@ -35,36 +35,32 @@ type Config struct {
 	Pool    *pool.Pool
 	Monitor *usage.Monitor
 	Logs    *logbuf.Buffer
-	// ProcessPerSession is shown read-only.
-	ProcessPerSession bool
-	Log               *slog.Logger
+	Log     *slog.Logger
 }
 
 type Handler struct {
-	store             *store.Store
-	control           *control.Control
-	pool              *pool.Pool
-	monitor           *usage.Monitor
-	logs              *logbuf.Buffer
-	processPerSession bool
-	log               *slog.Logger
-	loginLimiter      *guard.Limiter
-	hashing           chan struct{}
-	mux               *http.ServeMux
+	store        *store.Store
+	control      *control.Control
+	pool         *pool.Pool
+	monitor      *usage.Monitor
+	logs         *logbuf.Buffer
+	log          *slog.Logger
+	loginLimiter *guard.Limiter
+	hashing      chan struct{}
+	mux          *http.ServeMux
 }
 
 func New(cfg Config) *Handler {
 	h := &Handler{
-		store:             cfg.Store,
-		control:           cfg.Control,
-		pool:              cfg.Pool,
-		monitor:           cfg.Monitor,
-		logs:              cfg.Logs,
-		processPerSession: cfg.ProcessPerSession,
-		log:               cfg.Log,
-		loginLimiter:      guard.NewLimiter(loginLimits),
-		hashing:           make(chan struct{}, maxHashing),
-		mux:               http.NewServeMux(),
+		store:        cfg.Store,
+		control:      cfg.Control,
+		pool:         cfg.Pool,
+		monitor:      cfg.Monitor,
+		logs:         cfg.Logs,
+		log:          cfg.Log,
+		loginLimiter: guard.NewLimiter(loginLimits),
+		hashing:      make(chan struct{}, maxHashing),
+		mux:          http.NewServeMux(),
 	}
 	static, err := fs.Sub(staticFiles, "static")
 	if err != nil {
