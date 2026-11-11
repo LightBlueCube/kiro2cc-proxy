@@ -666,6 +666,14 @@ views.workers = container => {
 
 // ---- calls -----------------------------------------------------------
 
+// Why a request with history replayed it into a new session.
+const replayReasons = {
+  no_snapshot: "No session holds this conversation's history: new to the relay, idle past the snapshot TTL, or the history was edited",
+  tools_changed: "The client's tool set differs from the session's",
+  warm_failed: "The session could not be reopened or rewound",
+  retry: "An earlier attempt failed on another account",
+};
+
 const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#9333ea", "#ea580c"];
 
 function cachePct(input, cached) { return input > 0 ? cached / input : null; }
@@ -811,6 +819,7 @@ views.calls = container => {
       { title: "Model", cell: r => h("span", { title: r.slug }, r.model) },
       { title: "API", cell: r => r.api + (r.stream ? " ⇢" : "") },
       { title: "Mode", cell: r => r.mode || "—" },
+      { title: "Replay reason", cell: r => r.replay_reason ? h("span", { title: replayReasons[r.replay_reason] || "" }, r.replay_reason) : "" },
       { title: "Status", cell: r => r.status === "ok" ? (r.finish || "ok") : h("span", { class: "bad", title: r.error }, r.status) },
       { title: "Time", num: true, cell: r => fmt.ms(r.duration_ms) },
       { title: "TTFT", num: true, cell: r => fmt.ms(r.ttft_ms) },

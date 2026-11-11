@@ -37,7 +37,7 @@ func (r *Recorder) SetPrices(prices []Price) {
 func (r *Recorder) Record(rec gateway.Record) {
 	row := store.Request{
 		At: rec.At, Key: rec.Key, Account: rec.Account, Model: rec.Model, Slug: rec.Slug,
-		API: rec.API, Stream: rec.Stream, Mode: string(rec.Mode), Status: "ok", Finish: string(rec.Finish),
+		API: rec.API, Stream: rec.Stream, Mode: string(rec.Mode), ReplayReason: string(rec.ReplayReason), Status: "ok", Finish: string(rec.Finish),
 		Duration: rec.Duration, QuotaGroup: rec.QuotaGroup,
 	}
 	if rec.TimeToFirstOutput > 0 {
