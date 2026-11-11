@@ -20,6 +20,7 @@ import (
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/conv"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/tokens"
 )
 
 const (
@@ -46,7 +47,10 @@ type Config struct {
 	Recorder Recorder
 	// Budget measures key quota use; it must be set when keys have limits.
 	Budget Budget
-	Log    *slog.Logger
+	// Tokens counts prompts against ContextWindows.
+	Tokens         *tokens.Set
+	ContextWindows []ContextWindow
+	Log            *slog.Logger
 }
 
 // Budget reports an API key's weekly-quota use in a quota group, as a
@@ -63,9 +67,12 @@ type Gateway struct {
 	models   *catalog
 	recorder Recorder
 	budget   Budget
+	prompts  *promptEstimator
 	stop     chan struct{}
 	// idleClose is a time.Duration.
 	idleClose atomic.Int64
+	// windows maps model ids to their context windows in tokens.
+	windows atomic.Pointer[map[string]int]
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
 	mu       sync.Mutex
@@ -125,6 +132,9 @@ func newActiveTurn(sess *session) *activeTurn {
 }
 
 func New(cfg Config) (*Gateway, error) {
+	if cfg.Tokens == nil {
+		return nil, errors.New("gateway: Tokens is required")
+	}
 	snaps, err := openSnapshotStore(filepath.Join(cfg.DataDir, "snapshots.json"), cfg.SnapshotTTL)
 	if err != nil {
 		return nil, err
@@ -137,16 +147,25 @@ func New(cfg Config) (*Gateway, error) {
 		models:   newCatalog(),
 		recorder: cfg.Recorder,
 		budget:   cfg.Budget,
+		prompts:  newPromptEstimator(cfg.Tokens),
 		stop:     make(chan struct{}),
 		sessions: map[string]*session{},
 	}
 	g.idleClose.Store(int64(cfg.IdleClose))
+	g.SetContextWindows(cfg.ContextWindows)
 	go g.janitor()
 	return g, nil
 }
 
 // SetIdleClose changes how long an idle session stays open in agy.
 func (g *Gateway) SetIdleClose(d time.Duration) { g.idleClose.Store(int64(d)) }
+
+// SetContextWindows replaces the context windows; models without one are
+// left to upstream's limit.
+func (g *Gateway) SetContextWindows(windows []ContextWindow) {
+	m := windowMap(windows)
+	g.windows.Store(&m)
+}
 
 // Close stops background work. Running turns end with their processes.
 func (g *Gateway) Close() { close(g.stop) }
@@ -203,6 +222,10 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if err := g.checkLimit(ctx, caller, rec.QuotaGroup); err != nil {
 		return err
 	}
+	estimate, err := g.checkContextWindow(req, t, modelID)
+	if err != nil {
+		return err
+	}
 
 	user := caller.Name
 	r := &run{user: user, req: req, t: t, slug: slug, group: pool.QuotaGroup(slug), exclude: map[string]bool{}, reuse: true}
@@ -216,6 +239,10 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 			failure = g.consume(ctx, at, r, w)
 		}
 		if failure == nil {
+			if w.usage != nil && estimate > 0 {
+				// A turn of one model call reports its prompt; compare.
+				g.log.Debug("prompt estimate vs usage", "model", modelID, "mode", r.mode, "estimate", estimate, "prompt_tokens", w.usage.PromptTokens)
+			}
 			return nil
 		}
 		if !failure.retry || w.emitted || attempt >= attempts || ctx.Err() != nil {
@@ -245,6 +272,28 @@ func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, group stri
 			"this API key used %.2f%% of its %.2f%% limit on %s quota (100%% = one account's weekly bucket)", used*100, limit*100, group)}
 	}
 	return nil
+}
+
+// checkContextWindow refuses a request whose estimated prompt exceeds the
+// model's context window. The message matches the overflow patterns of
+// OpenAI clients (opencode, pi), which then compact the conversation.
+// It returns the estimate, 0 when the model has no window.
+func (g *Gateway) checkContextWindow(req conv.Request, t *transcript, modelID string) (int, *conv.Error) {
+	window, limited := (*g.windows.Load())[modelID]
+	if !limited {
+		return 0, nil
+	}
+	estimate, err := g.prompts.estimate(modelID, req, t)
+	if err != nil {
+		g.log.Error("prompt token count failed", "model", modelID, "err", err)
+		return 0, &conv.Error{Kind: conv.ErrUnavailable, Message: "could not count the prompt's tokens: " + err.Error()}
+	}
+	if estimate <= window {
+		return estimate, nil
+	}
+	return estimate, &conv.Error{Kind: conv.ErrContextLength, Message: fmt.Sprintf(
+		"This model's maximum context length is %d tokens. However, your messages resulted in about %d tokens (agyrelay's estimate). Please reduce the length of the messages.",
+		window, estimate)}
 }
 
 func validate(req conv.Request, t *transcript) *conv.Error {
