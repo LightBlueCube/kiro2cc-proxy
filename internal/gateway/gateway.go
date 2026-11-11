@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -430,6 +431,10 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard
 	case noticeCapacity:
 		g.forget(at.account.Name(), at.sess.id)
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: message}, account: account}
+	case noticeAgentError:
+		// The session holds the failed input now.
+		g.forget(at.account.Name(), at.sess.id)
+		return &attemptFailure{err: g.agentError(at), account: account}
 	}
 
 	for _, ev := range held {
@@ -579,6 +584,23 @@ func (g *Gateway) countSteps(at *activeTurn) int {
 		return 0
 	}
 	return steps
+}
+
+// agentError maps the model error that ended the turn. Messages pass
+// through: clients recognize overflow by their text as well.
+func (g *Gateway) agentError(at *activeTurn) *conv.Error {
+	g.mu.Lock()
+	proc := at.sess.proc
+	g.mu.Unlock()
+	cause, err := proc.LastError(context.Background(), at.sess.id, at.baseSteps)
+	if err != nil {
+		g.log.Warn("cause of agy's turn error unavailable", "session", at.sess.id, "err", err)
+		return &conv.Error{Kind: conv.ErrUpstream, Message: agentErrorNotice + " (cause unavailable: " + err.Error() + ")"}
+	}
+	if cause.Code == http.StatusBadRequest && contextOverflow.MatchString(cause.Message) {
+		return &conv.Error{Kind: conv.ErrContextLength, Message: cause.Message}
+	}
+	return &conv.Error{Kind: conv.ErrUpstream, Message: cause.Message}
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if

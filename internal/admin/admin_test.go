@@ -17,6 +17,7 @@ import (
 
 	"agyrelay/internal/agy/agytest"
 	"agyrelay/internal/bridge"
+	"agyrelay/internal/cloudcode"
 	"agyrelay/internal/control"
 	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
@@ -74,10 +75,15 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cloudCode, err := cloudcode.Start(cloudcode.DefaultUpstream, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cloudCode.Close() })
 	// Fake agy makes no outbound connections; let accounts route directly.
 	settings.AllowDirect = true
 	ctl, err := control.New(context.Background(), control.Config{
-		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, AgyBin: os.Args[0], Level: new(slog.LevelVar),
+		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, CloudCode: cloudCode, AgyBin: os.Args[0], Level: new(slog.LevelVar),
 		AccountsDir: filepath.Join(dir, "accounts"), Settings: settings, Log: log,
 	})
 	if err != nil {

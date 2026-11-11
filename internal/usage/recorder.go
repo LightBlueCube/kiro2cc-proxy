@@ -66,6 +66,7 @@ func (r *Recorder) Record(rec gateway.Record) {
 
 var statusNames = map[conv.ErrorKind]string{
 	conv.ErrInvalidRequest: "invalid_request",
+	conv.ErrContextLength:  "context_length",
 	conv.ErrUnauthorized:   "unauthorized",
 	conv.ErrForbidden:      "forbidden",
 	conv.ErrUnknownModel:   "unknown_model",

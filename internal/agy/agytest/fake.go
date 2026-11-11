@@ -50,7 +50,13 @@ const (
 	stepUserInput = "CORTEX_STEP_TYPE_USER_INPUT"
 	stepPlanner   = "CORTEX_STEP_TYPE_PLANNER_RESPONSE"
 	stepGeneric   = "CORTEX_STEP_TYPE_GENERIC"
+	// stepErrorMessage records a failed model call.
+	stepErrorMessage = "CORTEX_STEP_TYPE_ERROR_MESSAGE"
 )
+
+// OverflowError is the model error of the "@overflow" prompt, as agy
+// records it for Gemini.
+const OverflowError = "INVALID_ARGUMENT (code 400): The input token count exceeds the maximum number of tokens allowed 1048576."
 
 // EnvRun makes a test binary act as the fake agent (see Main).
 const EnvRun = "FAKE_AGY"
@@ -366,9 +372,13 @@ func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.PathValue("method") {
 	case "GetCascadeTrajectorySteps":
-		steps := []map[string]string{}
+		steps := []map[string]any{}
 		for _, step := range s.steps[min(req.StepOffset, len(s.steps)):] {
-			steps = append(steps, map[string]string{"type": step})
+			entry := map[string]any{"type": step}
+			if step == stepErrorMessage {
+				entry["errorMessage"] = map[string]any{"error": map[string]any{"modelErrorMessage": OverflowError, "errorCode": 400}}
+			}
+			steps = append(steps, entry)
 		}
 		raw, _ = json.Marshal(map[string]any{"steps": steps})
 	case "RevertToCascadeStep":
@@ -430,6 +440,13 @@ func (f *fake) prompt(msg rpcMessage) {
 	f.prompts++
 	f.mu.Unlock()
 	f.addSteps(p.SessionID, s, stepUserInput)
+	if input == "@overflow" {
+		// agy's reply when the model call fails; the cause is in the step.
+		f.addSteps(p.SessionID, s, stepErrorMessage)
+		f.chunk(p.SessionID, "agent_message_chunk", "\n⚠ Agent execution terminated due to error.\n")
+		f.reply(msg.ID, map[string]any{"stopReason": "end_turn"})
+		return
+	}
 	text, err := f.respond(ctx, s, p.SessionID, input)
 	if ctx.Err() != nil {
 		f.reply(msg.ID, map[string]any{"stopReason": "cancelled"})

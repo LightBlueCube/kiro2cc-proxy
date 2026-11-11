@@ -13,9 +13,20 @@ import (
 const (
 	quotaNoticePrefix    = "Usage Limit Reached"
 	capacityNoticePrefix = "⚠ Our servers are experiencing high traffic"
+	// agentErrorNotice ends a turn whose model call failed; the cause is
+	// in the session's ERROR_MESSAGE step.
+	agentErrorNotice = "⚠ Agent execution terminated due to error."
 )
 
-var noticePrefixes = []string{quotaNoticePrefix, capacityNoticePrefix}
+var noticePrefixes = []string{quotaNoticePrefix, capacityNoticePrefix, agentErrorNotice}
+
+// contextOverflow matches the model errors seen for a conversation over
+// the window (agy 1.5.3):
+//
+//	Gemini:       The input token count exceeds the maximum number of tokens allowed 1048576.
+//	gpt-oss-120b: Requested token count exceeds the model's maximum context length of 131072 tokens. …
+//	gpt-oss-120b: The input (183641 tokens) is longer than the model's context length (131072 tokens).
+var contextOverflow = regexp.MustCompile(`exceeds the maximum number of tokens allowed|exceeds the model's maximum context length|is longer than the model's context length`)
 
 var quotaNotice = regexp.MustCompile(`^Usage Limit Reached\n\nYou have reached your current quota for this period\.(?: Your limit will reset (?:in ((?:\d+ (?:day|hour|minute|second)s?(?:, )?)+)|on (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2}), (\d{4}) (\d{2}):(\d{2}) UTC)\.)?$`)
 
@@ -78,6 +89,7 @@ const (
 	noticeNone noticeKind = iota
 	noticeQuota
 	noticeCapacity
+	noticeAgentError
 )
 
 // classifyNotice classifies a whole reply. For a quota notice it returns
@@ -89,6 +101,9 @@ func classifyNotice(text string, now time.Time) (noticeKind, time.Time, string) 
 	}
 	if m := capacityNotice.FindStringSubmatch(trimmed); m != nil {
 		return noticeCapacity, time.Time{}, m[1]
+	}
+	if trimmed == agentErrorNotice {
+		return noticeAgentError, time.Time{}, trimmed
 	}
 	return noticeNone, time.Time{}, ""
 }
