@@ -137,3 +137,52 @@ func TestRecordAndAttribute(t *testing.T) {
 		t.Fatalf("after pruning, used = %v, %v", used, err)
 	}
 }
+
+// Cloud Code answers some quota reads with an older, higher value under
+// the same reset time; only a later reset time refills the bucket.
+func TestStaleQuotaSamples(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Output: 1}}, log)
+	attributor := NewAttributor(st, log)
+
+	t0 := time.Now().Add(-time.Hour)
+	week := t0.Add(7 * 24 * time.Hour)
+	sample := func(at time.Duration, remaining float64, resetAt time.Time) {
+		t.Helper()
+		if err := st.AddQuotaSamples(ctx, []store.QuotaSample{{Account: "a", At: t0.Add(at), Bucket: "gemini-weekly", Group: "Gemini",
+			Window: "weekly", Remaining: remaining, ResetAt: resetAt}}); err != nil {
+			t.Fatal(err)
+		}
+		attributor.Attribute(ctx, "a", t0.Add(at), false)
+	}
+	record := func(at time.Duration) {
+		rec.Record(gateway.Record{At: t0.Add(at), Key: "k", Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
+	}
+
+	sample(0, 0.90, week)
+	record(time.Minute)
+	sample(5*time.Minute, 0.86, week) // 0.04
+	record(6 * time.Minute)
+	sample(10*time.Minute, 0.88, week) // stale: carried
+	sample(15*time.Minute, 0.85, week) // 0.01, not 0.88 - 0.85
+	// A later reset time with more quota left is a refill.
+	sample(20*time.Minute, 1.0, week.Add(7*24*time.Hour))
+	record(21 * time.Minute)
+	sample(25*time.Minute, 0.98, week.Add(7*24*time.Hour)) // 0.02
+
+	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, 10)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	for i, want := range []float64{0.02, 0.01, 0.04} { // newest first
+		if got := rows[i].QuotaUsed; got == nil || math.Abs(*got-want) > 1e-9 {
+			t.Fatalf("row %d quota = %v, want %v", i, got, want)
+		}
+	}
+}

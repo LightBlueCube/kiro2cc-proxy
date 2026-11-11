@@ -73,8 +73,12 @@ func (a *Attributor) attributeBucket(ctx context.Context, account, bucket, group
 	if err != nil {
 		return err
 	}
-	reset := !cur.At.Before(from.ResetAt) || cur.Remaining > from.Remaining
-	if reset {
+	// A rise without a later reset time is a stale sample, not a reset:
+	// Cloud Code answers some reads with an older value (seen: 0.9897,
+	// 0.9935, 0.9897 under one reset time). It falls through to drop <= 0
+	// and leaves the cursor, so the drop it hid is counted once.
+	refilled := cur.ResetAt.After(from.ResetAt) && cur.Remaining > from.Remaining
+	if !cur.At.Before(from.ResetAt) || refilled {
 		return a.store.AttributeQuota(ctx, account, bucket, cur.At, nil)
 	}
 	if busy {
