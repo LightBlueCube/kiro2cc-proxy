@@ -65,13 +65,32 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 		for _, account := range m.cfg.Pool.Accounts() {
-			procs := account.LiveProcs()
-			if len(procs) == 0 {
+			proc, err := withLanguageServer(account.LiveProcs())
+			if err != nil {
+				m.fail(account.Name(), err)
 				continue
 			}
-			m.sample(ctx, account, procs[0])
+			if proc == nil {
+				continue // no agy, or its idle sessions were all closed
+			}
+			m.sample(ctx, account, proc)
 		}
 	}
+}
+
+// withLanguageServer is the first process whose language server runs, or
+// nil.
+func withLanguageServer(procs []*agy.Proc) (*agy.Proc, error) {
+	for _, proc := range procs {
+		has, err := proc.HasLanguageServer()
+		if err != nil {
+			return nil, err
+		}
+		if has {
+			return proc, nil
+		}
+	}
+	return nil, nil
 }
 
 // Refresh samples the account now, starting agy and its language server
@@ -80,8 +99,12 @@ func (m *Monitor) Refresh(ctx context.Context, account *pool.Account) (AccountQu
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	proc, err := account.Proc(ctx, m.cfg.Profile)
+	probe := ""
 	if err == nil {
-		err = proc.EnsureLanguageServer(ctx, agy.SessionSpec{Cwd: account.Workspace()})
+		probe, err = proc.EnsureLanguageServer(ctx, agy.SessionSpec{Cwd: account.Workspace()})
+	}
+	if probe != "" {
+		defer m.closeProbe(account.Name(), proc, probe)
 	}
 	if err != nil {
 		m.fail(account.Name(), err)
@@ -89,6 +112,16 @@ func (m *Monitor) Refresh(ctx context.Context, account *pool.Account) (AccountQu
 		return q, err
 	}
 	return m.sample(ctx, account, proc)
+}
+
+// closeProbe closes the empty session Refresh opened to start a language
+// server.
+func (m *Monitor) closeProbe(account string, proc *agy.Proc, sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), sampleTimeout)
+	defer cancel()
+	if err := proc.CloseSession(ctx, sessionID); err != nil {
+		m.cfg.Log.Warn("closing the quota probe session failed", "account", account, "session", sessionID, "err", err)
+	}
 }
 
 func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.Proc) (AccountQuota, error) {

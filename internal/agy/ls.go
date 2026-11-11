@@ -135,7 +135,16 @@ func (p *Proc) accountCall(ctx context.Context, method string, out any) error {
 	return errors.Join(errs...)
 }
 
-// lsPorts lists the process's language server ports, newest first.
+// HasLanguageServer reports whether one of the process's language servers
+// runs. It starts with the first session; under --process-per-session it
+// exits with the last worker, e.g. when idle sessions were closed.
+func (p *Proc) HasLanguageServer() (bool, error) {
+	ports, err := p.lsPorts()
+	return len(ports) > 0, err
+}
+
+// lsPorts lists the ports of the process's running language servers,
+// newest first.
 func (p *Proc) lsPorts() ([]string, error) {
 	pid := p.cmd.Process.Pid
 	if !p.cfg.ProcessPerSession {
@@ -150,10 +159,9 @@ func (p *Proc) lsPorts() ([]string, error) {
 		return nil, err
 	}
 	var ports []string
-	started := startedWorker.FindAllStringSubmatch(front, -1)
-	for i := len(started) - 1; i >= 0; i-- {
-		workerPid, _ := strconv.Atoi(started[i][2])
-		if port, err := p.listenPort("acp-worker", workerPid); err == nil {
+	workers := liveWorkers(front, pid)
+	for i := len(workers) - 1; i >= 0; i-- {
+		if port, err := p.listenPort("acp-worker", workers[i].PID); err == nil {
 			ports = append(ports, port)
 		}
 	}
