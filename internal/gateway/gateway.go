@@ -48,6 +48,9 @@ type Config struct {
 	Recorder Recorder
 	// Budget measures key spend; it must be set when keys have limits.
 	Budget Budget
+	// Refresh, when set, samples an account's quota, starting agy, which
+	// reports the account's model catalog (see refreshUnreported).
+	Refresh func(ctx context.Context, account *pool.Account) error
 	// ContextCheck turns on the check of prompts against ContextWindows.
 	ContextCheck   bool
 	ContextWindows []ContextWindow
@@ -69,7 +72,12 @@ type Gateway struct {
 	snaps    *snapshotStore
 	recorder Recorder
 	budget   Budget
-	stop     chan struct{}
+	refresh  func(ctx context.Context, account *pool.Account) error
+	// refreshes holds, by account name, a running refresh or the last one
+	// that left the account without a catalog.
+	refreshMu sync.Mutex
+	refreshes map[string]*refreshCall
+	stop      chan struct{}
 	// idleClose is a time.Duration.
 	idleClose atomic.Int64
 	// limits is the context-window check, nil while it is off; limitsMu
@@ -141,14 +149,16 @@ func New(cfg Config) (*Gateway, error) {
 		return nil, err
 	}
 	g := &Gateway{
-		log:      cfg.Log,
-		pool:     cfg.Pool,
-		bridge:   cfg.Bridge,
-		snaps:    snaps,
-		recorder: cfg.Recorder,
-		budget:   cfg.Budget,
-		stop:     make(chan struct{}),
-		sessions: map[string]*session{},
+		log:       cfg.Log,
+		pool:      cfg.Pool,
+		bridge:    cfg.Bridge,
+		snaps:     snaps,
+		recorder:  cfg.Recorder,
+		budget:    cfg.Budget,
+		refresh:   cfg.Refresh,
+		refreshes: map[string]*refreshCall{},
+		stop:      make(chan struct{}),
+		sessions:  map[string]*session{},
 	}
 	g.idleClose.Store(int64(cfg.IdleClose))
 	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
@@ -232,6 +242,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if err := validate(req, t); err != nil {
 		return err
 	}
+	g.refreshUnreported(ctx)
 	offered := g.offered()
 	model, ok := lookupModel(offered, req.Model, req.Effort)
 	if !ok {
