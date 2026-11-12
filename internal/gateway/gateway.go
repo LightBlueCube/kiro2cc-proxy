@@ -233,11 +233,11 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if err := validate(req, t); err != nil {
 		return err
 	}
-	slug, modelID, ok := g.models.resolve(req.Model, req.Effort)
+	slug, modelID, effort, ok := g.models.resolve(req.Model, req.Effort)
 	if !ok {
 		return &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", req.Model)}
 	}
-	rec.Model, rec.Slug, rec.QuotaGroup = modelID, slug, pool.QuotaGroup(slug)
+	rec.Model, rec.Slug, rec.Effort, rec.QuotaGroup = modelID, slug, effort, pool.QuotaGroup(slug)
 	if !caller.Allows(modelID) {
 		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf("this API key may not use model %q", modelID)}
 	}

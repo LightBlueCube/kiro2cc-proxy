@@ -39,7 +39,7 @@ function h(tag, props, ...children) {
     else if (key === "style") node.style.cssText = value;
     else node.setAttribute(key, value === true ? "" : value);
   }
-  for (const child of children.flat()) {
+  for (const child of children.flat(Infinity)) {
     if (child === null || child === undefined || child === false) continue;
     node.append(child instanceof Node ? child : String(child));
   }
@@ -219,17 +219,17 @@ function usageCell(k, groups) {
   });
 }
 
-// modelPicker lists the catalog's models as checkboxes; none checked
+// modelPicker lists the catalog's model ids as checkboxes; none checked
 // allows every model. Selected ids missing from the catalog stay listed,
 // so saving does not drop them.
 function modelPicker(catalog, selected) {
-  const names = Object.fromEntries(catalog.map(m => [m.id, m.name]));
-  const ids = [...new Set([...catalog.map(m => m.id), ...selected])];
+  const known = new Set(catalog.map(m => m.id));
+  const ids = [...new Set([...known, ...selected])];
   const boxes = ids.map(id => h("input", { type: "checkbox", value: id, checked: selected.includes(id) }));
   return {
     node: h("div", { class: "picker" },
-      ids.length ? ids.map((id, i) => h("label", { class: "check", title: names[id] ? id : t("keys.models.not_in_catalog") },
-        boxes[i], names[id] ? `${names[id]} ` : "", h("span", { class: "mono" }, id)))
+      ids.length ? ids.map((id, i) => h("label", { class: "check", title: known.has(id) ? null : t("keys.models.not_in_catalog") },
+        boxes[i], h("span", { class: "mono" }, id)))
         : h("span", { class: "muted" }, t("keys.models.none_known"))),
     read: () => boxes.filter(b => b.checked).map(b => b.value),
   };
@@ -913,7 +913,7 @@ views.calls = container => {
       { title: t("calls.who"), cell: r => stack(keyName(r.key, r.key_hash),
           [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : ""]) },
       { title: t("calls.model_mode"), cell: r => stack(
-          h("span", { title: r.slug }, r.model),
+          [h("span", { title: r.slug }, r.model), r.effort ? term(" · " + r.effort, t("calls.effort.hint")) : ""],
           r.mode ? [term(r.mode, lookup("mode", r.mode)), r.replay_reason ? [" · ", term(r.replay_reason, lookup("replay", r.replay_reason))] : ""] : null) },
       { title: t("calls.status"), cell: r => r.status === "ok" ? term(r.finish || "ok", lookup("status", r.finish || "ok"))
           : h("span", { class: "bad", title: joined(lookup("status", r.status), r.error) }, r.status) },

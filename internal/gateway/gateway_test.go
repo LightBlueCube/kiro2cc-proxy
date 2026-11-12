@@ -759,7 +759,7 @@ func TestRecordsDescribeRequests(t *testing.T) {
 	second := h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Messages: messages, Tools: tools})
 	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: second.text})
 	h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Messages: append(slices.Clone(messages), user("a")), Tools: tools})
-	h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Messages: append(slices.Clone(messages), user("b")), Tools: tools})
+	h.complete(ctx, "alice", conv.Request{API: "chat", Model: model, Effort: "xhigh", Messages: append(slices.Clone(messages), user("b")), Tools: tools})
 	h.complete(ctx, "alice", conv.Request{API: "chat", Model: "nope", Messages: messages})
 
 	records := h.records.all(t, 5)
@@ -775,6 +775,9 @@ func TestRecordsDescribeRequests(t *testing.T) {
 	tool, done := records[0], records[1]
 	if tool.Finish != conv.FinishToolCalls || tool.Usage != nil || tool.Account != "acct0" || tool.Model != model || tool.QuotaGroup != "gemini" {
 		t.Errorf("tool-call record = %+v", tool)
+	}
+	if tool.Effort != "medium" || records[3].Effort != "high" || records[3].Slug != model+"-high" {
+		t.Errorf("efforts = %q, %q (slug %q), want medium, high", tool.Effort, records[3].Effort, records[3].Slug)
 	}
 	if done.Finish != conv.FinishStop || done.Usage == nil || done.TimeToFirstOutput <= 0 || done.Duration < done.TimeToFirstOutput {
 		t.Errorf("final record = %+v", done)
