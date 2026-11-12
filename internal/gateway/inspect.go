@@ -13,8 +13,8 @@ import (
 type SessionInfo struct {
 	Account string
 	ID      string
-	// Key is the API key whose conversation the session caches.
-	Key string
+	// KeyHash is the API key whose conversation the session caches.
+	KeyHash string
 	// PID is the agy process holding the session (0 when not open).
 	PID      int
 	LastUsed time.Time
@@ -52,7 +52,7 @@ func (g *Gateway) Sessions() []SessionInfo {
 	defer g.mu.Unlock()
 	out := make([]SessionInfo, 0, len(g.sessions))
 	for _, sess := range g.sessions {
-		info := SessionInfo{Account: sess.account.Name(), ID: sess.id, Key: sess.user, LastUsed: sess.lastUsed}
+		info := SessionInfo{Account: sess.account.Name(), ID: sess.id, KeyHash: sess.user, LastUsed: sess.lastUsed}
 		if sess.proc != nil && sess.proc.Alive() && sess.proc.HasSession(sess.id) {
 			info.PID = sess.proc.PID()
 		}

@@ -36,7 +36,7 @@ func (r *Recorder) SetPrices(prices []Price) {
 // Record implements gateway.Recorder.
 func (r *Recorder) Record(rec gateway.Record) {
 	row := store.Request{
-		At: rec.At, Key: rec.Key, Account: rec.Account, Model: rec.Model, Slug: rec.Slug,
+		At: rec.At, KeyHash: rec.KeyHash, KeyName: rec.KeyName, Account: rec.Account, Model: rec.Model, Slug: rec.Slug,
 		API: rec.API, Stream: rec.Stream, Mode: string(rec.Mode), ReplayReason: string(rec.ReplayReason), Status: "ok", Finish: string(rec.Finish),
 		Duration: rec.Duration, QuotaGroup: rec.QuotaGroup,
 	}
@@ -60,7 +60,7 @@ func (r *Recorder) Record(rec gateway.Record) {
 	ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
 	defer cancel()
 	if err := r.store.AddRequest(ctx, row); err != nil {
-		r.log.Error("request record lost", "key", rec.Key, "err", err)
+		r.log.Error("request record lost", "key", rec.KeyName, "err", err)
 	}
 }
 

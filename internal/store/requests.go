@@ -10,9 +10,11 @@ import (
 
 // Request is one served API request.
 type Request struct {
-	ID      int64
-	At      time.Time
-	Key     string
+	ID int64
+	At time.Time
+	// KeyHash identifies the API key; KeyName is its name, for display.
+	KeyHash string
+	KeyName string
 	Account string
 	Model   string
 	Slug    string
@@ -36,7 +38,7 @@ type Request struct {
 	QuotaUsed *float64
 }
 
-const requestColumns = `id, at, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
+const requestColumns = `id, at, key_hash, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used`
 
 func (s *Store) AddRequest(ctx context.Context, r Request) error {
@@ -44,16 +46,16 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	if r.TTFT != nil {
 		ttft = sql.NullInt64{Int64: r.TTFT.Milliseconds(), Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (at, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
-		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.At.UnixMilli(), r.Key, r.Account, r.Model, r.Slug, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
+		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.Model, r.Slug, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
 		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup)
 	return err
 }
 
 // RequestFilter selects requests; zero fields do not filter.
 type RequestFilter struct {
-	Key     string
+	KeyHash string
 	Model   string
 	Account string
 	Since   time.Time
@@ -67,8 +69,8 @@ func (f RequestFilter) where() (string, []any) {
 		conds = append(conds, cond)
 		args = append(args, arg)
 	}
-	if f.Key != "" {
-		add("key_name = ?", f.Key)
+	if f.KeyHash != "" {
+		add("key_hash = ?", f.KeyHash)
 	}
 	if f.Model != "" {
 		add("model = ?", f.Model)
@@ -111,7 +113,7 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		var at, duration int64
 		var ttft sql.NullInt64
 		var cost, quota sql.NullFloat64
-		if err := rows.Scan(&r.ID, &at, &r.Key, &r.Account, &r.Model, &r.Slug, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
+		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.Model, &r.Slug, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
 			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota); err != nil {
 			return nil, err
 		}
@@ -133,7 +135,9 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 
 // Summary totals requests of one group.
 type Summary struct {
-	Group     string  `json:"group"`
+	Group string `json:"group"`
+	// KeyName is the key's name when the group has a key hash.
+	KeyName   string  `json:"key_name,omitempty"`
 	Requests  int64   `json:"requests"`
 	Errors    int64   `json:"errors"`
 	Input     int64   `json:"input"`
@@ -154,30 +158,31 @@ const (
 	ByModel   SummaryBy = "model"
 	ByAccount SummaryBy = "account"
 	ByDay     SummaryBy = "day"
-	// ByDayKey groups by "day\x1fkey".
+	// ByDayKey groups by "day\x1fkey hash".
 	ByDayKey SummaryBy = "day_key"
 )
 
-// Summarize totals matching requests by key, model, account, or day. Days
-// start at local midnight for a zone tzOffset east of UTC.
+// Summarize totals matching requests by key hash, model, account, or day.
+// Days start at local midnight for a zone tzOffset east of UTC.
 func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tzOffset time.Duration) ([]Summary, error) {
-	var group string
+	// A key's name never changes, so any of its requests carries it.
+	group, keyName := "", "MIN(key_name)"
 	switch by {
 	case ByKey:
-		group = "key_name"
+		group = "key_hash"
 	case ByModel:
-		group = "model"
+		group, keyName = "model", "''"
 	case ByAccount:
-		group = "account"
+		group, keyName = "account", "''"
 	case ByDay:
-		group = fmt.Sprintf("date(at / 1000 + %d, 'unixepoch')", int64(tzOffset.Seconds()))
+		group, keyName = fmt.Sprintf("date(at / 1000 + %d, 'unixepoch')", int64(tzOffset.Seconds())), "''"
 	case ByDayKey:
-		group = fmt.Sprintf("date(at / 1000 + %d, 'unixepoch') || char(31) || key_name", int64(tzOffset.Seconds()))
+		group = fmt.Sprintf("date(at / 1000 + %d, 'unixepoch') || char(31) || key_hash", int64(tzOffset.Seconds()))
 	default:
 		return nil, fmt.Errorf("unknown grouping %q", by)
 	}
 	where, args := f.where()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+group+`, COUNT(*), SUM(status != 'ok'), SUM(input), SUM(cached), SUM(output), SUM(reasoning),
+	rows, err := s.db.QueryContext(ctx, `SELECT `+group+`, `+keyName+`, COUNT(*), SUM(status != 'ok'), SUM(input), SUM(cached), SUM(output), SUM(reasoning),
 		COALESCE(SUM(cost_usd), 0), SUM(cost_usd IS NULL AND input + output > 0), COALESCE(SUM(quota_used), 0)
 		FROM requests`+where+` GROUP BY 1 ORDER BY 1`, args...)
 	if err != nil {
@@ -187,7 +192,7 @@ func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tz
 	var out []Summary
 	for rows.Next() {
 		var sum Summary
-		if err := rows.Scan(&sum.Group, &sum.Requests, &sum.Errors, &sum.Input, &sum.Cached, &sum.Output, &sum.Reasoning, &sum.CostUSD, &sum.Unpriced, &sum.QuotaUsed); err != nil {
+		if err := rows.Scan(&sum.Group, &sum.KeyName, &sum.Requests, &sum.Errors, &sum.Input, &sum.Cached, &sum.Output, &sum.Reasoning, &sum.CostUSD, &sum.Unpriced, &sum.QuotaUsed); err != nil {
 			return nil, err
 		}
 		out = append(out, sum)
@@ -195,10 +200,35 @@ func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tz
 	return out, rows.Err()
 }
 
-// Distinct lists the values of a request column (key_name, model,
-// account) seen since the given time, for filter menus.
+// RequestKey is an API key seen in requests.
+type RequestKey struct {
+	Hash string `json:"hash"`
+	Name string `json:"name"`
+}
+
+// RequestKeys lists the keys of requests since the given time by name,
+// for filter menus.
+func (s *Store) RequestKeys(ctx context.Context, since time.Time) ([]RequestKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, MIN(key_name) FROM requests WHERE at >= ? GROUP BY 1 ORDER BY 2, 1`, since.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RequestKey
+	for rows.Next() {
+		var k RequestKey
+		if err := rows.Scan(&k.Hash, &k.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// Distinct lists the values of a request column (model, account) seen
+// since the given time, for filter menus.
 func (s *Store) Distinct(ctx context.Context, by SummaryBy, since time.Time) ([]string, error) {
-	column := map[SummaryBy]string{ByKey: "key_name", ByModel: "model", ByAccount: "account"}[by]
+	column := map[SummaryBy]string{ByModel: "model", ByAccount: "account"}[by]
 	if column == "" {
 		return nil, fmt.Errorf("unknown column %q", by)
 	}
@@ -262,13 +292,13 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 	}
 	defer tx.Rollback()
 	for id, share := range shares {
-		var key, group string
-		err := tx.QueryRowContext(ctx, `UPDATE requests SET quota_used = ? WHERE id = ? RETURNING key_name, quota_group`, share, id).Scan(&key, &group)
+		var keyHash, group string
+		err := tx.QueryRowContext(ctx, `UPDATE requests SET quota_used = ? WHERE id = ? RETURNING key_hash, quota_group`, share, id).Scan(&keyHash, &group)
 		if err != nil {
 			return fmt.Errorf("request %d: %w", id, err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_name, grp, used) VALUES (?, ?, ?)
-			ON CONFLICT (key_name, grp) DO UPDATE SET used = used + excluded.used`, key, group, share); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_hash, grp, used) VALUES (?, ?, ?)
+			ON CONFLICT (key_hash, grp) DO UPDATE SET used = used + excluded.used`, keyHash, group, share); err != nil {
 			return err
 		}
 	}
@@ -282,18 +312,18 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 // KeyUse is a key's attributed quota in one quota group since the key
 // was created; pruning requests keeps it.
 type KeyUse struct {
-	Key   string
-	Group string
-	Used  float64
+	KeyHash string
+	Group   string
+	Used    float64
 }
 
-// KeyUses lists attributed quota by key and group; key "" selects every
-// key.
-func (s *Store) KeyUses(ctx context.Context, key string) ([]KeyUse, error) {
-	query, args := `SELECT key_name, grp, used FROM key_usage`, []any{}
-	if key != "" {
-		query += ` WHERE key_name = ?`
-		args = append(args, key)
+// KeyUses lists attributed quota by key hash and group; keyHash ""
+// selects every key.
+func (s *Store) KeyUses(ctx context.Context, keyHash string) ([]KeyUse, error) {
+	query, args := `SELECT key_hash, grp, used FROM key_usage`, []any{}
+	if keyHash != "" {
+		query += ` WHERE key_hash = ?`
+		args = append(args, keyHash)
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -303,7 +333,7 @@ func (s *Store) KeyUses(ctx context.Context, key string) ([]KeyUse, error) {
 	var out []KeyUse
 	for rows.Next() {
 		var u KeyUse
-		if err := rows.Scan(&u.Key, &u.Group, &u.Used); err != nil {
+		if err := rows.Scan(&u.KeyHash, &u.Group, &u.Used); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -314,21 +344,21 @@ func (s *Store) KeyUses(ctx context.Context, key string) ([]KeyUse, error) {
 // PendingCost totals the list-price cost of one key's priced requests of
 // one quota group on one account that have no attributed share.
 type PendingCost struct {
-	Key     string
+	KeyHash string
 	Group   string
 	Account string
 	CostUSD float64
 }
 
-// PendingCosts lists unattributed cost by key, group, and account; key ""
-// selects every key.
-func (s *Store) PendingCosts(ctx context.Context, key string) ([]PendingCost, error) {
-	query := `SELECT key_name, quota_group, account, SUM(cost_usd) FROM requests
+// PendingCosts lists unattributed cost by key hash, group, and account;
+// keyHash "" selects every key.
+func (s *Store) PendingCosts(ctx context.Context, keyHash string) ([]PendingCost, error) {
+	query := `SELECT key_hash, quota_group, account, SUM(cost_usd) FROM requests
 		WHERE quota_used IS NULL AND cost_usd > 0 AND account != ''`
 	var args []any
-	if key != "" {
-		query += ` AND key_name = ?`
-		args = append(args, key)
+	if keyHash != "" {
+		query += ` AND key_hash = ?`
+		args = append(args, keyHash)
 	}
 	rows, err := s.db.QueryContext(ctx, query+` GROUP BY 1, 2, 3`, args...)
 	if err != nil {
@@ -338,7 +368,7 @@ func (s *Store) PendingCosts(ctx context.Context, key string) ([]PendingCost, er
 	var out []PendingCost
 	for rows.Next() {
 		var p PendingCost
-		if err := rows.Scan(&p.Key, &p.Group, &p.Account, &p.CostUSD); err != nil {
+		if err := rows.Scan(&p.KeyHash, &p.Group, &p.Account, &p.CostUSD); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

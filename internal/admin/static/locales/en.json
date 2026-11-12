@@ -52,6 +52,8 @@
   "keys.create": "Create key",
   "keys.created.title": "Key for {name}",
   "keys.created.note": "Copy it now. It is shown only once; the server keeps only its hash.",
+  "keys.col.hash": "SHA-256",
+  "keys.col.hash.hint": "Hex SHA-256 of the whole key; hover for all of it. Check a key with: printf %s 'sk-agyrelay-…' | sha256sum",
   "keys.col.models": "Models",
   "keys.col.usage": "Quota used (total) / limit",
   "keys.col.created": "Created",
@@ -60,6 +62,9 @@
   "keys.edit.title": "Edit {name}",
   "keys.revoke": "Revoke",
   "keys.revoke.confirm": "Revoke the key {name}? Clients using it stop working at once.",
+  "keys.restore": "Restore",
+  "keys.delete": "Delete",
+  "keys.delete.confirm": "Delete the key {name}? This cannot be undone. Its quota use is dropped and the name is freed; its calls stay in the history.",
 
   "settings.title": "Settings",
   "settings.general": "General",

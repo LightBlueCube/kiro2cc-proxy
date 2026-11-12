@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -50,6 +51,7 @@ func (h *Handler) listModels(w http.ResponseWriter, r *http.Request) {
 type keyView struct {
 	ID     int64    `json:"id"`
 	Name   string   `json:"name"`
+	Hash   string   `json:"hash"`
 	Note   string   `json:"note"`
 	Models []string `json:"models"`
 	// Limits and Usage are weekly-quota shares (0.3 = 30%) by quota group.
@@ -83,14 +85,14 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	out := keysView{Keys: []keyView{}, Groups: usage.Groups}
 	for _, k := range keys {
-		v := keyView{ID: k.ID, Name: k.Name, Note: k.Note, Models: k.Models, Limits: k.Limits, Usage: map[string]useView{}, CreatedAt: k.CreatedAt}
+		v := keyView{ID: k.ID, Name: k.Name, Hash: k.Hash, Note: k.Note, Models: k.Models, Limits: k.Limits, Usage: map[string]useView{}, CreatedAt: k.CreatedAt}
 		if v.Models == nil {
 			v.Models = []string{}
 		}
 		if v.Limits == nil {
 			v.Limits = map[string]float64{}
 		}
-		for group, use := range uses[k.Name] {
+		for group, use := range uses[k.Hash] {
 			v.Usage[group] = useView{Attributed: use.Attributed, Estimated: use.Estimated}
 		}
 		if !k.RevokedAt.IsZero() {
@@ -156,6 +158,35 @@ func (h *Handler) revokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "key_revoked", strconv.FormatInt(id, 10))
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) restoreKey(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err := h.control.RestoreKey(r.Context(), id); err != nil {
+		h.fail(w, "restore key", err)
+		return
+	}
+	h.audit(r, "key_restored", strconv.FormatInt(id, 10))
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) deleteKey(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	name, hash, err := h.control.DeleteKey(r.Context(), id)
+	if err != nil {
+		h.fail(w, "delete key", err)
+		return
+	}
+	h.audit(r, "key_deleted", fmt.Sprintf("%d %s sha256:%s", id, name, hash))
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 

@@ -57,7 +57,7 @@ type Config struct {
 // Budget reports an API key's weekly-quota use in a quota group, as a
 // share of one account's weekly bucket.
 type Budget interface {
-	Used(ctx context.Context, key, group string) (float64, error)
+	Used(ctx context.Context, keyHash, group string) (float64, error)
 }
 
 type Gateway struct {
@@ -197,7 +197,7 @@ func (g *Gateway) SetSnapshotTTL(ttl time.Duration) { g.snaps.setTTL(ttl) }
 
 func (g *Gateway) Models() []conv.ModelInfo { return g.models.list() }
 
-// Complete runs req for user (the API key's name). The channel yields
+// Complete runs req for the caller's API key. The channel yields
 // output events and ends with exactly one Finish or Err event. An Err
 // before any output means nothing was produced, so the HTTP layer may
 // still choose a status code.
@@ -206,7 +206,7 @@ func (g *Gateway) Complete(ctx context.Context, caller conv.Caller, req conv.Req
 	go func() {
 		defer close(out)
 		w := &response{ctx: ctx, out: out}
-		rec := Record{At: time.Now(), Key: caller.Name, API: req.API, Stream: req.Stream, Model: req.Model}
+		rec := Record{At: time.Now(), KeyHash: caller.KeyHash, KeyName: caller.Name, API: req.API, Stream: req.Stream, Model: req.Model}
 		err := g.serve(ctx, caller, req, w, &rec)
 		if err != nil {
 			w.fail(err)
@@ -249,8 +249,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		return err
 	}
 
-	user := caller.Name
-	r := &run{user: user, req: req, t: t, slug: slug, group: pool.QuotaGroup(slug), exclude: map[string]bool{}, reuse: true}
+	r := &run{user: caller.KeyHash, req: req, t: t, slug: slug, group: pool.QuotaGroup(slug), exclude: map[string]bool{}, reuse: true}
 	attempts := min(maxAttempts, len(g.pool.Accounts()))
 	for attempt := 1; ; attempt++ {
 		at, failure := g.start(ctx, r)
@@ -284,7 +283,7 @@ func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, group stri
 	if !limited {
 		return nil
 	}
-	used, err := g.budget.Used(ctx, caller.Name, group)
+	used, err := g.budget.Used(ctx, caller.KeyHash, group)
 	if err != nil {
 		g.log.Error("key limit check failed", "key", caller.Name, "err", err)
 		return &conv.Error{Kind: conv.ErrUnavailable, Message: "could not check this API key's usage limit"}

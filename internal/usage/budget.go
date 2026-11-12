@@ -34,13 +34,14 @@ type Use struct {
 
 func (u Use) Total() float64 { return u.Attributed + u.Estimated }
 
-// Uses returns quota use by key and quota group; key "" selects every key.
-func (b *Budget) Uses(ctx context.Context, key string) (map[string]map[string]Use, error) {
-	attributed, err := b.store.KeyUses(ctx, key)
+// Uses returns quota use by key hash and quota group; keyHash "" selects
+// every key.
+func (b *Budget) Uses(ctx context.Context, keyHash string) (map[string]map[string]Use, error) {
+	attributed, err := b.store.KeyUses(ctx, keyHash)
 	if err != nil {
 		return nil, err
 	}
-	pending, err := b.store.PendingCosts(ctx, key)
+	pending, err := b.store.PendingCosts(ctx, keyHash)
 	if err != nil {
 		return nil, err
 	}
@@ -51,11 +52,11 @@ func (b *Budget) Uses(ctx context.Context, key string) (map[string]map[string]Us
 	rate := rateLookup(rates)
 
 	out := map[string]map[string]Use{}
-	add := func(key, group string, attributed, estimated float64) {
-		byGroup := out[key]
+	add := func(keyHash, group string, attributed, estimated float64) {
+		byGroup := out[keyHash]
 		if byGroup == nil {
 			byGroup = map[string]Use{}
-			out[key] = byGroup
+			out[keyHash] = byGroup
 		}
 		use := byGroup[group]
 		use.Attributed += attributed
@@ -63,21 +64,21 @@ func (b *Budget) Uses(ctx context.Context, key string) (map[string]map[string]Us
 		byGroup[group] = use
 	}
 	for _, u := range attributed {
-		add(u.Key, u.Group, u.Used, 0)
+		add(u.KeyHash, u.Group, u.Used, 0)
 	}
 	for _, p := range pending {
-		add(p.Key, p.Group, 0, p.CostUSD*rate(p.Group, p.Account))
+		add(p.KeyHash, p.Group, 0, p.CostUSD*rate(p.Group, p.Account))
 	}
 	return out, nil
 }
 
 // Used implements gateway.Budget.
-func (b *Budget) Used(ctx context.Context, key, group string) (float64, error) {
-	uses, err := b.Uses(ctx, key)
+func (b *Budget) Used(ctx context.Context, keyHash, group string) (float64, error) {
+	uses, err := b.Uses(ctx, keyHash)
 	if err != nil {
 		return 0, err
 	}
-	return uses[key][group].Total(), nil
+	return uses[keyHash][group].Total(), nil
 }
 
 // rateLookup returns quota share per dollar by (group, account), falling

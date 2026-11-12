@@ -43,8 +43,10 @@ type workerView struct {
 }
 
 type sessionView struct {
-	ID       string    `json:"id"`
+	ID string `json:"id"`
+	// Key is the key's name, "" once the key is deleted.
 	Key      string    `json:"key"`
+	KeyHash  string    `json:"key_hash"`
 	PID      int       `json:"pid"`
 	Worker   int       `json:"worker"`
 	LastUsed time.Time `json:"last_used"`
@@ -85,9 +87,19 @@ func optionalTime(t time.Time) *time.Time {
 }
 
 func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
+	keys, err := h.control.Keys(r.Context())
+	if err != nil {
+		h.internalError(w, "list keys", err)
+		return
+	}
+	keyNames := map[string]string{}
+	for _, k := range keys {
+		keyNames[k.Hash] = k.Name
+	}
+
 	sessionsByAccount := map[string][]sessionView{}
 	for _, s := range h.control.Sessions() {
-		v := sessionView{ID: s.ID, Key: s.Key, PID: s.PID, LastUsed: s.LastUsed}
+		v := sessionView{ID: s.ID, Key: keyNames[s.KeyHash], KeyHash: s.KeyHash, PID: s.PID, LastUsed: s.LastUsed}
 		if t := s.Turn; t != nil {
 			v.Turn = &turnView{State: string(t.State), Model: t.Model, Started: optionalTime(t.Started),
 				ParkedAt: optionalTime(t.ParkedAt), ParkTimeout: optionalTime(t.ParkTimeout)}

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -70,12 +69,14 @@ func (s *Store) RemoveAccount(ctx context.Context, name string) error {
 	return affected(s.db.ExecContext(ctx, `DELETE FROM accounts WHERE name = ?`, name))
 }
 
-// Key is an API key, stored as its SHA-256.
+// Key is an API key, stored as its hash.
 type Key struct {
-	ID     int64
-	Name   string
-	SHA256 [sha256.Size]byte
-	Note   string
+	ID   int64
+	Name string
+	// Hash is the lowercase hex SHA-256 of the key; it identifies the key
+	// in requests and quota use.
+	Hash string
+	Note string
 	// Models limits the key to these client model names; empty allows all.
 	Models []string
 	// Limits caps the key's total quota use (key_usage) per quota group,
@@ -88,7 +89,7 @@ type Key struct {
 }
 
 func (s *Store) Keys(ctx context.Context) ([]Key, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, sha256, note, models, limits, created_at, revoked_at FROM api_keys ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, hash, note, models, limits, created_at, revoked_at FROM api_keys ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -96,17 +97,12 @@ func (s *Store) Keys(ctx context.Context) ([]Key, error) {
 	var out []Key
 	for rows.Next() {
 		var k Key
-		var sum []byte
 		var models, limits string
 		var created int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&k.ID, &k.Name, &sum, &k.Note, &models, &limits, &created, &revoked); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Hash, &k.Note, &models, &limits, &created, &revoked); err != nil {
 			return nil, err
 		}
-		if len(sum) != sha256.Size {
-			return nil, errors.New("api key with a malformed hash")
-		}
-		k.SHA256 = [sha256.Size]byte(sum)
 		if err := json.Unmarshal([]byte(models), &k.Models); err != nil {
 			return nil, err
 		}
@@ -132,8 +128,8 @@ func (s *Store) AddKey(ctx context.Context, k Key) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (name, sha256, note, models, limits, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		k.Name, k.SHA256[:], k.Note, string(models), string(limits), k.CreatedAt.Unix())
+	res, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (name, hash, note, models, limits, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		k.Name, k.Hash, k.Note, string(models), string(limits), k.CreatedAt.Unix())
 	if err != nil {
 		return 0, uniqueErr(err)
 	}
@@ -162,6 +158,44 @@ func (s *Store) UpdateKey(ctx context.Context, id int64, u KeyUpdate) error {
 
 func (s *Store) RevokeKey(ctx context.Context, id int64, at time.Time) error {
 	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, at.Unix(), id))
+}
+
+// RestoreKey makes a revoked key valid again.
+func (s *Store) RestoreKey(ctx context.Context, id int64) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE id = ? AND revoked_at IS NOT NULL`, id))
+}
+
+// ErrKeyActive means the key must be revoked first.
+var ErrKeyActive = errors.New("key is not revoked")
+
+// DeleteKey deletes a revoked key and its quota use, freeing its name, and
+// returns the name and hash. Its requests stay, labeled with the name.
+func (s *Store) DeleteKey(ctx context.Context, id int64) (name, hash string, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+
+	var revoked sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT name, hash, revoked_at FROM api_keys WHERE id = ?`, id).Scan(&name, &hash, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if !revoked.Valid {
+		return "", "", ErrKeyActive
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id); err != nil {
+		return "", "", err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM key_usage WHERE key_hash = ?`, hash); err != nil {
+		return "", "", err
+	}
+	return name, hash, tx.Commit()
 }
 
 func nonNil(list []string) []string {

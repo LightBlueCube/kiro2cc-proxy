@@ -111,6 +111,39 @@ var migrations = []string{
 		SELECT key_name, quota_group, SUM(quota_used) FROM requests WHERE quota_used IS NOT NULL GROUP BY 1, 2;`,
 
 	`ALTER TABLE requests ADD COLUMN replay_reason TEXT NOT NULL DEFAULT '';`,
+
+	// A key's hash (lowercase hex SHA-256 of the key) identifies it, so a
+	// deleted key's name can be reused; requests keep the name for display.
+	// AUTOINCREMENT keeps a deleted key's id from being reused, so audit
+	// entries naming an id stay unambiguous.
+	`CREATE TABLE api_keys_new (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		name       TEXT NOT NULL UNIQUE,
+		hash       TEXT NOT NULL UNIQUE,
+		note       TEXT NOT NULL,
+		models     TEXT NOT NULL,
+		limits     TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		revoked_at INTEGER
+	);
+	INSERT INTO api_keys_new SELECT id, name, lower(hex(sha256)), note, models, limits, created_at, revoked_at FROM api_keys;
+	DROP TABLE api_keys;
+	ALTER TABLE api_keys_new RENAME TO api_keys;
+
+	ALTER TABLE requests ADD COLUMN key_hash TEXT NOT NULL DEFAULT '';
+	UPDATE requests SET key_hash = (SELECT hash FROM api_keys WHERE api_keys.name = requests.key_name);
+	DROP INDEX requests_key_at;
+	CREATE INDEX requests_key_at ON requests (key_hash, at);
+
+	CREATE TABLE key_usage_new (
+		key_hash TEXT NOT NULL,
+		grp      TEXT NOT NULL,
+		used     REAL NOT NULL,
+		PRIMARY KEY (key_hash, grp)
+	);
+	INSERT INTO key_usage_new SELECT k.hash, u.grp, u.used FROM key_usage u JOIN api_keys k ON k.name = u.key_name;
+	DROP TABLE key_usage;
+	ALTER TABLE key_usage_new RENAME TO key_usage;`,
 }
 
 // ErrNotFound means the named row does not exist.

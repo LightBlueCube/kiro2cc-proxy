@@ -40,10 +40,11 @@ const (
 
 // Record describes one served request, reported after its last event.
 type Record struct {
-	At     time.Time
-	Key    string
-	API    string
-	Stream bool
+	At      time.Time
+	KeyHash string
+	KeyName string
+	API     string
+	Stream  bool
 	// Model is the public model id once resolved, else as requested.
 	Model      string
 	Slug       string

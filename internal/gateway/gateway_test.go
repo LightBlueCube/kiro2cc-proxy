@@ -142,8 +142,11 @@ type result struct {
 
 func (h *harness) complete(ctx context.Context, user string, req conv.Request) result {
 	h.t.Helper()
-	return h.completeAs(ctx, conv.Caller{Name: user}, req)
+	return h.completeAs(ctx, testCaller(user), req)
 }
+
+// testCaller's key hash differs from its name, so mixing them up fails.
+func testCaller(name string) conv.Caller { return conv.Caller{KeyHash: "hash-" + name, Name: name} }
 
 func (h *harness) completeAs(ctx context.Context, caller conv.Caller, req conv.Request) result {
 	h.t.Helper()
@@ -226,7 +229,7 @@ func TestInspectAndCloseSession(t *testing.T) {
 	}
 
 	list := h.gw.Sessions()
-	if len(list) != 1 || list[0].Key != "alice" || list[0].Turn != nil || list[0].PID == 0 {
+	if len(list) != 1 || list[0].KeyHash != "hash-alice" || list[0].Turn != nil || list[0].PID == 0 {
 		t.Fatalf("sessions = %+v", list)
 	}
 	info, err := h.p.Accounts()[0].LiveProcs()[0].Inspect()
@@ -287,7 +290,7 @@ func TestProcessModeSwitchRetiresProcesses(t *testing.T) {
 		bobDone <- h.complete(bobCtx, "bob", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}})
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for !slices.ContainsFunc(h.gw.Sessions(), func(s SessionInfo) bool { return s.Key == "bob" && s.Turn != nil }) {
+	for !slices.ContainsFunc(h.gw.Sessions(), func(s SessionInfo) bool { return s.KeyHash == "hash-bob" && s.Turn != nil }) {
 		if time.Now().After(deadline) {
 			t.Fatal("bob's turn never started")
 		}
@@ -326,12 +329,13 @@ func TestKeyLimits(t *testing.T) {
 		t.Fatalf("unlimited key: %+v, budget calls %d", r, h.budget.calls)
 	}
 
-	alice := conv.Caller{Name: "alice", Limits: map[string]float64{"gemini": 0.3}}
-	h.budget.set("alice", "gemini", 0.29)
+	alice := testCaller("alice")
+	alice.Limits = map[string]float64{"gemini": 0.3}
+	h.budget.set(alice.KeyHash, "gemini", 0.29)
 	if r := h.completeAs(ctx, alice, req); r.err != nil {
 		t.Fatalf("under the limit: %+v", r)
 	}
-	h.budget.set("alice", "gemini", 0.3)
+	h.budget.set(alice.KeyHash, "gemini", 0.3)
 	r := h.completeAs(ctx, alice, req)
 	if r.err == nil || r.err.Kind != conv.ErrKeyLimit || !strings.Contains(r.err.Message, "30.00% of its 30.00% limit on gemini quota") {
 		t.Fatalf("at the limit: %+v", r.err)
@@ -764,8 +768,8 @@ func TestRecordsDescribeRequests(t *testing.T) {
 	}
 	wantModes := []Mode{ModeFresh, ModeContinue, ModeWarm, ModeRewind, ""}
 	for i, r := range records {
-		if r.Mode != wantModes[i] || r.Key != "alice" {
-			t.Errorf("record %d: mode %q key %q, want %q", i, r.Mode, r.Key, wantModes[i])
+		if r.Mode != wantModes[i] || r.KeyHash != "hash-alice" || r.KeyName != "alice" {
+			t.Errorf("record %d: mode %q key %q %q, want %q", i, r.Mode, r.KeyHash, r.KeyName, wantModes[i])
 		}
 	}
 	tool, done := records[0], records[1]
