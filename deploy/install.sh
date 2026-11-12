@@ -5,9 +5,13 @@
 # usage: sudo deploy/install.sh [--agy PATH]
 #
 #   --agy PATH  install agy from PATH: the antigravity executable or the
-#               tarball holding it. Needed on the first install, later only
-#               to replace agy. agyrelay accepts pinned agy versions only
-#               (now 1.5.3); this is checked before anything is installed.
+#               tarball holding it, instead of downloading it.
+#
+# agyrelay runs pinned agy versions only (now 1.5.3). Every run checks the
+# installed agy against the new build before installing anything. If no agy
+# is installed or the build cannot run it, and --agy is not given, the
+# script asks before downloading the pinned release from GitHub
+# (deploy/fetch-agy.sh). Behind a proxy: sudo https_proxy=URL deploy/install.sh
 #
 # The build runs as the user who called sudo and needs Go (the version in
 # go.mod, or a Go that downloads it).
@@ -16,13 +20,13 @@
 #   - asks before creating the system user "agyrelay";
 #   - writes /etc/agyrelay.json, listening on 127.0.0.1:8787;
 #   - asks for the admin password.
-# Every run checks agy against the new build, installs the executable (the
-# old one is kept as agyrelay.prev) and the unit, restarts the service, and
-# waits until it listens. The restart cuts off requests in progress.
+# Every run installs the executable (the old one is kept as agyrelay.prev)
+# and the unit, restarts the service, and waits until it listens. The
+# restart cuts off requests in progress.
 #
 # Installed:
 #   /usr/local/bin/agyrelay               executable
-#   /opt/agyrelay/antigravity             agy as given; agyrelay patches a copy
+#   /opt/agyrelay/antigravity             agy as released; agyrelay patches a copy
 #   /etc/agyrelay.json                    startup settings, never overwritten;
 #                                         only "listen" is meant to change
 #   /etc/systemd/system/agyrelay.service
@@ -52,6 +56,13 @@ die() {
 	exit 1
 }
 
+# confirm PROMPT: whether the user answers yes; no answer (EOF) is no.
+confirm() {
+	local answer
+	read -r -p "$1 [y/N] " answer || return 1
+	[[ $answer == [yY] ]]
+}
+
 agy_src=
 while (($#)); do
 	case $1 in
@@ -65,9 +76,6 @@ while (($#)); do
 done
 
 ((EUID == 0)) || die "run as root: sudo $0"
-if [[ -z $agy_src && ! -e $agy_bin ]]; then
-	die "no agy installed yet; pass --agy PATH"
-fi
 
 src=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
@@ -87,7 +95,19 @@ build() {
 echo "Building agyrelay"
 build
 
+# check_agy BIN: whether this build can run BIN; prints the report if not.
+check_agy() {
+	if "$work/agyrelay" check-agy "$1" >"$work/check-agy.txt" 2>&1; then
+		grep '^version' "$work/check-agy.txt"
+		return
+	fi
+	cat "$work/check-agy.txt" >&2
+	return 1
+}
+
+# agy_new: the agy to install, if any.
 agy_new=
+echo "Checking agy"
 if [[ -n $agy_src ]]; then
 	case $agy_src in
 	*.tar.gz | *.tgz)
@@ -96,18 +116,23 @@ if [[ -n $agy_src ]]; then
 		;;
 	*) agy_new=$agy_src ;;
 	esac
+	check_agy "$agy_new" || die "this build cannot run the agy from $agy_src"
+elif [[ ! -e $agy_bin ]] || ! check_agy "$agy_bin"; then
+	if [[ -e $agy_bin ]]; then
+		missing="This build cannot run the installed agy."
+	else
+		missing="No agy installed."
+	fi
+	confirm "$missing Download the pinned agy release from GitHub (google-antigravity/antigravity-cli)?" ||
+		die "aborted: pass --agy PATH to install agy from a file"
+	"$src/deploy/fetch-agy.sh" "$work/antigravity"
+	agy_new=$work/antigravity
+	check_agy "$agy_new" || die "this build cannot run the downloaded agy: deploy/fetch-agy.sh and the pinned list disagree"
 fi
-echo "Checking agy"
-if ! "$work/agyrelay" check-agy "${agy_new:-$agy_bin}" >"$work/check-agy.txt"; then
-	cat "$work/check-agy.txt" >&2
-	die "this build cannot run the agy from ${agy_src:-$agy_bin}"
-fi
-grep '^version' "$work/check-agy.txt"
 
 if ! id -u "$service_user" >/dev/null 2>&1; then
-	read -r -p "System user '$service_user' does not exist. Create it? [y/N] " answer ||
-		die "no answer; the service needs the user '$service_user'"
-	[[ $answer == [yY] ]] || die "aborted: the service needs the user '$service_user'"
+	confirm "System user '$service_user' does not exist. Create it?" ||
+		die "aborted: the service needs the user '$service_user'"
 	nologin=$(command -v nologin) || die "nologin not found"
 	useradd --system --user-group --home-dir "$data_dir" --no-create-home --shell "$nologin" "$service_user"
 fi
