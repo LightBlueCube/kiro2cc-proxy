@@ -60,12 +60,13 @@ func toolPolicy(tools []conv.ToolSpec) string {
 	}
 	names := make([]string, len(tools))
 	for i, tool := range tools {
-		names[i] = tool.Name
+		names[i] = agy.ModelToolName(tool.Name)
 	}
+	parallel := agy.ModelToolName(parallelToolName)
 	return strings.Join([]string{
-		fmt.Sprintf("The client's tools in this session, served by the %s MCP server (you call them as mcp_%s_<name>; the transcript names them without the prefix):", agy.BridgeServer, agy.BridgeServer),
+		fmt.Sprintf("The client's tools in this session, served by the %s MCP server:", agy.BridgeServer),
 		strings.Join(names, ", "),
-		fmt.Sprintf("For two or more independent, non-conflicting client tool calls, call mcp_%s_%s once with {calls: [{name, arguments}, ...]}, names without the prefix, instead of issuing them sequentially. Never nest %s.", agy.BridgeServer, parallelToolName, parallelToolName),
+		fmt.Sprintf("For two or more independent, non-conflicting client tool calls, call %s once with {calls: [{name, arguments}, ...]} instead of issuing them sequentially. Never nest %s.", parallel, parallel),
 	}, "\n")
 }
 
@@ -214,7 +215,8 @@ type parallelCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-// parseParallel validates a parallel tool call's arguments.
+// parseParallel validates a parallel tool call's arguments. Names may carry
+// the prefix the model calls tools by; the result holds the client's names.
 func parseParallel(args json.RawMessage, known func(string) bool) ([]parallelCall, error) {
 	var input struct {
 		Calls []parallelCall `json:"calls"`
@@ -232,9 +234,13 @@ func parseParallel(args json.RawMessage, known func(string) bool) ([]parallelCal
 		if name == "" {
 			return nil, fmt.Errorf("parallel.calls[%d].name must be a non-empty string", i)
 		}
-		if isInternalTool(name) || !known(name) {
-			return nil, fmt.Errorf("parallel.calls[%d] cannot invoke %s", i, name)
+		if !known(name) {
+			name = strings.TrimPrefix(name, agy.ModelToolName(""))
 		}
+		if isInternalTool(name) || !known(name) {
+			return nil, fmt.Errorf("parallel.calls[%d] cannot invoke %s", i, call.Name)
+		}
+		input.Calls[i].Name = name
 		if len(call.Arguments) == 0 || string(call.Arguments) == "null" {
 			input.Calls[i].Arguments = json.RawMessage("{}")
 			continue
@@ -274,7 +280,7 @@ func formatParallel(calls []*pendingCall, results []bridge.Result) bridge.Result
 			images = append(images, image)
 			blocks = append(blocks, parallelBlock{Type: "image", Index: len(images), MimeType: image.MimeType})
 		}
-		entries[i] = parallelEntry{CallID: call.id, Name: call.name, IsError: r.IsError, Content: blocks}
+		entries[i] = parallelEntry{CallID: call.id, Name: agy.ModelToolName(call.name), IsError: r.IsError, Content: blocks}
 		isError = isError || r.IsError
 	}
 	text, _ := json.MarshalIndent(map[string]any{"results": entries}, "", "  ")
