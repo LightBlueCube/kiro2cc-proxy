@@ -142,6 +142,22 @@ func (h *Handler) summarize(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sums)
 }
 
+// quota serves the weekly-quota use of matching requests by key, account,
+// and quota group.
+func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
+	f, ok := queryFilter(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "since and until are Unix milliseconds")
+		return
+	}
+	report, err := h.control.Quota(r.Context(), f)
+	if err != nil {
+		h.internalError(w, "quota use", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // filterValues lists the keys, models, and accounts seen since ?since.
 func (h *Handler) filterValues(w http.ResponseWriter, r *http.Request) {
 	f, ok := queryFilter(r)

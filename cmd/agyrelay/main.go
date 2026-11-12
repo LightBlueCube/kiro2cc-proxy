@@ -132,7 +132,7 @@ func runServe(args []string) error {
 
 	usageLog := log.With("component", "usage")
 	recorder := usage.NewRecorder(st, settings.Prices, usageLog)
-	budget := usage.NewBudget(st)
+	budget := usage.NewBudget(st, recorder)
 	outbound, err := egress.Start(log.With("component", "egress"))
 	if err != nil {
 		return err

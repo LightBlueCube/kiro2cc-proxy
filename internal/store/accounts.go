@@ -77,9 +77,11 @@ type Key struct {
 	Note string
 	// Models limits the key to these client model names; empty allows all.
 	Models []string
-	// Limits caps the key's total quota use (key_usage) per quota group,
-	// as a share of one account's weekly bucket (0.3 = 30%); absent
-	// groups are unlimited.
+	// LimitTotal caps the key's whole list-price spend (key_usage) in USD;
+	// nil is no total limit.
+	LimitTotal *float64
+	// Limits caps the spend per quota group in USD; absent groups are
+	// unlimited. At most one of LimitTotal and Limits is set.
 	Limits    map[string]float64
 	CreatedAt time.Time
 	// RevokedAt is zero while the key is valid.
@@ -87,7 +89,7 @@ type Key struct {
 }
 
 func (s *Store) Keys(ctx context.Context) ([]Key, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT hash, name, note, models, limits, created_at, revoked_at FROM api_keys ORDER BY created_at, name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT hash, name, note, models, limit_total, limits, created_at, revoked_at FROM api_keys ORDER BY created_at, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -96,10 +98,14 @@ func (s *Store) Keys(ctx context.Context) ([]Key, error) {
 	for rows.Next() {
 		var k Key
 		var models, limits string
+		var total sql.NullFloat64
 		var created int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&k.Hash, &k.Name, &k.Note, &models, &limits, &created, &revoked); err != nil {
+		if err := rows.Scan(&k.Hash, &k.Name, &k.Note, &models, &total, &limits, &created, &revoked); err != nil {
 			return nil, err
+		}
+		if total.Valid {
+			k.LimitTotal = &total.Float64
 		}
 		if err := json.Unmarshal([]byte(models), &k.Models); err != nil {
 			return nil, err
@@ -125,16 +131,17 @@ func (s *Store) AddKey(ctx context.Context, k Key) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, limits, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		k.Hash, k.Name, k.Note, string(models), string(limits), k.CreatedAt.Unix())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, limit_total, limits, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		k.Hash, k.Name, k.Note, string(models), k.LimitTotal, string(limits), k.CreatedAt.Unix())
 	return uniqueErr(err)
 }
 
 // KeyUpdate is what the admin can change on a key.
 type KeyUpdate struct {
-	Note   string
-	Models []string
-	Limits map[string]float64
+	Note       string
+	Models     []string
+	LimitTotal *float64
+	Limits     map[string]float64
 }
 
 func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
@@ -146,8 +153,8 @@ func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
 	if err != nil {
 		return err
 	}
-	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, limits = ? WHERE hash = ?`,
-		u.Note, string(models), string(limits), hash))
+	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, limit_total = ?, limits = ? WHERE hash = ?`,
+		u.Note, string(models), u.LimitTotal, string(limits), hash))
 }
 
 func (s *Store) RevokeKey(ctx context.Context, hash string, at time.Time) error {
@@ -162,7 +169,7 @@ func (s *Store) RestoreKey(ctx context.Context, hash string) error {
 // ErrKeyActive means the key must be revoked first.
 var ErrKeyActive = errors.New("key is not revoked")
 
-// DeleteKey deletes a revoked key and its quota use, freeing its name, and
+// DeleteKey deletes a revoked key and its spend, freeing its name, and
 // returns the name. Its requests stay, labeled with the name.
 func (s *Store) DeleteKey(ctx context.Context, hash string) (name string, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)

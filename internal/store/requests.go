@@ -42,16 +42,31 @@ type Request struct {
 const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used`
 
+// AddRequest stores the request and adds its cost to the key's spend.
 func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	var ttft sql.NullInt64
 	if r.TTFT != nil {
 		ttft = sql.NullInt64{Int64: r.TTFT.Milliseconds(), Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
 		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
 		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup)
-	return err
+	if err != nil {
+		return err
+	}
+	if r.CostUSD != nil && *r.CostUSD > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_hash, grp, cost_usd) VALUES (?, ?, ?)
+			ON CONFLICT (key_hash, grp) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd`, r.KeyHash, r.QuotaGroup, *r.CostUSD); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // RequestFilter selects requests; zero fields do not filter.
@@ -147,8 +162,7 @@ type Summary struct {
 	Reasoning int64   `json:"reasoning"`
 	CostUSD   float64 `json:"cost_usd"`
 	// Unpriced counts requests with tokens but no price.
-	Unpriced  int64   `json:"unpriced"`
-	QuotaUsed float64 `json:"quota_used"`
+	Unpriced int64 `json:"unpriced"`
 }
 
 // SummaryBy names a grouping of Summarize.
@@ -184,7 +198,7 @@ func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tz
 	}
 	where, args := f.where()
 	rows, err := s.db.QueryContext(ctx, `SELECT `+group+`, `+keyName+`, COUNT(*), SUM(status != 'ok'), SUM(input), SUM(cached), SUM(output), SUM(reasoning),
-		COALESCE(SUM(cost_usd), 0), SUM(cost_usd IS NULL AND input + output > 0), COALESCE(SUM(quota_used), 0)
+		COALESCE(SUM(cost_usd), 0), SUM(cost_usd IS NULL AND input + output > 0)
 		FROM requests`+where+` GROUP BY 1 ORDER BY 1`, args...)
 	if err != nil {
 		return nil, err
@@ -193,7 +207,7 @@ func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tz
 	var out []Summary
 	for rows.Next() {
 		var sum Summary
-		if err := rows.Scan(&sum.Group, &sum.KeyName, &sum.Requests, &sum.Errors, &sum.Input, &sum.Cached, &sum.Output, &sum.Reasoning, &sum.CostUSD, &sum.Unpriced, &sum.QuotaUsed); err != nil {
+		if err := rows.Scan(&sum.Group, &sum.KeyName, &sum.Requests, &sum.Errors, &sum.Input, &sum.Cached, &sum.Output, &sum.Reasoning, &sum.CostUSD, &sum.Unpriced); err != nil {
 			return nil, err
 		}
 		out = append(out, sum)
@@ -293,14 +307,8 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 	}
 	defer tx.Rollback()
 	for id, share := range shares {
-		var keyHash, group string
-		err := tx.QueryRowContext(ctx, `UPDATE requests SET quota_used = ? WHERE id = ? RETURNING key_hash, quota_group`, share, id).Scan(&keyHash, &group)
-		if err != nil {
+		if err := affected(tx.ExecContext(ctx, `UPDATE requests SET quota_used = ? WHERE id = ?`, share, id)); err != nil {
 			return fmt.Errorf("request %d: %w", id, err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_hash, grp, used) VALUES (?, ?, ?)
-			ON CONFLICT (key_hash, grp) DO UPDATE SET used = used + excluded.used`, keyHash, group, share); err != nil {
-			return err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO quota_cursors (account, bucket, at) VALUES (?, ?, ?)
@@ -310,18 +318,18 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 	return tx.Commit()
 }
 
-// KeyUse is a key's attributed quota in one quota group since the key
+// KeySpend is a key's list-price spend in one quota group since the key
 // was created; pruning requests keeps it.
-type KeyUse struct {
+type KeySpend struct {
 	KeyHash string
 	Group   string
-	Used    float64
+	CostUSD float64
 }
 
-// KeyUses lists attributed quota by key hash and group; keyHash ""
-// selects every key.
-func (s *Store) KeyUses(ctx context.Context, keyHash string) ([]KeyUse, error) {
-	query, args := `SELECT key_hash, grp, used FROM key_usage`, []any{}
+// KeySpends lists spend by key hash and group; keyHash "" selects every
+// key.
+func (s *Store) KeySpends(ctx context.Context, keyHash string) ([]KeySpend, error) {
+	query, args := `SELECT key_hash, grp, cost_usd FROM key_usage`, []any{}
 	if keyHash != "" {
 		query += ` WHERE key_hash = ?`
 		args = append(args, keyHash)
@@ -331,77 +339,49 @@ func (s *Store) KeyUses(ctx context.Context, keyHash string) ([]KeyUse, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []KeyUse
+	var out []KeySpend
 	for rows.Next() {
-		var u KeyUse
-		if err := rows.Scan(&u.KeyHash, &u.Group, &u.Used); err != nil {
+		var k KeySpend
+		if err := rows.Scan(&k.KeyHash, &k.Group, &k.CostUSD); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// QuotaUse is the weekly-quota share attributed to one key's requests on
+// one account in one quota group.
+type QuotaUse struct {
+	KeyHash string  `json:"key_hash"`
+	KeyName string  `json:"key_name"`
+	Account string  `json:"account"`
+	Group   string  `json:"group"`
+	Used    float64 `json:"used"`
+}
+
+// QuotaUses totals the attributed shares of matching requests by key
+// hash, account, and quota group.
+func (s *Store) QuotaUses(ctx context.Context, f RequestFilter) ([]QuotaUse, error) {
+	where, args := f.where()
+	if where == "" {
+		where = " WHERE quota_used IS NOT NULL"
+	} else {
+		where += " AND quota_used IS NOT NULL"
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, MIN(key_name), account, quota_group, SUM(quota_used) FROM requests`+where+`
+		GROUP BY 1, 3, 4 ORDER BY 3, 4, 2`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QuotaUse
+	for rows.Next() {
+		var u QuotaUse
+		if err := rows.Scan(&u.KeyHash, &u.KeyName, &u.Account, &u.Group, &u.Used); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
-	}
-	return out, rows.Err()
-}
-
-// PendingCost totals the list-price cost of one key's priced requests of
-// one quota group on one account that have no attributed share.
-type PendingCost struct {
-	KeyHash string
-	Group   string
-	Account string
-	CostUSD float64
-}
-
-// PendingCosts lists unattributed cost by key hash, group, and account;
-// keyHash "" selects every key.
-func (s *Store) PendingCosts(ctx context.Context, keyHash string) ([]PendingCost, error) {
-	query := `SELECT key_hash, quota_group, account, SUM(cost_usd) FROM requests
-		WHERE quota_used IS NULL AND cost_usd > 0 AND account != ''`
-	var args []any
-	if keyHash != "" {
-		query += ` AND key_hash = ?`
-		args = append(args, keyHash)
-	}
-	rows, err := s.db.QueryContext(ctx, query+` GROUP BY 1, 2, 3`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []PendingCost
-	for rows.Next() {
-		var p PendingCost
-		if err := rows.Scan(&p.KeyHash, &p.Group, &p.Account, &p.CostUSD); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
-// QuotaRate is the weekly-quota share one list-price dollar used, from
-// the attributed requests of a quota group on an account.
-type QuotaRate struct {
-	Group      string
-	Account    string
-	Attributed float64
-	CostUSD    float64
-}
-
-// QuotaRates totals attributed, priced requests since the given time by
-// quota group and account.
-func (s *Store) QuotaRates(ctx context.Context, since time.Time) ([]QuotaRate, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT quota_group, account, SUM(quota_used), SUM(cost_usd) FROM requests
-		WHERE at >= ? AND quota_used IS NOT NULL AND cost_usd > 0 GROUP BY 1, 2`, since.UnixMilli())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []QuotaRate
-	for rows.Next() {
-		var r QuotaRate
-		if err := rows.Scan(&r.Group, &r.Account, &r.Attributed, &r.CostUSD); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
 	}
 	return out, rows.Err()
 }

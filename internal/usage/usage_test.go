@@ -82,7 +82,7 @@ func TestRecordAndAttribute(t *testing.T) {
 	}
 
 	sums, err := st.Summarize(ctx, store.RequestFilter{}, store.ByKey, 0)
-	if err != nil || len(sums) != 1 || sums[0].Group != "k" || sums[0].KeyName != "alice" || sums[0].Requests != 3 || sums[0].Errors != 1 || math.Abs(sums[0].QuotaUsed-0.04) > 1e-9 {
+	if err != nil || len(sums) != 1 || sums[0].Group != "k" || sums[0].KeyName != "alice" || sums[0].Requests != 3 || sums[0].Errors != 1 {
 		t.Fatalf("summary = %+v, %v", sums, err)
 	}
 
@@ -101,7 +101,7 @@ func TestRecordAndAttribute(t *testing.T) {
 	sample(t0.Add(30*time.Minute), 0.80, false)
 	record(31*time.Minute, "k2")
 	sample(t0.Add(40*time.Minute), 0.79, false)
-	// Not sampled yet: estimated.
+	// Not sampled yet.
 	record(45*time.Minute, "k")
 
 	rows, err = st.Requests(ctx, store.RequestFilter{}, 0, 10)
@@ -116,25 +116,37 @@ func TestRecordAndAttribute(t *testing.T) {
 		}
 	}
 
-	uses, err := NewBudget(st).Uses(ctx, "")
+	report, err := Quota(ctx, st, store.RequestFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 0.08 of quota for $0.007 of attributed requests; the pending one costs $0.001.
-	k, k2 := uses["k"]["gemini"], uses["k2"]["gemini"]
-	if math.Abs(k.Attributed-0.07) > 1e-9 || math.Abs(k.Estimated-0.08/7) > 1e-9 || math.Abs(k2.Total()-0.01) > 1e-9 {
-		t.Fatalf("uses = %+v", uses)
+	used := map[string]float64{}
+	for _, u := range report.Uses {
+		used[u.KeyHash+" "+u.Account+" "+u.Group] = u.Used
 	}
-	if used, err := NewBudget(st).Used(ctx, "k", "claude-gpt"); err != nil || used != 0 {
-		t.Fatalf("claude-gpt used = %v, %v", used, err)
+	if len(used) != 2 || math.Abs(used["k a gemini"]-0.07) > 1e-9 || math.Abs(used["k2 a gemini"]-0.01) > 1e-9 ||
+		!slices.Equal(report.Accounts["gemini"], []string{"a"}) {
+		t.Fatalf("quota report = %+v", report)
 	}
 
-	// Use never resets: pruning every request keeps the attributed part.
+	// Spend is the cost of every priced request, sampled or not: five
+	// requests of 1000 or 3000 tokens at $1 per million.
+	budget := NewBudget(st, rec)
+	spent, err := budget.Spent(ctx, "k")
+	if err != nil || math.Abs(spent["gemini"]-0.007) > 1e-9 || len(spent) != 1 {
+		t.Fatalf("spent = %v, %v", spent, err)
+	}
+	if !budget.Priced("m") || budget.Priced("other") {
+		t.Fatal("priced models are wrong")
+	}
+
+	// Spend never resets: pruning every request keeps it.
 	if err := st.Prune(ctx, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if used, err := NewBudget(st).Used(ctx, "k", "gemini"); err != nil || math.Abs(used-0.07) > 1e-9 {
-		t.Fatalf("after pruning, used = %v, %v", used, err)
+	spends, err := budget.Spends(ctx, "")
+	if err != nil || math.Abs(spends["k"]["gemini"]-0.007) > 1e-9 || math.Abs(spends["k2"]["gemini"]-0.001) > 1e-9 {
+		t.Fatalf("after pruning, spends = %v, %v", spends, err)
 	}
 }
 

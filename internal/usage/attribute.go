@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"agyrelay/internal/store"
@@ -19,6 +20,49 @@ var weeklyBuckets = map[string]string{
 
 // Groups lists the quota groups with a weekly bucket.
 var Groups = []string{"gemini", "claude-gpt", "argon"}
+
+// QuotaReport is the weekly-quota use attributed to matching requests.
+// Shares of different accounts' buckets do not add up to one number: plans
+// differ in bucket size.
+type QuotaReport struct {
+	// Accounts lists by quota group the accounts that have the group's
+	// weekly bucket: configured accounts sampled with it, and accounts
+	// with use in Uses. A key's average over accounts divides by them.
+	Accounts map[string][]string `json:"accounts"`
+	Uses     []store.QuotaUse    `json:"uses"`
+}
+
+func Quota(ctx context.Context, st *store.Store, f store.RequestFilter) (QuotaReport, error) {
+	uses, err := st.QuotaUses(ctx, f)
+	if err != nil {
+		return QuotaReport{}, err
+	}
+	byBucket, err := st.BucketAccounts(ctx)
+	if err != nil {
+		return QuotaReport{}, err
+	}
+	report := QuotaReport{Accounts: map[string][]string{}, Uses: uses}
+	add := func(group, account string) {
+		if !slices.Contains(report.Accounts[group], account) {
+			report.Accounts[group] = append(report.Accounts[group], account)
+		}
+	}
+	for bucket, group := range weeklyBuckets {
+		for _, account := range byBucket[bucket] {
+			add(group, account)
+		}
+	}
+	for _, u := range uses {
+		add(u.Group, u.Account)
+	}
+	for _, accounts := range report.Accounts {
+		slices.Sort(accounts)
+	}
+	if report.Uses == nil {
+		report.Uses = []store.QuotaUse{}
+	}
+	return report, nil
+}
 
 // settleTime is how long after a request its quota is assumed to show in
 // samples. Measured once: the fraction had not moved 20 s after a turn.

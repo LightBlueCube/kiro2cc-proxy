@@ -499,13 +499,13 @@ func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate)
 	if err := validateKeyName(name); err != nil {
 		return "", "", err
 	}
-	if err := validateLimits(u.Limits); err != nil {
+	if err := validateLimits(u); err != nil {
 		return "", "", err
 	}
 	token = keyPrefix + rand.Text()
 	hash = keyHash(token)
 	err = c.cfg.Store.AddKey(ctx, store.Key{
-		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), Limits: u.Limits, CreatedAt: time.Now(),
+		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), LimitTotal: u.LimitTotal, Limits: u.Limits, CreatedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrExists) {
 		return "", "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
@@ -517,7 +517,7 @@ func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate)
 }
 
 func (c *Control) UpdateKey(ctx context.Context, hash string, u store.KeyUpdate) error {
-	if err := validateLimits(u.Limits); err != nil {
+	if err := validateLimits(u); err != nil {
 		return err
 	}
 	u.Models = cleanModels(u.Models)
@@ -560,21 +560,29 @@ func (c *Control) RestartAccount(name string) error {
 // Egress is the account's outbound traffic and route.
 func (c *Control) Egress(account string) (egress.Stats, bool) { return c.cfg.Egress.Stats(account) }
 
-// KeyUses is every key's total quota use by quota group.
-func (c *Control) KeyUses(ctx context.Context) (map[string]map[string]usage.Use, error) {
-	return c.cfg.Budget.Uses(ctx, "")
+// KeySpends is every key's list-price spend in USD by quota group.
+func (c *Control) KeySpends(ctx context.Context) (map[string]map[string]float64, error) {
+	return c.cfg.Budget.Spends(ctx, "")
 }
 
-// maxLimit bounds a key limit: 1000% is ten accounts' weekly buckets.
-const maxLimit = 10
+// Quota is the weekly-quota use attributed to matching requests.
+func (c *Control) Quota(ctx context.Context, f store.RequestFilter) (usage.QuotaReport, error) {
+	return usage.Quota(ctx, c.cfg.Store, f)
+}
 
-func validateLimits(limits map[string]float64) error {
-	for group, limit := range limits {
+func validateLimits(u store.KeyUpdate) error {
+	if u.LimitTotal != nil && len(u.Limits) > 0 {
+		return &InputError{"set either a total limit or per-group limits, not both"}
+	}
+	if u.LimitTotal != nil && *u.LimitTotal < 0 {
+		return &InputError{"the total limit cannot be negative"}
+	}
+	for group, limit := range u.Limits {
 		if !slices.Contains(usage.Groups, group) {
 			return &InputError{fmt.Sprintf("unknown quota group %q (known: %s)", group, strings.Join(usage.Groups, ", "))}
 		}
-		if !(limit >= 0 && limit <= maxLimit) {
-			return &InputError{fmt.Sprintf("the %s limit must be between 0%% and %d%%", group, maxLimit*100)}
+		if limit < 0 {
+			return &InputError{fmt.Sprintf("the %s limit cannot be negative", group)}
 		}
 	}
 	return nil
@@ -611,7 +619,7 @@ func (c *Control) reloadKeys(ctx context.Context) error {
 	byHash := make(map[string]conv.Caller, len(keys))
 	for _, k := range keys {
 		if k.RevokedAt.IsZero() {
-			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, Limits: k.Limits}
+			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, LimitTotal: k.LimitTotal, Limits: k.Limits}
 		}
 	}
 	c.mu.Lock()

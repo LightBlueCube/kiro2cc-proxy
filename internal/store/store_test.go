@@ -19,12 +19,12 @@ func TestDeleteKey(t *testing.T) {
 	if err := st.AddKey(ctx, Key{Hash: "h1", Name: "alice", CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", QuotaGroup: "gemini", Input: 1}); err != nil {
+	cost := 0.5
+	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", QuotaGroup: "gemini", Input: 1, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
-	rows, _ := st.Requests(ctx, RequestFilter{}, 0, 1)
-	if err := st.AttributeQuota(ctx, "main", "b", time.Now(), map[int64]float64{rows[0].ID: 0.1}); err != nil {
-		t.Fatal(err)
+	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.5 {
+		t.Fatalf("spend = %+v, %v", spends, err)
 	}
 
 	if _, err := st.DeleteKey(ctx, "h1"); !errors.Is(err, ErrKeyActive) {
@@ -39,8 +39,8 @@ func TestDeleteKey(t *testing.T) {
 	if _, err := st.DeleteKey(ctx, "h1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete again: %v", err)
 	}
-	if uses, err := st.KeyUses(ctx, "h1"); err != nil || len(uses) != 0 {
-		t.Fatalf("quota use after delete = %+v, %v", uses, err)
+	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 0 {
+		t.Fatalf("spend after delete = %+v, %v", spends, err)
 	}
 	if rows, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10); err != nil || len(rows) != 1 {
 		t.Fatalf("requests after delete = %+v, %v (they stay)", rows, err)
