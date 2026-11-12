@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -188,12 +189,16 @@ func runServe(args []string) error {
 	}
 
 	httpServer := &http.Server{
-		Addr:              cfg.Listen,
 		Handler:           server.New(server.Config{Keys: ctl, OpenAI: openai.NewHandler(gw), Admin: adminUI}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// Bound before "listening" is logged: deploy/install.sh waits for it.
+	listener, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return err
+	}
 	served := make(chan error, 1)
-	go func() { served <- httpServer.ListenAndServe() }()
+	go func() { served <- httpServer.Serve(listener) }()
 	log.Info("listening", "addr", cfg.Listen, "accounts", len(accountPool.Accounts()))
 
 	select {
