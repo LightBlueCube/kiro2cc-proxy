@@ -113,7 +113,7 @@ func toolsKey(tools []conv.ToolSpec) string {
 const (
 	continuationPrompt = "Continue the task from the latest tool results above."
 	imageOnlyPrompt    = "See the attached images."
-	deltaPrompt        = "Continue the task. The attached transcript delta lists, in order, the messages the client recorded after your last reply (tool results, user messages, other models' replies, or client system messages). Attached images are numbered in delta order. The same tool rules as before apply."
+	deltaPrompt        = "The transcript delta above lists, in order, the messages the client recorded after your last reply: tool results, user messages, replies from other models, and client system messages. Attached images are numbered in delta order. Continue the conversation from there, with the same tool rules as before."
 	deltaURI           = "relay://transcript-delta"
 	historyPlaceholder = "[Image in original transcript]"
 )
@@ -250,9 +250,10 @@ func deltaPromptBlocks(delta []conv.Message) []agy.ContentBlock {
 		}
 		images = append(images, m.Images...)
 	}
+	// agy joins the resource and the next block without a separator.
 	blocks := []agy.ContentBlock{{
 		Type:     "resource",
-		Resource: &agy.Resource{URI: deltaURI, MimeType: "text/markdown", Text: strings.Join(parts, "\n\n")},
+		Resource: &agy.Resource{URI: deltaURI, MimeType: "text/markdown", Text: strings.Join(parts, "\n\n") + "\n\n"},
 	}}
 	for _, image := range images {
 		blocks = append(blocks, agy.ImageBlock(image.Data, image.MimeType))

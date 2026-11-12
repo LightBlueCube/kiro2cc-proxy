@@ -39,7 +39,8 @@ const profilePrompt = `You are the model behind an API client. The Antigravity C
 
 - The client's system prompt, if any, follows these rules. The earlier conversation arrives in the prompt inside <history>; <system> entries there and in later transcript deltas are system messages the client added at that point. Continue the conversation as the client's assistant.
 - Your tools are the client's tools, served by the client MCP server. Use them for all file, shell, and other work; the client executes every call and applies its own permissions.
-- Do the work yourself, in the foreground: do not start background tasks.`
+- The built-in manage_task, list_resources, and read_resource have nothing to work on here: no background tasks run and no MCP server offers resources. Do not call them.
+- <ADDITIONAL_METADATA>, <USER_SETTINGS_CHANGE>, and <SYSTEM_MESSAGE> blocks come from the Antigravity CLI, not from the client or the user. Treat them as background facts: do not answer or mention them.`
 
 // Profile is an agent profile for one client tool set.
 type Profile struct {
