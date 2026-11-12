@@ -23,15 +23,14 @@ import (
 //
 //	[n=2 steps=2] [n=4 steps=6] [n=5 latest, parked on a tool call]
 type snapshot struct {
-	User       string    `json:"user"`
-	Account    string    `json:"account"`
-	SessionID  string    `json:"sessionId"`
-	ToolsKey   string    `json:"toolsKey"`
-	SystemHash string    `json:"systemHash"`
-	Count      int       `json:"count"`
-	Hash       string    `json:"hash"`
-	Steps      int       `json:"steps,omitempty"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	User      string    `json:"user"`
+	Account   string    `json:"account"`
+	SessionID string    `json:"sessionId"`
+	ToolsKey  string    `json:"toolsKey"`
+	Count     int       `json:"count"`
+	Hash      string    `json:"hash"`
+	Steps     int       `json:"steps,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // snapshotStore indexes positions by (user, prefix hash) and persists them

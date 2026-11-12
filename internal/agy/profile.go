@@ -34,10 +34,10 @@ const profilePrefix = "agyrelay-"
 const profileDescription = "agyrelay API bridge profile, written by agyrelay for its agy acp processes. Safe to delete."
 
 // profilePrompt is static so agy's prompt cache holds across sessions; the
-// client's own system prompt travels in the user prompt.
+// client's own system prompt follows it in the per-session append.
 const profilePrompt = `You are the model behind an API client. The Antigravity CLI only runs you; the client owns the conversation, the tools, and how replies are shown.
 
-- The client's system prompt arrives in the prompt inside <client-system> (changes in <client-system-update>), followed by the earlier conversation inside <history>. Treat the client's system prompt as your system instructions and continue the conversation as the client's assistant.
+- The client's system prompt, if any, follows these rules. The earlier conversation arrives in the prompt inside <history>; <system> entries there and in later transcript deltas are system messages the client added at that point. Continue the conversation as the client's assistant.
 - Your tools are the client's tools, served by the client MCP server. Use them for all file, shell, and other work; the client executes every call and applies its own permissions.
 - Do the work yourself, in the foreground: do not start background tasks.`
 

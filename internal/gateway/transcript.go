@@ -13,15 +13,17 @@ import (
 )
 
 // A transcript is the client's request split into what the planner needs:
-// the system text (never part of the reusable prefix) and the body, with
-// one key per message and chained prefix hashes.
+// the leading system messages, which become agy's system prompt, and the
+// body, with one key per message and chained prefix hashes. System messages
+// after the first other message stay in the body at their position.
 //
 //	body:    m1   m2   m3   m4
 //	keys:    k1   k2   k3   k4
-//	hashes:  h0   h1   h2   h3   h4      h[i] = sha256(h[i-1] ‖ 0 ‖ k[i])
+//	hashes:  h0   h1   h2   h3   h4      h0 = sha256(system)
+//	                                     h[i] = sha256(h[i-1] ‖ 0 ‖ k[i])
 //
 // A session snapshot with count n and hash h[n] matches every later request
-// whose first n body messages are unchanged.
+// with the same system prompt and the same first n body messages.
 type transcript struct {
 	system string
 	body   []conv.Message
@@ -31,31 +33,27 @@ type transcript struct {
 
 func newTranscript(messages []conv.Message) *transcript {
 	t := &transcript{}
+	leading := 0
 	var system []string
-	for _, m := range messages {
-		if m.Role == conv.RoleSystem {
-			if text := strings.TrimSpace(m.Text); text != "" {
-				system = append(system, text)
-			}
-			continue
+	for leading < len(messages) && messages[leading].Role == conv.RoleSystem {
+		if text := strings.TrimSpace(messages[leading].Text); text != "" {
+			system = append(system, text)
 		}
-		t.body = append(t.body, m)
+		leading++
 	}
 	t.system = strings.Join(system, "\n\n")
+	t.body = messages[leading:]
 	t.keys = make([]string, len(t.body))
 	for i, m := range t.body {
 		t.keys[i] = messageKey(m)
 	}
-	t.hashes = chainHashes("", t.keys)
+	t.hashes = chainHashes(hashString(t.system), t.keys)
 	return t
 }
 
-// chainHashes extends base (the hash of an empty prefix when "") by keys.
-// The result has len(keys)+1 entries; entry 0 is base.
+// chainHashes extends base by keys. The result has len(keys)+1 entries;
+// entry 0 is base.
 func chainHashes(base string, keys []string) []string {
-	if base == "" {
-		base = hashString("")
-	}
 	hashes := make([]string, 0, len(keys)+1)
 	hashes = append(hashes, base)
 	for _, key := range keys {
@@ -115,7 +113,7 @@ func toolsKey(tools []conv.ToolSpec) string {
 const (
 	continuationPrompt = "Continue the task from the latest tool results above."
 	imageOnlyPrompt    = "See the attached images."
-	deltaPrompt        = "Continue the task. The attached transcript delta lists, in order, the messages the client recorded after your last reply (tool results, user messages, other models' replies, or updated client system instructions). Attached images are numbered in delta order. The same tool rules as before apply."
+	deltaPrompt        = "Continue the task. The attached transcript delta lists, in order, the messages the client recorded after your last reply (tool results, user messages, other models' replies, or client system messages). Attached images are numbered in delta order. The same tool rules as before apply."
 	deltaURI           = "relay://transcript-delta"
 	historyPlaceholder = "[Image in original transcript]"
 )
@@ -138,6 +136,11 @@ func renderMessage(m conv.Message, imageBase int) string {
 			return ""
 		}
 		return "<user>\n" + content + "\n</user>"
+	case conv.RoleSystem:
+		if content == "" {
+			return ""
+		}
+		return "<system>\n" + content + "\n</system>"
 	case conv.RoleTool:
 		return fmt.Sprintf("<tool-result name=%q id=%q>\n%s\n</tool-result>", m.ToolName, m.ToolCallID, content)
 	case conv.RoleAssistant:
@@ -190,8 +193,9 @@ func newestInput(body []conv.Message) int {
 	return len(body)
 }
 
-// freshPrompt is the whole input for a new session: client system prompt,
-// history, then the newest user input verbatim with its images.
+// freshPrompt is the whole input for a new session: history, then the
+// newest user input verbatim with its images. The leading system messages
+// travel in agy's system prompt (sessionSpec).
 func freshPrompt(t *transcript) []agy.ContentBlock {
 	body := t.body
 	inputStart := newestInput(body)
@@ -206,9 +210,6 @@ func freshPrompt(t *transcript) []agy.ContentBlock {
 		}
 	}
 	var sections []string
-	if t.system != "" {
-		sections = append(sections, "<client-system>\n"+t.system+"\n</client-system>")
-	}
 	if history := renderHistory(body[:inputStart]); history != "" {
 		sections = append(sections, history)
 	}
@@ -217,10 +218,9 @@ func freshPrompt(t *transcript) []agy.ContentBlock {
 }
 
 // deltaPromptBlocks is the input for a warm session: plain user text when
-// only user messages were added and nothing else changed, else a transcript
-// delta resource.
-func deltaPromptBlocks(delta []conv.Message, systemUpdate string) []agy.ContentBlock {
-	onlyUsers := systemUpdate == ""
+// only user messages were added, else a transcript delta resource.
+func deltaPromptBlocks(delta []conv.Message) []agy.ContentBlock {
+	onlyUsers := true
 	for _, m := range delta {
 		if m.Role != conv.RoleUser {
 			onlyUsers = false
@@ -243,9 +243,6 @@ func deltaPromptBlocks(delta []conv.Message, systemUpdate string) []agy.ContentB
 	}
 
 	var parts []string
-	if systemUpdate != "" {
-		parts = append(parts, "<client-system-update>\n"+systemUpdate+"\n</client-system-update>")
-	}
 	var images []conv.Image
 	for _, m := range delta {
 		if text := renderMessage(m, len(images)); text != "" {
@@ -272,7 +269,8 @@ func withImages(text string, images []conv.Image) []agy.ContentBlock {
 }
 
 // toolResultText formats the client's tool result for the parked MCP call,
-// carrying user messages the client added after it as steering.
+// carrying the user and system messages the client added after it as
+// steering.
 func toolResultText(result conv.Message, trailing []conv.Message) string {
 	text := result.Text
 	var notes []string
@@ -287,5 +285,5 @@ func toolResultText(result conv.Message, trailing []conv.Message) string {
 	if text == "" {
 		text = "(no output)"
 	}
-	return text + "\n\n<client-steering>\nThe user sent a message while this tool was running. Address it immediately:\n" + strings.Join(notes, "\n\n") + "\n</client-steering>"
+	return text + "\n\n<client-steering>\nThe client added these messages while this tool was running. Address them immediately:\n" + strings.Join(notes, "\n\n") + "\n</client-steering>"
 }

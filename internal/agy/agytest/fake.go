@@ -417,10 +417,8 @@ func (f *fake) prompt(msg rpcMessage) {
 		}
 	}
 	f.chunk(p.SessionID, "user_message_chunk", input)
-	for _, end := range []string{"</client-system>", "</history>"} {
-		if i := strings.LastIndex(input, end); i >= 0 {
-			input = input[i+len(end):]
-		}
+	if i := strings.LastIndex(input, "</history>"); i >= 0 {
+		input = input[i+len("</history>"):]
 	}
 	input = strings.TrimSpace(input)
 

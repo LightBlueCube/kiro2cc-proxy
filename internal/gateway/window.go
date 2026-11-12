@@ -114,7 +114,7 @@ func (e *promptEstimator) estimate(modelID string, req conv.Request, t *transcri
 	counter := e.tokens.For(modelID)
 	texts := make([]string, 0, len(t.body)+len(req.Tools)+1)
 	if t.system != "" {
-		texts = append(texts, "<client-system>\n"+t.system+"\n</client-system>")
+		texts = append(texts, t.system)
 	}
 	total := agyPromptTokens
 	for _, m := range t.body {

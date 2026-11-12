@@ -61,7 +61,7 @@ func (g *Gateway) tryContinue(snap snapshot, r *run) *activeTurn {
 		return nil
 	}
 	at := sess.turn
-	sameTurn := at.parked != nil && !at.finished && at.choice == r.choice() && snap.SystemHash == hashString(r.t.system)
+	sameTurn := at.parked != nil && !at.finished && at.choice == r.choice()
 	if !sameTurn {
 		return nil
 	}
@@ -86,7 +86,7 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 	if err := account.Available(r.group); err != nil {
 		return nil, err
 	}
-	at, err := g.claimSession(ctx, snap, account, r.req.Tools)
+	at, err := g.claimSession(ctx, snap, account, r)
 	if err != nil {
 		if !errors.Is(err, errSessionBusy) && ctx.Err() == nil {
 			g.forget(snap.Account, snap.SessionID)
@@ -95,7 +95,7 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 	}
 	r.mode = ModeWarm
 	if snap.Steps > 0 {
-		rewound, err := g.rewindTo(ctx, at, snap, r.req.Tools)
+		rewound, err := g.rewindTo(ctx, at, snap, r)
 		if err != nil {
 			g.releaseClaim(at)
 			if ctx.Err() == nil {
@@ -111,21 +111,14 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 		g.releaseClaim(at)
 		return nil, err
 	}
-	systemUpdate := ""
-	if snap.SystemHash != hashString(r.t.system) {
-		systemUpdate = r.t.system
-		if systemUpdate == "" {
-			systemUpdate = "(The client removed its system prompt.)"
-		}
-	}
-	g.launch(at, account, r, deltaPromptBlocks(r.t.body[snap.Count:], systemUpdate), snap.Steps)
+	g.launch(at, account, r, deltaPromptBlocks(r.t.body[snap.Count:]), snap.Steps)
 	return at, nil
 }
 
 // rewindTo returns the claimed session to snap's position when turns ran
 // past it (later replies, or what a cancelled turn left), and reports
 // whether it did.
-func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, tools []conv.ToolSpec) (bool, error) {
+func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, r *run) (bool, error) {
 	g.mu.Lock()
 	proc, binding := at.sess.proc, at.sess.binding
 	g.mu.Unlock()
@@ -136,7 +129,7 @@ func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, t
 	if steps == snap.Steps {
 		return false, nil
 	}
-	if err := proc.Rewind(ctx, snap.SessionID, snap.Steps, sessionSpec(at.sess.account, binding, tools)); err != nil {
+	if err := proc.Rewind(ctx, snap.SessionID, snap.Steps, sessionSpec(at.sess.account, binding, r)); err != nil {
 		return false, err
 	}
 	g.log.Info("rewound session", "session", snap.SessionID, "steps", steps, "kept", snap.Steps)
@@ -149,7 +142,7 @@ func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, t
 // claimSession reserves the snapshot's session for a new turn, cancelling
 // the turn that runs there, and reopens the session when this process no
 // longer holds it.
-func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool.Account, tools []conv.ToolSpec) (*activeTurn, error) {
+func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool.Account, r *run) (*activeTurn, error) {
 	ref := sessionRef(snap.Account, snap.SessionID)
 	for {
 		g.mu.Lock()
@@ -188,7 +181,7 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 		if live {
 			return at, nil
 		}
-		if err := g.reopen(ctx, sess, tools); err != nil {
+		if err := g.reopen(ctx, sess, r); err != nil {
 			g.mu.Lock()
 			if sess.binding != nil {
 				sess.binding.Close()
@@ -202,10 +195,11 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 }
 
 // reopen restores a persisted session into the account's current process.
-func (g *Gateway) reopen(ctx context.Context, sess *session, tools []conv.ToolSpec) error {
+func (g *Gateway) reopen(ctx context.Context, sess *session, r *run) error {
 	if _, err := os.Stat(sess.account.ConversationStore(sess.id)); err != nil {
 		return fmt.Errorf("conversation store: %w", err)
 	}
+	tools := r.req.Tools
 	proc, err := sess.account.Proc(context.WithoutCancel(ctx), profileFor(tools))
 	if err != nil {
 		return err
@@ -214,7 +208,7 @@ func (g *Gateway) reopen(ctx context.Context, sess *session, tools []conv.ToolSp
 	if err != nil {
 		return err
 	}
-	if err := proc.ReopenSession(ctx, sess.id, sessionSpec(sess.account, binding, tools)); err != nil {
+	if err := proc.ReopenSession(ctx, sess.id, sessionSpec(sess.account, binding, r)); err != nil {
 		binding.Close()
 		return err
 	}
@@ -274,7 +268,7 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 	if err != nil {
 		return nil, err
 	}
-	id, models, err := proc.NewSession(ctx, sessionSpec(account, binding, r.req.Tools))
+	id, models, err := proc.NewSession(ctx, sessionSpec(account, binding, r))
 	if err != nil {
 		binding.Close()
 		return nil, err
@@ -311,7 +305,16 @@ func (g *Gateway) releaseClaim(at *activeTurn) {
 	g.mu.Unlock()
 }
 
-func sessionSpec(account *pool.Account, binding *bridge.Binding, tools []conv.ToolSpec) agy.SessionSpec {
+// sessionSpec appends the tool policy and the client's leading system
+// messages, verbatim, to agy's system prompt. A session always gets the
+// same text, since the system prompt seeds its prefix hashes: resuming a
+// live session with a different append adds it next to the old one
+// (verified on 1.5.3).
+func sessionSpec(account *pool.Account, binding *bridge.Binding, r *run) agy.SessionSpec {
+	appended := toolPolicy(r.req.Tools)
+	if r.t.system != "" {
+		appended += "\n\n" + r.t.system
+	}
 	return agy.SessionSpec{
 		Cwd: account.Workspace(),
 		MCPServers: []agy.MCPServer{{
@@ -320,7 +323,7 @@ func sessionSpec(account *pool.Account, binding *bridge.Binding, tools []conv.To
 			URL:     binding.URL(),
 			Headers: []agy.HTTPHeader{{Name: bridge.TokenHeader, Value: binding.Token()}},
 		}},
-		SystemAppend: toolPolicy(tools),
+		SystemAppend: appended,
 	}
 }
 
