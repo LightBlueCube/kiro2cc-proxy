@@ -82,6 +82,7 @@ var migrations = []string{
 		account       TEXT NOT NULL,
 		model         TEXT NOT NULL,
 		slug          TEXT NOT NULL,
+		effort        TEXT NOT NULL,
 		api           TEXT NOT NULL,
 		stream        INTEGER NOT NULL,
 		mode          TEXT NOT NULL,

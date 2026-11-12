@@ -18,6 +18,7 @@ type Request struct {
 	Account string
 	Model   string
 	Slug    string
+	Effort  string
 	API     string
 	Stream  bool
 	Mode    string
@@ -38,7 +39,7 @@ type Request struct {
 	QuotaUsed *float64
 }
 
-const requestColumns = `id, at, key_hash, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
+const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used`
 
 func (s *Store) AddRequest(ctx context.Context, r Request) error {
@@ -46,9 +47,9 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	if r.TTFT != nil {
 		ttft = sql.NullInt64{Int64: r.TTFT.Milliseconds(), Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish,
-		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.Model, r.Slug, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
+		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
 		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup)
 	return err
 }
@@ -113,7 +114,7 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		var at, duration int64
 		var ttft sql.NullInt64
 		var cost, quota sql.NullFloat64
-		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.Model, &r.Slug, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
+		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.Model, &r.Slug, &r.Effort, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
 			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota); err != nil {
 			return nil, err
 		}

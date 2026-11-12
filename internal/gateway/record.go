@@ -46,8 +46,10 @@ type Record struct {
 	API     string
 	Stream  bool
 	// Model is the public model id once resolved, else as requested.
-	Model      string
-	Slug       string
+	Model string
+	Slug  string
+	// Effort is the tier sent to agy, "" for a model without tiers.
+	Effort     string
 	QuotaGroup string
 	// Account and Mode are empty when no attempt started.
 	Account string
