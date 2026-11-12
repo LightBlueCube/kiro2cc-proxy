@@ -33,6 +33,14 @@ func (r *Recorder) SetPrices(prices []Price) {
 	r.mu.Unlock()
 }
 
+// priced reports whether the model has a price.
+func (r *Recorder) priced(model string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := priceOf(r.prices, model)
+	return ok
+}
+
 // Record implements gateway.Recorder.
 func (r *Recorder) Record(rec gateway.Record) {
 	row := store.Request{

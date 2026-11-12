@@ -189,34 +189,55 @@ function polling(container, interval, render) {
 
 const groupName = g => lookup("group", g) || g;
 
-// limitInputs makes one percent field per quota group; blank = unlimited.
-function limitInputs(groups, limits) {
-  const inputs = Object.fromEntries(groups.map(g => [g, h("input", {
-    type: "number", min: 0, max: 1000, step: "any", placeholder: t("keys.limit.placeholder"), style: "width:110px",
-    value: limits[g] === undefined ? "" : String(+(limits[g] * 100).toFixed(4)),
-  })]));
+
+// limitEditor picks a key's spend limit in list-price USD: none, one
+// total, or one per quota group (a blank group is unlimited).
+function limitEditor(groups, k) {
+  const usd = value => h("input", { type: "number", min: 0, step: "any", placeholder: t("keys.limit.placeholder"), style: "width:110px",
+    value: value === undefined || value === null ? "" : String(value) });
+  const total = usd(k.limit_total);
+  const perGroup = Object.fromEntries(groups.map(g => [g, usd(k.limits[g])]));
+  const initial = k.limit_total !== null ? "total" : Object.keys(k.limits).length ? "group" : "none";
+  const fields = h("div", { class: "row" });
+  const show = mode => {
+    total.required = mode === "total";
+    fields.replaceChildren(...(mode === "total" ? [h("label", {}, t("keys.limit.total"), total)]
+      : mode === "group" ? groups.map(g => h("label", {}, t("keys.limit.label", { group: groupName(g) }), perGroup[g])) : []));
+  };
+  const mode = h("select", { onchange: e => show(e.target.value) },
+    [["none", t("keys.limit.mode.none")], ["total", t("keys.limit.mode.total")], ["group", t("keys.limit.mode.group")]]
+      .map(([m, label]) => h("option", { value: m, selected: m === initial }, label)));
+  show(initial);
+  const groupLimits = () => Object.fromEntries(groups.filter(g => perGroup[g].value.trim() !== "").map(g => [g, Number(perGroup[g].value)]));
   return {
-    nodes: groups.map(g => h("label", {}, t("keys.limit.label", { group: groupName(g) }), inputs[g])),
-    read: () => Object.fromEntries(groups.filter(g => inputs[g].value.trim() !== "").map(g => [g, Number(inputs[g].value) / 100])),
+    nodes: [h("label", {}, t("keys.limit.mode"), mode), fields],
+    read: () => ({
+      limit_total: mode.value === "total" ? Number(total.value) : null,
+      limits: mode.value === "group" ? groupLimits() : {},
+    }),
   };
 }
 
-function usageCell(k, groups) {
-  const shown = groups.filter(g => k.limits[g] !== undefined || k.usage[g]);
+function spendBar(label, spent, limit, title) {
+  const level = spent >= limit ? "low" : spent >= limit * 0.8 ? "mid" : "";
+  const fill = limit > 0 ? Math.min(100, (spent / limit) * 100) : 100;
+  return h("div", { class: "row", title },
+    h("span", { style: "width:120px" }, label),
+    h("div", { class: "bar " + level, style: "width:120px" }, h("span", { style: `width:${fill}%` })),
+    h("span", { class: "mono" }, `${fmt.usd(spent)} / ${fmt.usd(limit)}`));
+}
+
+function spendCell(k, groups) {
+  const spent = g => k.spent[g] || 0;
+  if (k.limit_total !== null) {
+    const byGroup = groups.filter(g => spent(g) > 0).map(g => `${groupName(g)}: ${fmt.usd(spent(g))}`).join("\n");
+    return spendBar(t("keys.limit.mode.total"), Object.values(k.spent).reduce((a, b) => a + b, 0), k.limit_total, byGroup);
+  }
+  const shown = groups.filter(g => k.limits[g] !== undefined || spent(g) > 0);
   if (!shown.length) return h("span", { class: "muted" }, t("keys.usage.none"));
-  return shown.map(g => {
-    const u = k.usage[g] || { attributed: 0, estimated: 0 };
-    const used = u.attributed + u.estimated;
-    const limit = k.limits[g];
-    const title = t("keys.usage.split", { attributed: fmt.pct(u.attributed, 2), estimated: fmt.pct(u.estimated, 2) });
-    if (limit === undefined) return h("div", { title }, t("keys.usage.unlimited", { group: groupName(g), used: fmt.pct(used, 2) }));
-    const level = used >= limit ? "low" : used >= limit * 0.8 ? "mid" : "";
-    const fill = limit > 0 ? Math.min(100, (used / limit) * 100) : 100;
-    return h("div", { class: "row", title },
-      h("span", { style: "width:120px" }, groupName(g)),
-      h("div", { class: "bar " + level, style: "width:120px" }, h("span", { style: `width:${fill}%` })),
-      h("span", { class: "mono" }, `${fmt.pct(used, 2)} / ${fmt.pct(limit, 1)}`));
-  });
+  return shown.map(g => k.limits[g] === undefined
+    ? h("div", {}, t("keys.usage.unlimited", { group: groupName(g), spent: fmt.usd(spent(g)) }))
+    : spendBar(groupName(g), spent(g), k.limits[g]));
 }
 
 // modelPicker lists the catalog's model ids as checkboxes; none checked
@@ -251,7 +272,7 @@ views.keys = container => {
   const form = h("form", { onsubmit: event => {
     event.preventDefault();
     guarded(async () => {
-      const data = await api("POST", "keys", { name: name.value, note: note.value, models: newModels.read(), limits: newLimits.read() });
+      const data = await api("POST", "keys", { name: name.value, note: note.value, models: newModels.read(), ...newLimits.read() });
       created.replaceChildren(h("div", { class: "card" },
         h("h2", {}, t("keys.created.title", { name: name.value })),
         h("p", { class: "muted" }, t("keys.created.note")),
@@ -274,7 +295,7 @@ views.keys = container => {
     groups = data.groups;
     catalog = models;
     if (!newLimits) {
-      newLimits = limitInputs(groups, {});
+      newLimits = limitEditor(groups, { limit_total: null, limits: {} });
       limitsRow.replaceChildren(...newLimits.nodes);
     }
     if (!newModels) {
@@ -286,7 +307,7 @@ views.keys = container => {
       { title: t("keys.col.hash"), hint: t("keys.col.hash.hint"), cell: k => hashText(k.hash) },
       { title: t("common.note"), cell: k => k.note || h("span", { class: "muted" }, "—") },
       { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
-      { title: t("keys.col.usage"), cell: k => usageCell(k, groups) },
+      { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
       { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
       { title: "", cell: k => k.revoked_at
           ? h("span", { class: "row" }, t("keys.revoked", { time: fmt.time(k.revoked_at) }),
@@ -301,11 +322,11 @@ views.keys = container => {
   function editKey(k) {
     const noteInput = h("input", { value: k.note });
     const models = modelPicker(catalog, k.models);
-    const limits = limitInputs(groups, k.limits);
+    const limits = limitEditor(groups, k);
     const save = event => {
       event.preventDefault();
       guarded(async () => {
-        await api("PATCH", `keys/${k.hash}`, { note: noteInput.value, models: models.read(), limits: limits.read() });
+        await api("PATCH", `keys/${k.hash}`, { note: noteInput.value, models: models.read(), ...limits.read() });
         editor.replaceChildren();
         toast(t("common.saved"));
         await load();
@@ -833,7 +854,7 @@ views.calls = container => {
     const select = (field, options, all) => h("select", { onchange: e => { state[field] = e.target.value; reload(); } },
       h("option", { value: "" }, all), options.map(([v, label]) => h("option", { value: v, selected: v === state[field] }, label)));
     const plain = values => values.map(v => [v, v]);
-    const metrics = [["cost", t("calls.metric.cost")], ["tokens", t("calls.metric.tokens")], ["quota", t("calls.metric.quota")]];
+    const metrics = [["cost", t("calls.metric.cost")], ["tokens", t("calls.metric.tokens")]];
     filters.replaceChildren(
       h("label", {}, t("calls.range"), h("select", { onchange: e => { state.range = e.target.value; reload(); } },
         Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
@@ -846,12 +867,47 @@ views.calls = container => {
       h("button", { onclick: e => guarded(reload, e.target) }, t("common.refresh")));
   }
 
+  const stat = (label, value, hint) => h("div", { title: hint || "" }, h("div", { class: "muted" }, label), h("div", { style: "font-size:18px;font-weight:600" }, value));
+
+  // quota is the weekly-quota report: uses by key, account, and group, and
+  // by group the accounts with that weekly bucket.
+  let quota = { accounts: {}, uses: [] };
+  // quotaText lists shares by group: "Gemini 0.05% · Claude + GPT 0.11%".
+  const quotaText = (byGroup, digits) => joined(...Object.entries(byGroup)
+    .map(([g, share]) => [groupName(g), share])
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, share]) => `${name} ${fmt.pct(share, digits)}`));
+
+  // accountQuota adds up each account's shares by group; shares of
+  // different accounts stay apart, since plans differ in bucket size.
+  function accountQuota() {
+    const byAccount = {};
+    for (const u of quota.uses) {
+      const groups = byAccount[u.account] ||= {};
+      groups[u.group] = (groups[u.group] || 0) + u.used;
+    }
+    const accounts = Object.keys(byAccount).sort();
+    if (!accounts.length) return "—";
+    return accounts.map(a => h("div", { class: "mono", style: "font-size:13px" }, `${a}: ${quotaText(byAccount[a], 2)}`));
+  }
+
+  // keyQuota shows the key's average share over the accounts with each
+  // group's bucket (an account it did not use counts as 0), and each
+  // account's share on hover.
+  function keyQuota(hash) {
+    const mine = quota.uses.filter(u => u.key_hash === hash);
+    if (!mine.length) return null;
+    const average = {};
+    for (const u of mine) average[u.group] = (average[u.group] || 0) + u.used / quota.accounts[u.group].length;
+    const byAccount = mine.map(u => `${u.account} · ${groupName(u.group)}: ${fmt.pct(u.used, 3)}`);
+    return term(t("calls.quota_average", { quota: quotaText(average, 2) }), [t("calls.quota_average.hint"), ...byAccount].join("\n"));
+  }
+
   function renderTotals(sums) {
     const sum = sums.reduce((a, s) => {
-      for (const k of ["requests", "errors", "input", "cached", "output", "reasoning", "cost_usd", "unpriced", "quota_used"]) a[k] = (a[k] || 0) + s[k];
+      for (const k of ["requests", "errors", "input", "cached", "output", "reasoning", "cost_usd", "unpriced"]) a[k] = (a[k] || 0) + s[k];
       return a;
     }, {});
-    const stat = (label, value, hint) => h("div", { title: hint || "" }, h("div", { class: "muted" }, label), h("div", { style: "font-size:18px;font-weight:600" }, value));
     const price = fmt.usd(sum.cost_usd || 0) + (sum.unpriced ? " " + t("calls.total.unpriced", { count: sum.unpriced }) : "");
     totals.replaceChildren(h("div", { class: "row", style: "gap:28px" },
       stat(t("common.requests"), fmt.int(sum.requests || 0)),
@@ -861,7 +917,7 @@ views.calls = container => {
       stat(t("calls.total.cache_hit"), fmt.pct(cachePct(sum.input, sum.cached))),
       stat(t("calls.total.output"), fmt.compact(sum.output)),
       stat(t("calls.total.price"), price),
-      stat(t("calls.total.quota"), fmt.pct(sum.quota_used || 0, 2), t("calls.total.quota.hint"))));
+      h("div", { title: t("calls.total.quota.hint") }, h("div", { class: "muted" }, t("calls.total.quota")), accountQuota())));
   }
 
   let dayKey = [];
@@ -883,9 +939,9 @@ views.calls = container => {
     const valueOf = (day, key) => {
       const s = cell.get(day + "\x1f" + key);
       if (!s) return 0;
-      return state.metric === "cost" ? s.cost_usd : state.metric === "quota" ? s.quota_used : s.input + s.output;
+      return state.metric === "cost" ? s.cost_usd : s.input + s.output;
     };
-    const label = state.metric === "cost" ? fmt.usd : state.metric === "quota" ? (v => fmt.pct(v, 2)) : fmt.compact;
+    const label = state.metric === "cost" ? fmt.usd : fmt.compact;
     chart.replaceChildren(h("h2", {}, t("calls.per_day")),
       keys.length ? stackedBars(days, keys, k => keyText(names.get(k), k), valueOf, label) : h("p", { class: "muted" }, t("calls.no_calls")),
       h("div", { class: "legend" }, keys.map((k, i) => h("span", {}, h("i", { style: `background:${PALETTE[i % PALETTE.length]}` }), keyName(names.get(k), k)))));
@@ -898,7 +954,7 @@ views.calls = container => {
       { title: t("calls.tokens"), num: true, cell: s => tokensCell(s) },
       { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: s => stack(
           [fmt.usd(s.cost_usd), s.unpriced ? term("*", t("calls.unpriced", { count: s.unpriced })) : ""],
-          t("calls.quota_share", { pct: fmt.pct(s.quota_used, 2) })) },
+          keyQuota(s.group)) },
     ], sums));
   }
 
@@ -927,8 +983,10 @@ views.calls = container => {
 
   async function reload() {
     const tz = String(-new Date().getTimezoneOffset());
-    const [keySums, dayKeySums] = await Promise.all([api("GET", "usage?" + query({ by: "key", tz })), api("GET", "usage?" + query({ by: "day_key", tz }))]);
+    const [keySums, dayKeySums, quotaReport] = await Promise.all([
+      api("GET", "usage?" + query({ by: "key", tz })), api("GET", "usage?" + query({ by: "day_key", tz })), api("GET", "usage/quota?" + query({}))]);
     dayKey = dayKeySums;
+    quota = quotaReport;
     renderTotals(keySums);
     renderChart();
     renderByKey(keySums);

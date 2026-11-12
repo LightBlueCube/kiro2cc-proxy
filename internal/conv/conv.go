@@ -135,15 +135,23 @@ type Caller struct {
 	Name string
 	// Models limits the key to these model ids; empty allows all.
 	Models []string
-	// Limits caps the key's total quota use (it never resets) by quota
-	// group, as a share of one account's weekly bucket; absent groups are
-	// unlimited.
+	// LimitTotal caps the key's whole list-price spend in USD (it never
+	// resets); nil is no total limit.
+	LimitTotal *float64
+	// Limits caps the spend by quota group in USD; absent groups are
+	// unlimited. At most one of LimitTotal and Limits is set.
 	Limits map[string]float64
 }
 
 // Allows reports whether the caller may use the model id.
 func (c Caller) Allows(modelID string) bool {
 	return len(c.Models) == 0 || slices.Contains(c.Models, modelID)
+}
+
+// LimitedIn reports whether a spend limit covers the quota group.
+func (c Caller) LimitedIn(group string) bool {
+	_, grouped := c.Limits[group]
+	return c.LimitTotal != nil || grouped
 }
 
 // ModelInfo is one model the gateway serves.

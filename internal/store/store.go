@@ -18,7 +18,7 @@ import (
 var migrations = []string{
 	// api_keys.hash is the key's lowercase hex SHA-256 and identifies it;
 	// requests keep the key's name for display after the key is deleted.
-	// key_usage keeps each key's attributed quota after old requests are
+	// key_usage keeps each key's list-price spend after old requests are
 	// pruned; key limits count it.
 	`CREATE TABLE settings (
 		name  TEXT PRIMARY KEY,
@@ -32,13 +32,14 @@ var migrations = []string{
 		created_at INTEGER NOT NULL
 	);
 	CREATE TABLE api_keys (
-		hash       TEXT PRIMARY KEY,
-		name       TEXT NOT NULL UNIQUE,
-		note       TEXT NOT NULL,
-		models     TEXT NOT NULL,
-		limits     TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		revoked_at INTEGER
+		hash        TEXT PRIMARY KEY,
+		name        TEXT NOT NULL UNIQUE,
+		note        TEXT NOT NULL,
+		models      TEXT NOT NULL,
+		limit_total REAL,
+		limits      TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		revoked_at  INTEGER
 	);
 	CREATE TABLE admin_sessions (
 		token_hash BLOB PRIMARY KEY,
@@ -106,7 +107,7 @@ var migrations = []string{
 	CREATE TABLE key_usage (
 		key_hash TEXT NOT NULL,
 		grp      TEXT NOT NULL,
-		used     REAL NOT NULL,
+		cost_usd REAL NOT NULL,
 		PRIMARY KEY (key_hash, grp)
 	);`,
 }

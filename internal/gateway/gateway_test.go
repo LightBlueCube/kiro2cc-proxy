@@ -70,7 +70,7 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 		t.Fatal(err)
 	}
 	records := &recordLog{}
-	budget := &fakeBudget{used: map[string]float64{}}
+	budget := &fakeBudget{spent: map[string]map[string]float64{}, unpriced: map[string]bool{}}
 	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Log: logger})
 	if err != nil {
 		t.Fatal(err)
@@ -83,25 +83,37 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 	return &harness{t: t, gw: gw, p: p, log: logPath, records: records, budget: budget}
 }
 
-// fakeBudget reports set usage by key and group and counts its calls.
+// fakeBudget reports set spend by key and group, prices every model but
+// those in unpriced, and counts its calls.
 type fakeBudget struct {
-	mu    sync.Mutex
-	used  map[string]float64
-	err   error
-	calls int
+	mu       sync.Mutex
+	spent    map[string]map[string]float64
+	unpriced map[string]bool
+	err      error
+	calls    int
 }
 
-func (b *fakeBudget) set(key, group string, used float64) {
+func (b *fakeBudget) set(key, group string, spent float64) {
 	b.mu.Lock()
-	b.used[key+"\x00"+group] = used
+	if b.spent[key] == nil {
+		b.spent[key] = map[string]float64{}
+	}
+	b.spent[key][group] = spent
 	b.mu.Unlock()
 }
 
-func (b *fakeBudget) Used(_ context.Context, key, group string) (float64, error) {
+func (b *fakeBudget) Spent(_ context.Context, key string) (map[string]float64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls++
-	return b.used[key+"\x00"+group], b.err
+	return b.spent[key], b.err
+}
+
+func (b *fakeBudget) Priced(model string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls++
+	return !b.unpriced[model]
 }
 
 type recordLog struct {
@@ -329,20 +341,56 @@ func TestKeyLimits(t *testing.T) {
 		t.Fatalf("unlimited key: %+v, budget calls %d", r, h.budget.calls)
 	}
 
+	// A group limit counts that group's spend only.
 	alice := testCaller("alice")
-	alice.Limits = map[string]float64{"gemini": 0.3}
-	h.budget.set(alice.KeyHash, "gemini", 0.29)
+	alice.Limits = map[string]float64{"gemini": 3}
+	h.budget.set(alice.KeyHash, "gemini", 2.99)
+	h.budget.set(alice.KeyHash, "claude-gpt", 50)
+	bob := testCaller("bob")
+	bob.Limits = map[string]float64{"gemini": 0.0003}
+	h.budget.set(bob.KeyHash, "gemini", 0.000528)
+	if r := h.completeAs(ctx, bob, req); r.err == nil || !strings.Contains(r.err.Message, "spent $0.0005 of its $0.0003 limit") {
+		t.Fatalf("sub-dollar amounts: %+v", r.err)
+	}
 	if r := h.completeAs(ctx, alice, req); r.err != nil {
-		t.Fatalf("under the limit: %+v", r)
+		t.Fatalf("under the group limit: %+v", r)
 	}
-	h.budget.set(alice.KeyHash, "gemini", 0.3)
+	h.budget.set(alice.KeyHash, "gemini", 3)
 	r := h.completeAs(ctx, alice, req)
-	if r.err == nil || r.err.Kind != conv.ErrKeyLimit || !strings.Contains(r.err.Message, "30.00% of its 30.00% limit on gemini quota") {
-		t.Fatalf("at the limit: %+v", r.err)
+	if r.err == nil || r.err.Kind != conv.ErrKeyLimit || !strings.Contains(r.err.Message, "spent $3.00 of its $3.00 limit on gemini models") {
+		t.Fatalf("at the group limit: %+v", r.err)
 	}
-	if n := len(h.requests("session/prompt")); n != 2 {
-		t.Fatalf("prompts = %d, want 2 (the refused request reaches no agy)", n)
+
+	// A total limit counts every group.
+	carol := testCaller("carol")
+	total := 1.0
+	carol.LimitTotal = &total
+	h.budget.set(carol.KeyHash, "claude-gpt", 0.5)
+	if r := h.completeAs(ctx, carol, req); r.err != nil {
+		t.Fatalf("under the total limit: %+v", r)
 	}
+	h.budget.set(carol.KeyHash, "gemini", 0.5)
+	r = h.completeAs(ctx, carol, req)
+	if r.err == nil || r.err.Kind != conv.ErrKeyLimit || !strings.Contains(r.err.Message, "spent $1.00 of its $1.00 limit (at API list prices)") {
+		t.Fatalf("at the total limit: %+v", r.err)
+	}
+	if n := len(h.requests("session/prompt")); n != 3 {
+		t.Fatalf("prompts = %d, want 3 (refused requests reach no agy)", n)
+	}
+
+	// An unpriced model is refused to keys whose limit covers its group.
+	h.budget.unpriced["gemini-3.8-flash"] = true
+	dave := testCaller("dave")
+	dave.Limits = map[string]float64{"claude-gpt": 1}
+	if r := h.completeAs(ctx, dave, req); r.err != nil {
+		t.Fatalf("unpriced model outside the limited group: %+v", r.err)
+	}
+	r = h.completeAs(ctx, alice, req)
+	if r.err == nil || r.err.Kind != conv.ErrForbidden || !strings.Contains(r.err.Message, `model "gemini-3.8-flash" has no price`) ||
+		!strings.Contains(r.err.Message, "ask the agyrelay admin to add its price") {
+		t.Fatalf("unpriced model: %+v", r.err)
+	}
+	delete(h.budget.unpriced, "gemini-3.8-flash")
 
 	h.budget.err = errors.New("disk on fire")
 	if r := h.completeAs(ctx, alice, req); r.err == nil || r.err.Kind != conv.ErrUnavailable {

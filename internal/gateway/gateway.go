@@ -46,7 +46,7 @@ type Config struct {
 	IdleClose time.Duration
 	// Recorder, when set, receives a record of every request.
 	Recorder Recorder
-	// Budget measures key quota use; it must be set when keys have limits.
+	// Budget measures key spend; it must be set when keys have limits.
 	Budget Budget
 	// ContextCheck turns on the check of prompts against ContextWindows.
 	ContextCheck   bool
@@ -54,10 +54,12 @@ type Config struct {
 	Log            *slog.Logger
 }
 
-// Budget reports an API key's weekly-quota use in a quota group, as a
-// share of one account's weekly bucket.
+// Budget reports API keys' list-price spend.
 type Budget interface {
-	Used(ctx context.Context, keyHash, group string) (float64, error)
+	// Spent is the key's spend in USD by quota group.
+	Spent(ctx context.Context, keyHash string) (map[string]float64, error)
+	// Priced reports whether the model has a price, which spend needs.
+	Priced(modelID string) bool
 }
 
 type Gateway struct {
@@ -241,7 +243,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if !caller.Allows(modelID) {
 		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf("this API key may not use model %q", modelID)}
 	}
-	if err := g.checkLimit(ctx, caller, rec.QuotaGroup); err != nil {
+	if err := g.checkLimit(ctx, caller, modelID, rec.QuotaGroup); err != nil {
 		return err
 	}
 	estimate, err := g.checkContextWindow(req, t, modelID)
@@ -275,24 +277,47 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	}
 }
 
-// checkLimit refuses a key that used up its limit for the quota group. A
-// turn running when the limit is reached finishes; later requests,
-// including those continuing a parked turn, are refused.
-func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, group string) *conv.Error {
-	limit, limited := caller.Limits[group]
-	if !limited {
+// checkLimit refuses a key that spent its limit: the total, or the quota
+// group's. A model without a price would spend nothing, so a limited key
+// may not use it. A turn running when the limit is reached finishes;
+// later requests, including those continuing a parked turn, are refused.
+func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, modelID, group string) *conv.Error {
+	if !caller.LimitedIn(group) {
 		return nil
 	}
-	used, err := g.budget.Used(ctx, caller.KeyHash, group)
+	if !g.budget.Priced(modelID) {
+		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf(
+			"this API key has a spending limit, and model %q has no price in agyrelay; ask the agyrelay admin to add its price (Settings → API list prices)", modelID)}
+	}
+	spent, err := g.budget.Spent(ctx, caller.KeyHash)
 	if err != nil {
 		g.log.Error("key limit check failed", "key", caller.Name, "err", err)
-		return &conv.Error{Kind: conv.ErrUnavailable, Message: "could not check this API key's usage limit"}
+		return &conv.Error{Kind: conv.ErrUnavailable, Message: "could not check this API key's spending limit"}
 	}
-	if used >= limit {
+	if caller.LimitTotal != nil {
+		total := 0.0
+		for _, cost := range spent {
+			total += cost
+		}
+		if total >= *caller.LimitTotal {
+			return &conv.Error{Kind: conv.ErrKeyLimit, Message: fmt.Sprintf(
+				"this API key spent %s of its %s limit (at API list prices)", usd(total), usd(*caller.LimitTotal))}
+		}
+		return nil
+	}
+	if limit := caller.Limits[group]; spent[group] >= limit {
 		return &conv.Error{Kind: conv.ErrKeyLimit, Message: fmt.Sprintf(
-			"this API key used %.2f%% of its %.2f%% limit on %s quota (100%% = one account's weekly bucket)", used*100, limit*100, group)}
+			"this API key spent %s of its %s limit on %s models (at API list prices)", usd(spent[group]), usd(limit), group)}
 	}
 	return nil
+}
+
+// usd formats dollars with cents, and sub-dollar amounts to 1/100 cent.
+func usd(v float64) string {
+	if v >= 1 {
+		return fmt.Sprintf("$%.2f", v)
+	}
+	return fmt.Sprintf("$%.4f", v)
 }
 
 // checkContextWindow refuses a request whose estimated prompt exceeds the

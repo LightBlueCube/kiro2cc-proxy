@@ -52,16 +52,13 @@ type keyView struct {
 	Name   string   `json:"name"`
 	Note   string   `json:"note"`
 	Models []string `json:"models"`
-	// Limits and Usage are weekly-quota shares (0.3 = 30%) by quota group.
-	Limits    map[string]float64 `json:"limits"`
-	Usage     map[string]useView `json:"usage"`
-	CreatedAt time.Time          `json:"created_at"`
-	RevokedAt *time.Time         `json:"revoked_at"`
-}
-
-type useView struct {
-	Attributed float64 `json:"attributed"`
-	Estimated  float64 `json:"estimated"`
+	// LimitTotal, Limits, and Spent are list-price USD; Limits and Spent
+	// are by quota group.
+	LimitTotal *float64           `json:"limit_total"`
+	Limits     map[string]float64 `json:"limits"`
+	Spent      map[string]float64 `json:"spent"`
+	CreatedAt  time.Time          `json:"created_at"`
+	RevokedAt  *time.Time         `json:"revoked_at"`
 }
 
 type keysView struct {
@@ -76,22 +73,22 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "list keys", err)
 		return
 	}
-	uses, err := h.control.KeyUses(r.Context())
+	spends, err := h.control.KeySpends(r.Context())
 	if err != nil {
-		h.internalError(w, "key usage", err)
+		h.internalError(w, "key spend", err)
 		return
 	}
 	out := keysView{Keys: []keyView{}, Groups: usage.Groups}
 	for _, k := range keys {
-		v := keyView{Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, Limits: k.Limits, Usage: map[string]useView{}, CreatedAt: k.CreatedAt}
+		v := keyView{Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spends[k.Hash], CreatedAt: k.CreatedAt}
 		if v.Models == nil {
 			v.Models = []string{}
 		}
 		if v.Limits == nil {
 			v.Limits = map[string]float64{}
 		}
-		for group, use := range uses[k.Hash] {
-			v.Usage[group] = useView{Attributed: use.Attributed, Estimated: use.Estimated}
+		if v.Spent == nil {
+			v.Spent = map[string]float64{}
 		}
 		if !k.RevokedAt.IsZero() {
 			revoked := k.RevokedAt
@@ -103,14 +100,15 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 type keyRequest struct {
-	Name   string             `json:"name"`
-	Note   string             `json:"note"`
-	Models []string           `json:"models"`
-	Limits map[string]float64 `json:"limits"`
+	Name       string             `json:"name"`
+	Note       string             `json:"note"`
+	Models     []string           `json:"models"`
+	LimitTotal *float64           `json:"limit_total"`
+	Limits     map[string]float64 `json:"limits"`
 }
 
 func (k keyRequest) update() store.KeyUpdate {
-	return store.KeyUpdate{Note: k.Note, Models: k.Models, Limits: k.Limits}
+	return store.KeyUpdate{Note: k.Note, Models: k.Models, LimitTotal: k.LimitTotal, Limits: k.Limits}
 }
 
 func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {

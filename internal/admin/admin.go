@@ -100,6 +100,7 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/requests", h.authed(h.listRequests))
 	h.mux.HandleFunc("GET /admin/api/usage", h.authed(h.summarize))
 	h.mux.HandleFunc("GET /admin/api/usage/filters", h.authed(h.filterValues))
+	h.mux.HandleFunc("GET /admin/api/usage/quota", h.authed(h.quota))
 
 	h.mux.HandleFunc("GET /admin/api/models", h.authed(h.listModels))
 	h.mux.HandleFunc("GET /admin/api/keys", h.authed(h.listKeys))

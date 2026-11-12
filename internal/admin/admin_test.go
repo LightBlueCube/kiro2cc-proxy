@@ -62,17 +62,17 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	budget := usage.NewBudget(st)
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Log: log})
-	if err != nil {
-		t.Fatal(err)
-	}
 	settings, err := control.LoadSettings(context.Background(), st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor := usage.NewMonitor(usage.MonitorConfig{Store: st, Pool: p, Profile: gateway.IdleProfile(), Log: log})
 	recorder := usage.NewRecorder(st, settings.Prices, log)
+	budget := usage.NewBudget(st, recorder)
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := usage.NewMonitor(usage.MonitorConfig{Store: st, Pool: p, Profile: gateway.IdleProfile(), Log: log})
 	outbound, err := egress.Start(log)
 	if err != nil {
 		t.Fatal(err)
@@ -323,28 +323,43 @@ func TestKeyLimits(t *testing.T) {
 	}
 	c := e.client("203.0.113.1")
 	c.login(testPassword)
-	for _, limits := range []map[string]float64{{"nope": 0.1}, {"gemini": -0.1}, {"gemini": 11}} {
-		if r := c.do("POST", "/admin/api/keys", map[string]any{"name": "bad", "limits": limits}, nil); r.status != http.StatusBadRequest {
-			t.Fatalf("limits %v = %d %s", limits, r.status, r.raw)
+	for _, bad := range []map[string]any{
+		{"limits": map[string]float64{"nope": 1}},
+		{"limits": map[string]float64{"gemini": -0.1}},
+		{"limit_total": -1},
+		{"limit_total": 5, "limits": map[string]float64{"gemini": 1}},
+	} {
+		bad["name"] = "bad"
+		if r := c.do("POST", "/admin/api/keys", bad, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("limits %v = %d %s", bad, r.status, r.raw)
 		}
 	}
-	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "limits": map[string]float64{"claude-gpt": 0.3}}, nil)
+	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "limits": map[string]float64{"claude-gpt": 30}}, nil)
 	token, _ := r.body["key"].(string)
-	if caller, ok := e.ctl.Lookup(token); !ok || caller.Limits["claude-gpt"] != 0.3 || len(caller.Limits) != 1 {
+	if caller, ok := e.ctl.Lookup(token); !ok || caller.Limits["claude-gpt"] != 30 || len(caller.Limits) != 1 || caller.LimitTotal != nil {
 		t.Fatalf("lookup = %+v %v (%s)", caller, ok, r.raw)
 	}
 
 	r = c.do("GET", "/admin/api/keys", nil, nil)
 	var list keysView
 	json.Unmarshal([]byte(r.raw), &list)
-	if len(list.Keys) != 1 || list.Keys[0].Limits["claude-gpt"] != 0.3 || len(list.Groups) != 3 {
+	if len(list.Keys) != 1 || list.Keys[0].Limits["claude-gpt"] != 30 || list.Keys[0].LimitTotal != nil || len(list.Groups) != 3 {
 		t.Fatalf("keys = %s", r.raw)
 	}
-	if r := c.do("PATCH", "/admin/api/keys/"+list.Keys[0].Hash, map[string]any{"note": "n", "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
+
+	// Switching to a total limit drops the group limits.
+	hash := list.Keys[0].Hash
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"note": "n", "limit_total": 20, "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
 		t.Fatalf("update = %d %s", r.status, r.raw)
 	}
-	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 {
-		t.Fatalf("limits after clearing = %v", caller.Limits)
+	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.LimitTotal == nil || *caller.LimitTotal != 20 {
+		t.Fatalf("after switching to a total = %+v", caller)
+	}
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"note": "n"}, nil); r.status != http.StatusOK {
+		t.Fatalf("clear = %d %s", r.status, r.raw)
+	}
+	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.LimitTotal != nil {
+		t.Fatalf("limits after clearing = %+v", caller)
 	}
 }
 

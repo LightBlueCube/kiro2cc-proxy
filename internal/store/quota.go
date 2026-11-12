@@ -40,6 +40,26 @@ func (s *Store) LastQuotaSample(ctx context.Context, account, bucket string, bef
 		WHERE account = ? AND bucket = ? AND at < ? ORDER BY at DESC LIMIT 1`, account, bucket, before.UnixMilli()))
 }
 
+// BucketAccounts lists by bucket the configured accounts that have
+// samples of it.
+func (s *Store) BucketAccounts(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT bucket, account FROM quota_samples
+		WHERE account IN (SELECT name FROM accounts) ORDER BY 1, 2`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var bucket, account string
+		if err := rows.Scan(&bucket, &account); err != nil {
+			return nil, err
+		}
+		out[bucket] = append(out[bucket], account)
+	}
+	return out, rows.Err()
+}
+
 // QuotaCursor returns the sample the bucket's attribution has reached:
 // drops up to it are attributed (or known to be nobody's).
 func (s *Store) QuotaCursor(ctx context.Context, account, bucket string) (QuotaSample, error) {
