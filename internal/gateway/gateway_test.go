@@ -510,11 +510,12 @@ func TestSystemMessagePlacement(t *testing.T) {
 }
 
 func TestHistoryNamesToolsAsTheModelCallsThem(t *testing.T) {
-	call := conv.Message{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "read", Arguments: json.RawMessage(`{}`)}}}
+	call := conv.Message{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "read", Arguments: json.RawMessage(`{"path":"a.go"}`)}}}
 	result := conv.Message{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "read", Text: "x"}
 	orphan := conv.Message{Role: conv.RoleTool, ToolCallID: "c0", Text: "y"}
 	got := renderHistory([]conv.Message{call, result, orphan})
-	for _, want := range []string{`<assistant-tool-call name="mcp_client_read" id="c1">`, `<tool-result name="mcp_client_read" id="c1">`, `<tool-result name="" id="c0">`} {
+	for _, want := range []string{"<assistant-tool-call name=\"mcp_client_read\" id=\"c1\">\n{\"path\":\"a.go\",\"toolSummary\":\"\"}\n",
+		`<tool-result name="mcp_client_read" id="c1">`, `<tool-result name="" id="c0">`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("history lacks %s:\n%s", want, got)
 		}
