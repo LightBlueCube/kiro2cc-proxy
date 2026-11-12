@@ -179,17 +179,16 @@ func runServe(args []string) error {
 	}
 	go ctl.RunRetention(ctx)
 
-	var adminUI http.Handler
-	if cfg.loopbackOnly() {
-		adminUI = admin.New(admin.Config{
-			Store: st, Control: ctl, Pool: accountPool, Monitor: monitor, Logs: logs, Log: log.With("component", "admin"),
-		})
-	} else {
-		log.Warn("admin UI disabled: it needs a loopback listen address behind a TLS tunnel or proxy", "listen", cfg.Listen)
+	adminUI := admin.New(admin.Config{
+		Store: st, Control: ctl, Pool: accountPool, Monitor: monitor, Logs: logs, Log: log.With("component", "admin"), Proxies: cfg.proxies,
+	})
+	if !cfg.loopbackOnly() {
+		log.Warn("serving plain HTTP beyond loopback: put a TLS reverse proxy in front; admin sign-in works over HTTPS only",
+			"listen", cfg.Listen, "trusted_proxies", cfg.proxies)
 	}
 
 	httpServer := &http.Server{
-		Handler:           server.New(server.Config{Keys: ctl, OpenAI: openai.NewHandler(gw), Admin: adminUI}),
+		Handler:           server.New(server.Config{Keys: ctl, OpenAI: openai.NewHandler(gw), Admin: adminUI, Proxies: cfg.proxies}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	// Bound before "listening" is logged: deploy/install.sh waits for it.
