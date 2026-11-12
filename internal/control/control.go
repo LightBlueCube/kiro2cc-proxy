@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,7 +211,7 @@ type Control struct {
 
 	mu       sync.Mutex
 	settings Settings
-	keys     map[[sha256.Size]byte]conv.Caller
+	keys     map[string]conv.Caller // by key hash
 	logins   map[string]*pendingLogin
 }
 
@@ -466,11 +467,17 @@ func (c *Control) Lookup(token string) (conv.Caller, bool) {
 	if token == "" {
 		return conv.Caller{}, false
 	}
-	sum := sha256.Sum256([]byte(token))
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	caller, ok := c.keys[sum]
+	caller, ok := c.keys[keyHash(token)]
 	return caller, ok
+}
+
+// keyHash is the key's lowercase hex SHA-256, the same as
+// `printf %s "$KEY" | sha256sum`.
+func keyHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (c *Control) Keys(ctx context.Context) ([]store.Key, error) { return c.cfg.Store.Keys(ctx) }
@@ -496,10 +503,10 @@ func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate)
 	}
 	token := keyPrefix + rand.Text()
 	_, err := c.cfg.Store.AddKey(ctx, store.Key{
-		Name: name, SHA256: sha256.Sum256([]byte(token)), Note: u.Note, Models: cleanModels(u.Models), Limits: u.Limits, CreatedAt: time.Now(),
+		Name: name, Hash: keyHash(token), Note: u.Note, Models: cleanModels(u.Models), Limits: u.Limits, CreatedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrExists) {
-		return "", &InputError{fmt.Sprintf("key name %q is taken (revoked keys keep their name)", name)}
+		return "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
 	}
 	if err != nil {
 		return "", err
@@ -578,15 +585,32 @@ func (c *Control) RevokeKey(ctx context.Context, id int64) error {
 	return c.reloadKeys(ctx)
 }
 
+func (c *Control) RestoreKey(ctx context.Context, id int64) error {
+	if err := c.cfg.Store.RestoreKey(ctx, id); err != nil {
+		return err
+	}
+	return c.reloadKeys(ctx)
+}
+
+// DeleteKey deletes a revoked key and its quota use, and returns its name
+// and hash.
+func (c *Control) DeleteKey(ctx context.Context, id int64) (name, hash string, err error) {
+	name, hash, err = c.cfg.Store.DeleteKey(ctx, id)
+	if errors.Is(err, store.ErrKeyActive) {
+		return "", "", &InputError{"revoke the key before deleting it"}
+	}
+	return name, hash, err
+}
+
 func (c *Control) reloadKeys(ctx context.Context) error {
 	keys, err := c.cfg.Store.Keys(ctx)
 	if err != nil {
 		return err
 	}
-	byHash := make(map[[sha256.Size]byte]conv.Caller, len(keys))
+	byHash := make(map[string]conv.Caller, len(keys))
 	for _, k := range keys {
 		if k.RevokedAt.IsZero() {
-			byHash[k.SHA256] = conv.Caller{Name: k.Name, Models: k.Models, Limits: k.Limits}
+			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, Limits: k.Limits}
 		}
 	}
 	c.mu.Lock()

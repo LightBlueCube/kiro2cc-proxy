@@ -3,6 +3,8 @@ package admin
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -269,12 +271,49 @@ func TestChangesNeedCSRFAndSameOrigin(t *testing.T) {
 	if r := c.do("POST", "/admin/api/keys", body, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("duplicate key = %d", r.status)
 	}
-	keys, _ := e.st.Keys(context.Background())
-	if r := c.do("POST", "/admin/api/keys/"+itoa(keys[0].ID)+"/revoke", nil, nil); r.status != http.StatusOK {
+	sum := sha256.Sum256([]byte(token))
+	r = c.do("GET", "/admin/api/keys", nil, nil)
+	var list keysView
+	json.Unmarshal([]byte(r.raw), &list)
+	if len(list.Keys) != 1 || list.Keys[0].Hash != hex.EncodeToString(sum[:]) {
+		t.Fatalf("keys = %s, want the hash %x", r.raw, sum)
+	}
+	id := itoa(list.Keys[0].ID)
+
+	if r := c.do("DELETE", "/admin/api/keys/"+id, nil, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("delete an active key = %d %s", r.status, r.raw)
+	}
+	if r := c.do("POST", "/admin/api/keys/"+id+"/revoke", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("revoke = %d %s", r.status, r.raw)
 	}
 	if _, ok := e.ctl.Lookup(token); ok {
 		t.Fatal("revoked key still works")
+	}
+	if r := c.do("POST", "/admin/api/keys/"+id+"/restore", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("restore = %d %s", r.status, r.raw)
+	}
+	if _, ok := e.ctl.Lookup(token); !ok {
+		t.Fatal("restored key does not work")
+	}
+	if r := c.do("POST", "/admin/api/keys/"+id+"/restore", nil, nil); r.status != http.StatusNotFound {
+		t.Fatalf("restore a valid key = %d", r.status)
+	}
+
+	c.do("POST", "/admin/api/keys/"+id+"/revoke", nil, nil)
+	if r := c.do("DELETE", "/admin/api/keys/"+id, nil, nil); r.status != http.StatusOK {
+		t.Fatalf("delete = %d %s", r.status, r.raw)
+	}
+	if r := c.do("DELETE", "/admin/api/keys/"+id, nil, nil); r.status != http.StatusNotFound {
+		t.Fatalf("delete again = %d", r.status)
+	}
+	// The name is free again; the new key is a different key.
+	r = c.do("POST", "/admin/api/keys", body, nil)
+	newToken, _ := r.body["key"].(string)
+	if caller, ok := e.ctl.Lookup(newToken); r.status != http.StatusOK || !ok || caller.Name != "alice" || caller.KeyHash == hex.EncodeToString(sum[:]) {
+		t.Fatalf("recreate = %d %s, lookup %+v", r.status, r.raw, caller)
+	}
+	if _, ok := e.ctl.Lookup(token); ok {
+		t.Fatal("deleted key works")
 	}
 }
 
@@ -609,15 +648,21 @@ func TestLogsAndUsageNeedSession(t *testing.T) {
 
 	ctx := context.Background()
 	cost := 0.5
-	if err := e.st.AddRequest(ctx, store.Request{At: time.Now(), Key: "alice", Account: "main", Model: "m", Status: "ok", Input: 100, Cached: 40, Output: 10, CostUSD: &cost}); err != nil {
+	if err := e.st.AddRequest(ctx, store.Request{At: time.Now(), KeyHash: "hash-alice", KeyName: "alice", Account: "main", Model: "m", Status: "ok", Input: 100, Cached: 40, Output: 10, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 	r = c.do("GET", "/admin/api/usage?by=day_key&tz=480", nil, nil)
-	if r.status != http.StatusOK || !strings.Contains(r.raw, `alice","requests":1`) || !strings.Contains(r.raw, `"cost_usd":0.5`) {
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `hash-alice","key_name":"alice","requests":1`) || !strings.Contains(r.raw, `"cost_usd":0.5`) {
 		t.Fatalf("usage = %d %s", r.status, r.raw)
 	}
-	if r := c.do("GET", "/admin/api/requests?key=alice&limit=10", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"cached":40`) {
+	if r := c.do("GET", "/admin/api/requests?key=hash-alice&limit=10", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"key":"alice","key_hash":"hash-alice"`) || !strings.Contains(r.raw, `"cached":40`) {
 		t.Fatalf("requests = %d %s", r.status, r.raw)
+	}
+	if r := c.do("GET", "/admin/api/requests?key=alice&limit=10", nil, nil); r.raw != "[]\n" {
+		t.Fatalf("requests filtered by name = %s, want none (the filter takes a hash)", r.raw)
+	}
+	if r := c.do("GET", "/admin/api/usage/filters?since=0", nil, nil); !strings.Contains(r.raw, `"key":[{"hash":"hash-alice","name":"alice"}]`) {
+		t.Fatalf("filters = %s", r.raw)
 	}
 	if r := c.do("GET", "/admin/api/usage?by=nothing", nil, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad grouping = %d", r.status)

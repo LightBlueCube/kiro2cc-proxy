@@ -14,15 +14,17 @@ const (
 )
 
 type requestView struct {
-	ID      int64     `json:"id"`
-	At      time.Time `json:"at"`
-	Key     string    `json:"key"`
-	Account string    `json:"account"`
-	Model   string    `json:"model"`
-	Slug    string    `json:"slug"`
-	API     string    `json:"api"`
-	Stream  bool      `json:"stream"`
-	Mode    string    `json:"mode"`
+	ID int64     `json:"id"`
+	At time.Time `json:"at"`
+	// Key is the key's name.
+	Key     string `json:"key"`
+	KeyHash string `json:"key_hash"`
+	Account string `json:"account"`
+	Model   string `json:"model"`
+	Slug    string `json:"slug"`
+	API     string `json:"api"`
+	Stream  bool   `json:"stream"`
+	Mode    string `json:"mode"`
 	// ReplayReason is set for mode "replay".
 	ReplayReason string   `json:"replay_reason"`
 	Status       string   `json:"status"`
@@ -39,10 +41,11 @@ type requestView struct {
 	QuotaUsed    *float64 `json:"quota_used"`
 }
 
-// queryFilter reads key, model, account, and since/until (Unix ms).
+// queryFilter reads key (a key hash), model, account, and since/until
+// (Unix ms).
 func queryFilter(r *http.Request) (store.RequestFilter, bool) {
 	q := r.URL.Query()
-	f := store.RequestFilter{Key: q.Get("key"), Model: q.Get("model"), Account: q.Get("account")}
+	f := store.RequestFilter{KeyHash: q.Get("key"), Model: q.Get("model"), Account: q.Get("account")}
 	for name, dst := range map[string]*time.Time{"since": &f.Since, "until": &f.Until} {
 		raw := q.Get(name)
 		if raw == "" {
@@ -88,7 +91,7 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 	out := []requestView{}
 	for _, row := range rows {
 		v := requestView{
-			ID: row.ID, At: row.At, Key: row.Key, Account: row.Account, Model: row.Model, Slug: row.Slug, API: row.API,
+			ID: row.ID, At: row.At, Key: row.KeyName, KeyHash: row.KeyHash, Account: row.Account, Model: row.Model, Slug: row.Slug, API: row.API,
 			Stream: row.Stream, Mode: row.Mode, ReplayReason: row.ReplayReason, Status: row.Status, Error: row.Error, Finish: row.Finish,
 			DurationMS: row.Duration.Milliseconds(), Input: row.Input, Cached: row.Cached, Output: row.Output,
 			Reasoning: row.Reasoning, CostUSD: row.CostUSD, QuotaGroup: row.QuotaGroup, QuotaUsed: row.QuotaUsed,
@@ -144,8 +147,16 @@ func (h *Handler) filterValues(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "since is Unix milliseconds")
 		return
 	}
-	out := map[string][]string{}
-	for _, by := range []store.SummaryBy{store.ByKey, store.ByModel, store.ByAccount} {
+	keys, err := h.store.RequestKeys(r.Context(), f.Since)
+	if err != nil {
+		h.internalError(w, "list filter values", err)
+		return
+	}
+	if keys == nil {
+		keys = []store.RequestKey{}
+	}
+	out := map[string]any{"key": keys}
+	for _, by := range []store.SummaryBy{store.ByModel, store.ByAccount} {
 		values, err := h.store.Distinct(r.Context(), by, f.Since)
 		if err != nil {
 			h.internalError(w, "list filter values", err)

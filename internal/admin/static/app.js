@@ -76,6 +76,16 @@ function stack(main, ...lines) {
 // joined puts the non-empty parts on one line, separated by " · ".
 const joined = (...parts) => parts.filter(Boolean).join(" · ");
 
+// A key's hash (hex SHA-256 of the key) identifies it; the UI shows a
+// prefix, like git's short hashes, and the whole hash on hover.
+const SHORT_HASH = 8;
+const shortHash = hash => hash.slice(0, SHORT_HASH);
+const hashText = hash => h("span", { class: "mono muted", title: hash }, shortHash(hash));
+// keyName is the key's name and short hash; text-only places (menus,
+// chart tips) use keyText.
+const keyName = (name, hash) => h("span", {}, name ? name + " " : "", hashText(hash));
+const keyText = (name, hash) => name ? `${name} (${shortHash(hash)})` : shortHash(hash);
+
 // table renders rows; a column's hint explains its title on hover.
 function table(columns, rows, rowClass) {
   return h("div", { class: "table-wrap" }, h("table", {},
@@ -273,13 +283,18 @@ views.keys = container => {
     }
     list.replaceChildren(table([
       { title: t("common.name"), cell: k => k.name },
+      { title: t("keys.col.hash"), hint: t("keys.col.hash.hint"), cell: k => hashText(k.hash) },
       { title: t("common.note"), cell: k => k.note || h("span", { class: "muted" }, "—") },
       { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
       { title: t("keys.col.usage"), cell: k => usageCell(k, groups) },
       { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
-      { title: "", cell: k => k.revoked_at ? t("keys.revoked", { time: fmt.time(k.revoked_at) }) : h("span", { class: "row" },
-          h("button", { onclick: () => editKey(k) }, t("keys.edit")),
-          h("button", { class: "danger", onclick: e => revoke(k, e.target) }, t("keys.revoke"))) },
+      { title: "", cell: k => k.revoked_at
+          ? h("span", { class: "row" }, t("keys.revoked", { time: fmt.time(k.revoked_at) }),
+            h("button", { onclick: e => restore(k, e.target) }, t("keys.restore")),
+            h("button", { class: "danger", onclick: e => remove(k, e.target) }, t("keys.delete")))
+          : h("span", { class: "row" },
+            h("button", { onclick: () => editKey(k) }, t("keys.edit")),
+            h("button", { class: "danger", onclick: e => revoke(k, e.target) }, t("keys.revoke"))) },
     ], data.keys, k => k.revoked_at ? "revoked" : ""));
   }
 
@@ -311,6 +326,15 @@ views.keys = container => {
   function revoke(k, button) {
     if (!confirm(t("keys.revoke.confirm", { name: k.name }))) return;
     guarded(async () => { await api("POST", `keys/${k.id}/revoke`); await load(); }, button);
+  }
+
+  function restore(k, button) {
+    guarded(async () => { await api("POST", `keys/${k.id}/restore`); await load(); }, button);
+  }
+
+  function remove(k, button) {
+    if (!confirm(t("keys.delete.confirm", { name: k.name }))) return;
+    guarded(async () => { await api("DELETE", `keys/${k.id}`); await load(); }, button);
   }
 
   container.append(h("h1", {}, t("keys.title")), h("div", { class: "card" }, form), created, editor, h("div", { class: "card" }, list));
@@ -686,13 +710,13 @@ views.workers = container => {
       : fmt.span(s.turn.started, now);
     return table([
       { title: t("workers.session"), cell: s => stack(h("span", { class: "mono", title: s.id }, s.id.slice(0, 8)), where(s)) },
-      { title: t("common.key"), cell: s => s.key },
+      { title: t("common.key"), cell: s => keyName(s.key, s.key_hash) },
       { title: t("workers.state"), cell: s => !s.turn ? stack(term(t("workers.idle"), lookup("turn_state", "idle")), t("workers.last_used", { time: fmt.span(s.last_used, now) }))
           : stack(h("span", { class: s.turn.state.startsWith("waiting") ? "warn" : "ok", title: lookup("turn_state", s.turn.state) }, s.turn.state),
             joined(s.turn.model, turnTime(s))) },
       { title: "", cell: s => {
           const path = `workers/${enc}/sessions/${encodeURIComponent(s.id)}`;
-          if (s.turn) return action(t("workers.cancel_turn"), "danger", t("workers.cancel_turn.confirm", { key: s.key }), () => api("POST", path + "/cancel"));
+          if (s.turn) return action(t("workers.cancel_turn"), "danger", t("workers.cancel_turn.confirm", { key: keyText(s.key, s.key_hash) }), () => api("POST", path + "/cancel"));
           if (!s.pid) return "";
           return action(t("workers.close"), "", "", () => api("POST", path + "/close"));
         } },
@@ -748,7 +772,7 @@ function tokensCell(row) {
 }
 
 // stackedBars draws one bar per day, stacked by series, as SVG.
-function stackedBars(days, series, valueOf, label) {
+function stackedBars(days, series, seriesName, valueOf, label) {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("class", "chart");
@@ -778,7 +802,7 @@ function stackedBars(days, series, valueOf, label) {
       const barHeight = (v / top) * (height - bottom - 12);
       y -= barHeight;
       make("rect", { x, y, width: barWidth, height: barHeight, fill: PALETTE[j % PALETTE.length] })
-        .append(Object.assign(document.createElementNS(ns, "title"), { textContent: `${day} · ${s}: ${label(v)}` }));
+        .append(Object.assign(document.createElementNS(ns, "title"), { textContent: `${day} · ${seriesName(s)}: ${label(v)}` }));
     });
     const labelEvery = Math.ceil(days.length / 15);
     if (i % labelEvery === 0) make("text", { x: x, y: height - 6 }, day.slice(5));
@@ -805,15 +829,17 @@ views.calls = container => {
 
   async function renderFilters() {
     const values = await api("GET", "usage/filters?" + new URLSearchParams({ since: String(Math.floor(since())) }));
+    // options are [value, label] pairs.
     const select = (field, options, all) => h("select", { onchange: e => { state[field] = e.target.value; reload(); } },
-      h("option", { value: "" }, all), options.map(v => h("option", { value: v, selected: v === state[field] }, v)));
+      h("option", { value: "" }, all), options.map(([v, label]) => h("option", { value: v, selected: v === state[field] }, label)));
+    const plain = values => values.map(v => [v, v]);
     const metrics = [["cost", t("calls.metric.cost")], ["tokens", t("calls.metric.tokens")], ["quota", t("calls.metric.quota")]];
     filters.replaceChildren(
       h("label", {}, t("calls.range"), h("select", { onchange: e => { state.range = e.target.value; reload(); } },
         Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
-      h("label", {}, t("common.key"), select("key", values.key, t("calls.all_keys"))),
-      h("label", {}, t("common.model"), select("model", values.model, t("calls.all_models"))),
-      h("label", {}, t("common.account"), select("account", values.account, t("calls.all_accounts"))),
+      h("label", {}, t("common.key"), select("key", values.key.map(k => [k.hash, keyText(k.name, k.hash)]), t("calls.all_keys"))),
+      h("label", {}, t("common.model"), select("model", plain(values.model), t("calls.all_models"))),
+      h("label", {}, t("common.account"), select("account", plain(values.account), t("calls.all_accounts"))),
       h("label", {}, t("calls.chart"), h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
         metrics.map(([v, label]) => h("option", { value: v, selected: v === state.metric }, label)))),
       h("span", { class: "grow" }),
@@ -851,7 +877,8 @@ views.calls = container => {
     for (let at = since(); localDay(at) <= localDay(Date.now()); at += 86400e3) {
       if (days[days.length - 1] !== localDay(at)) days.push(localDay(at));
     }
-    const keys = [...new Set(dayKey.map(s => s.group.split("\x1f")[1]))].sort();
+    const names = new Map(dayKey.map(s => [s.group.split("\x1f")[1], s.key_name]));
+    const keys = [...names.keys()].sort((a, b) => names.get(a).localeCompare(names.get(b)) || a.localeCompare(b));
     const cell = new Map(dayKey.map(s => [s.group, s]));
     const valueOf = (day, key) => {
       const s = cell.get(day + "\x1f" + key);
@@ -860,13 +887,13 @@ views.calls = container => {
     };
     const label = state.metric === "cost" ? fmt.usd : state.metric === "quota" ? (v => fmt.pct(v, 2)) : fmt.compact;
     chart.replaceChildren(h("h2", {}, t("calls.per_day")),
-      keys.length ? stackedBars(days, keys, valueOf, label) : h("p", { class: "muted" }, t("calls.no_calls")),
-      h("div", { class: "legend" }, keys.map((k, i) => h("span", {}, h("i", { style: `background:${PALETTE[i % PALETTE.length]}` }), k))));
+      keys.length ? stackedBars(days, keys, k => keyText(names.get(k), k), valueOf, label) : h("p", { class: "muted" }, t("calls.no_calls")),
+      h("div", { class: "legend" }, keys.map((k, i) => h("span", {}, h("i", { style: `background:${PALETTE[i % PALETTE.length]}` }), keyName(names.get(k), k)))));
   }
 
   function renderByKey(sums) {
     byKey.replaceChildren(h("h2", {}, t("calls.per_key")), table([
-      { title: t("common.key"), cell: s => s.group },
+      { title: t("common.key"), cell: s => keyName(s.key_name, s.group) },
       { title: t("common.requests"), num: true, cell: s => stack(fmt.int(s.requests), s.errors ? h("span", { class: "bad" }, t("calls.failed", { count: s.errors })) : null) },
       { title: t("calls.tokens"), num: true, cell: s => tokensCell(s) },
       { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: s => stack(
@@ -883,7 +910,7 @@ views.calls = container => {
     list.replaceChildren(h("div", {}, h("h2", {}, t("calls.requests")), table([
       { title: t("common.time"), cell: r => stack(fmt.time(r.at),
           r.ttft_ms === null ? fmt.ms(r.duration_ms) : t("calls.time.first_output", { total: fmt.ms(r.duration_ms), first: fmt.ms(r.ttft_ms) })) },
-      { title: t("calls.who"), cell: r => stack(r.key,
+      { title: t("calls.who"), cell: r => stack(keyName(r.key, r.key_hash),
           [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : ""]) },
       { title: t("calls.model_mode"), cell: r => stack(
           h("span", { title: r.slug }, r.model),

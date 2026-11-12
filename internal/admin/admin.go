@@ -107,6 +107,8 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/keys", h.authed(h.createKey))
 	h.mux.HandleFunc("PATCH /admin/api/keys/{id}", h.authed(h.updateKey))
 	h.mux.HandleFunc("POST /admin/api/keys/{id}/revoke", h.authed(h.revokeKey))
+	h.mux.HandleFunc("POST /admin/api/keys/{id}/restore", h.authed(h.restoreKey))
+	h.mux.HandleFunc("DELETE /admin/api/keys/{id}", h.authed(h.deleteKey))
 	h.mux.HandleFunc("GET /admin/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})

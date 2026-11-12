@@ -61,11 +61,11 @@ func TestRecordAndAttribute(t *testing.T) {
 	// Two requests, the second costing three times the first.
 	for i, tokens := range []int64{1000, 3000} {
 		rec.Record(gateway.Record{
-			At: t0.Add(time.Duration(i+1) * time.Minute), Key: "k", Account: "a", Model: "m", QuotaGroup: "gemini",
+			At: t0.Add(time.Duration(i+1) * time.Minute), KeyHash: "k", KeyName: "alice", Account: "a", Model: "m", QuotaGroup: "gemini",
 			Usage: &conv.Usage{PromptTokens: tokens},
 		})
 	}
-	rec.Record(gateway.Record{At: t0.Add(3 * time.Minute), Key: "k", Account: "a", Model: "m", QuotaGroup: "gemini",
+	rec.Record(gateway.Record{At: t0.Add(3 * time.Minute), KeyHash: "k", KeyName: "alice", Account: "a", Model: "m", QuotaGroup: "gemini",
 		Err: &conv.Error{Kind: conv.ErrQuota, Message: "limit"}})
 	sample(t0.Add(5*time.Minute), 0.86, false)
 
@@ -82,12 +82,12 @@ func TestRecordAndAttribute(t *testing.T) {
 	}
 
 	sums, err := st.Summarize(ctx, store.RequestFilter{}, store.ByKey, 0)
-	if err != nil || len(sums) != 1 || sums[0].Requests != 3 || sums[0].Errors != 1 || math.Abs(sums[0].QuotaUsed-0.04) > 1e-9 {
+	if err != nil || len(sums) != 1 || sums[0].Group != "k" || sums[0].KeyName != "alice" || sums[0].Requests != 3 || sums[0].Errors != 1 || math.Abs(sums[0].QuotaUsed-0.04) > 1e-9 {
 		t.Fatalf("summary = %+v, %v", sums, err)
 	}
 
 	record := func(at time.Duration, key string) {
-		rec.Record(gateway.Record{At: t0.Add(at), Key: key, Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
+		rec.Record(gateway.Record{At: t0.Add(at), KeyHash: key, Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
 	}
 	// A sample during a running turn carries its drop to the next idle one.
 	record(6*time.Minute, "k")
@@ -162,7 +162,7 @@ func TestStaleQuotaSamples(t *testing.T) {
 		attributor.Attribute(ctx, "a", t0.Add(at), false)
 	}
 	record := func(at time.Duration) {
-		rec.Record(gateway.Record{At: t0.Add(at), Key: "k", Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
+		rec.Record(gateway.Record{At: t0.Add(at), KeyHash: "k", Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
 	}
 
 	sample(0, 0.90, week)

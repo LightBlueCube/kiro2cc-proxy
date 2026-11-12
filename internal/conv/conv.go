@@ -128,7 +128,10 @@ func (e *Error) Error() string { return e.Message }
 
 // Caller is the API key a request came with.
 type Caller struct {
-	// Name identifies the key; sessions and records are scoped by it.
+	// KeyHash (hex SHA-256 of the key) identifies the key; sessions,
+	// records, and quota use are scoped by it.
+	KeyHash string
+	// Name labels the key in records and logs.
 	Name string
 	// Models limits the key to these model ids; empty allows all.
 	Models []string

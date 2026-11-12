@@ -55,7 +55,8 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { font-size: 12px; color: var(--muted); font-weight: 500; white-space: nowrap; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-tr.revoked td { color: var(--muted); text-decoration: line-through; }
+tr.revoked td { color: var(--muted); }
+tr.revoked td:not(:last-child) { text-decoration: line-through; }
 .table-wrap { overflow-x: auto; }
 details.fold { margin-top: 16px; }
 details.fold > summary { cursor: pointer; font-weight: 600; }
