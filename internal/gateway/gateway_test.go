@@ -509,6 +509,29 @@ func TestSystemMessagePlacement(t *testing.T) {
 	}
 }
 
+func TestHistoryNamesToolsAsTheModelCallsThem(t *testing.T) {
+	call := conv.Message{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "read", Arguments: json.RawMessage(`{}`)}}}
+	result := conv.Message{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "read", Text: "x"}
+	orphan := conv.Message{Role: conv.RoleTool, ToolCallID: "c0", Text: "y"}
+	got := renderHistory([]conv.Message{call, result, orphan})
+	for _, want := range []string{`<assistant-tool-call name="mcp_client_read" id="c1">`, `<tool-result name="mcp_client_read" id="c1">`, `<tool-result name="" id="c0">`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("history lacks %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestParallelAcceptsPrefixedNames(t *testing.T) {
+	known := func(name string) bool { return name == "read" }
+	calls, err := parseParallel(json.RawMessage(`{"calls":[{"name":"mcp_client_read"},{"name":"read"}]}`), known)
+	if err != nil || calls[0].Name != "read" || calls[1].Name != "read" {
+		t.Fatalf("calls = %+v, %v", calls, err)
+	}
+	if _, err := parseParallel(json.RawMessage(`{"calls":[{"name":"mcp_client_parallel"}]}`), known); err == nil {
+		t.Fatal("nested parallel accepted")
+	}
+}
+
 func TestToolResultCarriesLaterSystemMessage(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()

@@ -114,7 +114,7 @@ const (
 	continuationPrompt = "Continue the task from the latest tool results above."
 	imageOnlyPrompt    = "See the attached images."
 	deltaPrompt        = "The transcript delta above lists, in order, the messages the client recorded after your last reply: tool results, user messages, replies from other models, and client system messages. Attached images are numbered in delta order. Continue the conversation from there, with the same tool rules as before."
-	deltaURI           = "relay://transcript-delta"
+	deltaURI           = "transcript://delta"
 	historyPlaceholder = "[Image in original transcript]"
 )
 
@@ -142,18 +142,28 @@ func renderMessage(m conv.Message, imageBase int) string {
 		}
 		return "<system>\n" + content + "\n</system>"
 	case conv.RoleTool:
-		return fmt.Sprintf("<tool-result name=%q id=%q>\n%s\n</tool-result>", m.ToolName, m.ToolCallID, content)
+		return fmt.Sprintf("<tool-result name=%q id=%q>\n%s\n</tool-result>", modelToolName(m.ToolName), m.ToolCallID, content)
 	case conv.RoleAssistant:
 		var parts []string
 		if text := strings.TrimSpace(m.Text); text != "" {
 			parts = append(parts, "<assistant>\n"+text+"\n</assistant>")
 		}
 		for _, call := range m.ToolCalls {
-			parts = append(parts, fmt.Sprintf("<assistant-tool-call name=%q id=%q>\n%s\n</assistant-tool-call>", call.Name, call.ID, canonicalJSON(call.Arguments)))
+			parts = append(parts, fmt.Sprintf("<assistant-tool-call name=%q id=%q>\n%s\n</assistant-tool-call>", modelToolName(call.Name), call.ID, canonicalJSON(call.Arguments)))
 		}
 		return strings.Join(parts, "\n\n")
 	}
 	return ""
+}
+
+// modelToolName names a client tool as the model calls it, so history
+// matches the live tool list. A result whose call the client dropped has
+// no name.
+func modelToolName(name string) string {
+	if name == "" {
+		return ""
+	}
+	return agy.ModelToolName(name)
 }
 
 func nonEmpty(values []string) []string {
@@ -286,5 +296,5 @@ func toolResultText(result conv.Message, trailing []conv.Message) string {
 	if text == "" {
 		text = "(no output)"
 	}
-	return text + "\n\n<client-steering>\nThe client added these messages while this tool was running. Address them immediately:\n" + strings.Join(notes, "\n\n") + "\n</client-steering>"
+	return text + "\n\n<client-steering>\nThe client added these messages while this tool was running:\n" + strings.Join(notes, "\n\n") + "\n</client-steering>"
 }
