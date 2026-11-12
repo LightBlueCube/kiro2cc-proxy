@@ -36,6 +36,16 @@ label, .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px
 label.check { flex-direction: row; align-items: center; gap: 6px; align-self: flex-end; padding-bottom: 8px; }
 .picker { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--fg); font-size: 13px; }
 .picker label.check { padding-bottom: 0; color: var(--fg); font-size: 13px; }
+details.models { margin-top: 0; }
+details.models > summary { font-size: 16px; }
+.model-group h3 { margin: 12px 0 2px; }
+.compact th, .compact td { padding: 2px 8px; font-size: 13px; }
+/* Fixed columns line the groups' tables up. */
+.models .compact table { table-layout: fixed; }
+.models .compact th:nth-child(1) { width: 30%; }
+.models .compact th:nth-child(2), .models .compact th:nth-child(3) { width: 7%; }
+.models .compact th:nth-child(4) { width: 12%; }
+.models .compact td:not(:last-child) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sub { font-size: 12px; color: var(--muted); }
 .with-reset { display: flex; gap: 4px; align-items: stretch; }
 .with-reset > input, .with-reset > select { flex: 1; }

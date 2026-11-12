@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -57,7 +58,27 @@ type Server struct {
 
 	mu       sync.Mutex
 	accounts map[string]*accountProxy
+	// agentModels is each account's last upstream catalog, by account.
+	agentModels map[string][]AgentModel
 }
+
+// AgentModel is one agent model of an account's upstream catalog, as
+// Google sent it, before the rewrite.
+type AgentModel struct {
+	// Slug is the catalog key ("gemini-3.8-flash-high"); a disabled
+	// model's lacks the "-disabled" suffix the catalog gives it.
+	Slug     string
+	Disabled bool
+	// Fields is the model's record without its experiment configuration
+	// and MIME type list.
+	Fields map[string]any
+}
+
+// Record fields left out of AgentModel.Fields: long, and about agy's
+// internals rather than the model.
+var omittedFields = []string{"modelExperiments", "modelExperimentIds", "supportedMimeTypes"}
+
+const disabledSuffix = "-disabled"
 
 type accountProxy struct {
 	proxy     *httputil.ReverseProxy
@@ -74,7 +95,7 @@ func Start(upstream string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud code proxy: %w", err)
 	}
-	s := &Server{log: log, upstream: target, listener: listener, accounts: map[string]*accountProxy{}}
+	s := &Server{log: log, upstream: target, listener: listener, accounts: map[string]*accountProxy{}, agentModels: map[string][]AgentModel{}}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: readHeaderTimeout}
 	go func() {
 		if err := s.http.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
@@ -142,10 +163,19 @@ func (s *Server) Forget(name string) {
 	s.mu.Lock()
 	ap := s.accounts[name]
 	delete(s.accounts, name)
+	delete(s.agentModels, name)
 	s.mu.Unlock()
 	if ap != nil {
 		ap.transport.CloseIdleConnections()
 	}
+}
+
+// AgentModels is the account's agent models from the catalog its agy
+// fetched last, in the catalog's order; nil before agy fetched one.
+func (s *Server) AgentModels(name string) []AgentModel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agentModels[name]
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +209,15 @@ func (s *Server) rewriteCatalog(account string, resp *http.Response) error {
 	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
 		return fmt.Errorf("model catalog arrived with Content-Encoding %q", encoding)
 	}
+	// The admin page shows the catalog; an unreadable one is only logged
+	// here, rewriteCatalog decides whether agy gets it.
+	if models, err := agentModels(raw); err != nil {
+		s.log.Warn("model catalog not kept for the admin page", "account", account, "err", err)
+	} else {
+		s.mu.Lock()
+		s.agentModels[account] = models
+		s.mu.Unlock()
+	}
 	body, changed, err := rewriteCatalog(raw)
 	if err != nil {
 		return fmt.Errorf("rewrite model catalog: %w", err)
@@ -192,6 +231,49 @@ func (s *Server) rewriteCatalog(account string, resp *http.Response) error {
 	resp.ContentLength = int64(len(body))
 	resp.Header.Set("Content-Length", fmt.Sprint(len(body)))
 	return nil
+}
+
+// agentModels reads the agent models from a catalog: the models
+// agentModelSorts lists, in its order (agy 1.5.3 offers the enabled ones
+// over ACP).
+func agentModels(raw []byte) ([]AgentModel, error) {
+	var catalog struct {
+		Models          map[string]map[string]any `json:"models"`
+		AgentModelSorts []struct {
+			Groups []struct {
+				ModelIDs []string `json:"modelIds"`
+			} `json:"groups"`
+		} `json:"agentModelSorts"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&catalog); err != nil {
+		return nil, err
+	}
+	out := []AgentModel{}
+	seen := map[string]bool{}
+	for _, sort := range catalog.AgentModelSorts {
+		for _, group := range sort.Groups {
+			for _, key := range group.ModelIDs {
+				record, ok := catalog.Models[key]
+				if !ok || seen[key] {
+					continue
+				}
+				seen[key] = true
+				fields := maps.Clone(record)
+				for _, name := range omittedFields {
+					delete(fields, name)
+				}
+				disabled := record["disabled"] == true
+				slug := key
+				if disabled {
+					slug = strings.TrimSuffix(key, disabledSuffix)
+				}
+				out = append(out, AgentModel{Slug: slug, Disabled: disabled, Fields: fields})
+			}
+		}
+	}
+	return out, nil
 }
 
 // rewriteCatalog disables every checkpointer experiment and raises

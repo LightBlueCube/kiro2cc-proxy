@@ -473,6 +473,12 @@ func (c *Control) AccountModels(account string) []conv.ModelInfo {
 	return c.cfg.Gateway.AccountModels(account)
 }
 
+// UpstreamModels is the account's agent models from the catalog Google
+// last sent its agy; nil before agy fetched one.
+func (c *Control) UpstreamModels(account string) []cloudcode.AgentModel {
+	return c.cfg.CloudCode.AgentModels(account)
+}
+
 const keyPrefix = "sk-agyrelay-"
 
 // CreateKey stores a new key and returns its plaintext, which is not kept,
