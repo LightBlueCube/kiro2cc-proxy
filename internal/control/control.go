@@ -47,7 +47,9 @@ type Settings struct {
 	RetentionDays int `json:"retention_days"`
 	// Prices are the list prices that estimate each request's API cost.
 	Prices []usage.Price `json:"prices"`
-	// ContextWindows cap each model's estimated prompt.
+	// ContextCheck turns on the check of each prompt's estimate against
+	// ContextWindows; it costs the tokenizers' memory and counting time.
+	ContextCheck   bool                    `json:"context_check"`
 	ContextWindows []gateway.ContextWindow `json:"context_windows"`
 	// FallbackProxy carries the traffic of accounts without their own
 	// proxy ("" = none).
@@ -260,9 +262,11 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Pool.SetProcessPerSession(s.PerSession())
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
-	c.cfg.Gateway.SetContextWindows(s.ContextWindows)
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
+	if err := c.cfg.Gateway.SetContextWindows(s.ContextWindows, s.ContextCheck); err != nil {
+		return err
+	}
 	return c.applyRoutes(ctx)
 }
 
@@ -473,6 +477,11 @@ func (c *Control) Keys(ctx context.Context) ([]store.Key, error) { return c.cfg.
 
 // Models is the gateway's model catalog.
 func (c *Control) Models() []conv.ModelInfo { return c.cfg.Gateway.Models() }
+
+// AccountModels is what agy last reported the account may call.
+func (c *Control) AccountModels(account string) []conv.ModelInfo {
+	return c.cfg.Gateway.AccountModels(account)
+}
 
 const keyPrefix = "sk-agyrelay-"
 

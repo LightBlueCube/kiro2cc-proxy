@@ -36,6 +36,8 @@ type accountView struct {
 	Groups    []agy.QuotaGroup     `json:"quota"`
 	SampledAt *time.Time           `json:"sampled_at"`
 	SampleErr string               `json:"sample_error"`
+	// Models is nil until agy opens a session for the account.
+	Models []modelView `json:"models"`
 }
 
 func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +71,12 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 				v.User, v.Groups, v.SampledAt = &user, q.Groups, &at
 			}
 			v.SampleErr = q.Err
+		}
+		if models := h.control.AccountModels(st.Name); models != nil {
+			v.Models = []modelView{}
+			for _, m := range models {
+				v.Models = append(v.Models, modelView{ID: m.ID, Name: m.Name, Efforts: m.Efforts})
+			}
 		}
 		out = append(out, v)
 	}

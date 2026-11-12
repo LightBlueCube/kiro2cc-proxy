@@ -46,8 +46,8 @@ func TestLoadSettingsPrices(t *testing.T) {
 			t.Errorf("%s cache_write = %v, want %v", model, got[model], w)
 		}
 	}
-	if len(s.ContextWindows) != len(gateway.DefaultContextWindows) {
-		t.Fatalf("context windows = %+v, want the defaults when none are stored", s.ContextWindows)
+	if len(s.ContextWindows) != len(gateway.DefaultContextWindows) || s.ContextCheck {
+		t.Fatalf("context check %v with windows %+v, want it off with the default windows when none are stored", s.ContextCheck, s.ContextWindows)
 	}
 }
 

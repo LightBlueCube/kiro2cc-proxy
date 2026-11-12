@@ -82,6 +82,9 @@ type Account struct {
 	removed  bool
 	cooldown map[string]time.Time
 	procs    map[string]*procSlot
+	// models is the ACP model catalog agy last reported for the account,
+	// nil until it opens a session.
+	models []agy.ModelInfo
 }
 
 // Status is a point-in-time view of an account.
@@ -395,6 +398,21 @@ func (a *Account) Status() Status {
 		}
 	}
 	return st
+}
+
+// SetModels records the model catalog agy reported for a new session.
+func (a *Account) SetModels(models []agy.ModelInfo) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.models = slices.Clone(models)
+}
+
+// Models returns the model catalog agy last reported, nil before the
+// account's first session.
+func (a *Account) Models() []agy.ModelInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.models)
 }
 
 // Restart kills the account's agy processes; turns running there fail

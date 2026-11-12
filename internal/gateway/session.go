@@ -292,6 +292,7 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 		return nil, err
 	}
 	g.models.update(models)
+	account.SetModels(models)
 	sess.id, sess.ref, sess.binding = id, sessionRef(account.Name(), id), binding
 	at := newActiveTurn(sess)
 	g.mu.Lock()

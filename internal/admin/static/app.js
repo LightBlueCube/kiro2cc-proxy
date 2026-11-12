@@ -63,8 +63,8 @@ async function guarded(action, button) {
   finally { if (button) button.disabled = false; }
 }
 
-// term marks a word whose meaning shows on hover.
-const term = (text, hint) => hint ? h("span", { class: "term", title: hint }, text) : text;
+// term shows a word with its meaning on hover.
+const term = (text, hint) => hint ? h("span", { title: hint }, text) : text;
 
 // stack shows a main value over smaller secondary lines; empty lines are
 // left out.
@@ -254,7 +254,7 @@ views.keys = container => {
     h("div", { class: "row" },
       h("label", {}, t("common.name"), name),
       h("label", { class: "grow" }, t("common.note"), note)),
-    h("div", { class: "field", title: t("keys.models.hint") }, t("keys.models.label"), modelsBox),
+    h("div", { class: "field" }, t("keys.models.label"), modelsBox),
     limitsRow,
     h("p", { class: "muted" }, t("keys.limit.hint")),
     h("button", { type: "submit" }, t("keys.create")));
@@ -275,7 +275,7 @@ views.keys = container => {
       { title: t("common.name"), cell: k => k.name },
       { title: t("common.note"), cell: k => k.note || h("span", { class: "muted" }, "—") },
       { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
-      { title: t("keys.col.usage"), hint: t("keys.limit.hint"), cell: k => usageCell(k, groups) },
+      { title: t("keys.col.usage"), cell: k => usageCell(k, groups) },
       { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
       { title: "", cell: k => k.revoked_at ? t("keys.revoked", { time: fmt.time(k.revoked_at) }) : h("span", { class: "row" },
           h("button", { onclick: () => editKey(k) }, t("keys.edit")),
@@ -301,7 +301,7 @@ views.keys = container => {
       h("form", { onsubmit: save },
         h("div", { class: "row" },
           h("label", { class: "grow" }, t("common.note"), noteInput)),
-        h("div", { class: "field", title: t("keys.models.hint") }, t("keys.models.label"), models.node),
+        h("div", { class: "field" }, t("keys.models.label"), models.node),
         h("div", { class: "row" }, limits.nodes),
         h("div", { class: "row", style: "margin-top:8px" },
           h("button", { type: "submit", class: "primary" }, t("common.save")),
@@ -343,7 +343,7 @@ const withReset = (input, value) => h("span", { class: "with-reset" }, input, re
 function rowEditor(fields, rows, defaults, blank, addLabel) {
   const body = h("tbody");
   const read = () => [...body.children].map(tr => tr.read());
-  const reset = h("button", { type: "button", class: "reset", title: t("settings.defaults.title") }, t("settings.defaults"));
+  const reset = h("button", { type: "button", class: "reset" }, t("settings.defaults"));
   const sync = () => { reset.disabled = JSON.stringify(read()) === JSON.stringify(defaults); };
   const add = row => {
     const inputs = fields.map(f => f.input(row[f.key]));
@@ -382,6 +382,7 @@ views.settings = container => {
     const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
+    const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
     const processMode = h("select", {}, [["per_account", t("settings.process_mode.per_account")], ["per_session", t("settings.process_mode.per_session")]]
       .map(([value, label]) => h("option", { value, selected: value === s.process_mode }, label)));
 
@@ -404,7 +405,7 @@ views.settings = container => {
       guarded(async () => {
         await api("PUT", "settings", {
           turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
-          retention_days: Number(retention.value), prices: prices.read(), context_windows: windows.read(),
+          retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, process_mode: processMode.value,
         });
         toast(t("common.saved"));
@@ -423,11 +424,16 @@ views.settings = container => {
       h("p", { class: "muted" }, t("settings.process_mode.note")),
       h("h3", {}, t("settings.outbound")),
       h("div", { class: "row" },
-        h("label", { class: "grow", title: t("settings.fallback.hint") }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
+        h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
         h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, t("settings.direct")), resetButton(direct, d.allow_direct))),
       h("p", { class: "muted" }, t("settings.outbound.note")),
       h("details", { class: "fold" },
-        h("summary", {}, t("settings.windows.summary", { count: s.context_windows.length })),
+        h("summary", {}, s.context_check
+          ? t("settings.windows.summary.on", { count: s.context_windows.length })
+          : t("settings.windows.summary.off", { count: s.context_windows.length })),
+        h("div", { class: "field" }, h("span", { class: "with-reset" },
+          h("label", { class: "check", title: t("settings.context_check.hint") }, contextCheck, t("settings.context_check")),
+          resetButton(contextCheck, d.context_check))),
         h("p", { class: "muted" }, t("settings.windows.note")),
         windows.node),
       h("details", { class: "fold" },
@@ -435,7 +441,7 @@ views.settings = container => {
         h("p", { class: "muted" }, t("settings.prices.note")),
         prices.node),
       h("div", { class: "row", style: "margin-top:12px" },
-        h("span", { class: "muted grow" }, t("settings.reset_note")),
+        h("span", { class: "grow" }),
         h("button", { type: "submit" }, t("settings.save"))));
     general.replaceChildren(h("h2", {}, t("settings.general")), form);
   }
@@ -582,7 +588,7 @@ views.accounts = container => {
       g.buckets.map(b => {
         const level = b.remaining <= 0.1 ? "low" : b.remaining <= 0.35 ? "mid" : "";
         return h("div", { class: "row", title: b.name },
-          h("span", { class: "muted", style: "width:52px" }, term(b.window, lookup("bucket", b.window))),
+          h("span", { class: "muted", style: "width:52px" }, b.window),
           h("div", { class: "bar grow " + level }, h("span", { style: `width:${Math.max(0, Math.min(100, b.remaining * 100))}%` })),
           h("span", { class: "mono", style: "width:150px;text-align:right" }, t("accounts.quota.left", { left: fmt.pct(b.remaining, 1), reset: fmt.until(b.reset_at) })));
       })));
@@ -605,6 +611,7 @@ views.accounts = container => {
         a.sampled_at ? t("accounts.sampled", { time: fmt.time(a.sampled_at) }) : t("accounts.not_sampled"),
         a.proxy ? t("accounts.traffic", { route }) : t("accounts.traffic.no_own_proxy", { route }),
         a.env_names.length ? t("accounts.env_names", { names: a.env_names.join(", ") }) : "")),
+      h("p", {}, a.models ? t("accounts.models", { models: a.models.map(m => m.id).join(", ") || "—" }) : h("span", { class: "muted" }, t("accounts.models.unknown"))),
       quota(a),
       signinPanel(a),
       h("div", { class: "row", style: "margin-top:12px" },
@@ -672,7 +679,7 @@ views.workers = container => {
   function sessions(a, now) {
     const enc = encodeURIComponent(a.name);
     const where = s => s.worker ? term(t("workers.kind.worker", { number: s.worker }), lookup("process", "worker"))
-      : s.pid ? term(t("workers.in_process"), t("workers.in_process.hint"))
+      : s.pid ? t("workers.in_process")
       : term(t("workers.closed"), t("workers.closed.hint"));
     const turnTime = s => !s.turn || !s.turn.started ? "" : s.turn.parked_at
       ? t("workers.turn.parked", { elapsed: fmt.span(s.turn.started, now), waiting: fmt.span(s.turn.parked_at, now), left: fmt.span(now, s.turn.park_timeout) })
@@ -681,7 +688,7 @@ views.workers = container => {
       { title: t("workers.session"), cell: s => stack(h("span", { class: "mono", title: s.id }, s.id.slice(0, 8)), where(s)) },
       { title: t("common.key"), cell: s => s.key },
       { title: t("workers.state"), cell: s => !s.turn ? stack(term(t("workers.idle"), lookup("turn_state", "idle")), t("workers.last_used", { time: fmt.span(s.last_used, now) }))
-          : stack(h("span", { class: (s.turn.state.startsWith("waiting") ? "warn" : "ok") + " term", title: lookup("turn_state", s.turn.state) || "" }, s.turn.state),
+          : stack(h("span", { class: s.turn.state.startsWith("waiting") ? "warn" : "ok", title: lookup("turn_state", s.turn.state) }, s.turn.state),
             joined(s.turn.model, turnTime(s))) },
       { title: "", cell: s => {
           const path = `workers/${enc}/sessions/${encodeURIComponent(s.id)}`;
@@ -827,7 +834,7 @@ views.calls = container => {
       stat(t("calls.total.cached"), fmt.compact(sum.cached)),
       stat(t("calls.total.cache_hit"), fmt.pct(cachePct(sum.input, sum.cached))),
       stat(t("calls.total.output"), fmt.compact(sum.output)),
-      stat(t("calls.total.price"), price, t("calls.total.price.hint")),
+      stat(t("calls.total.price"), price),
       stat(t("calls.total.quota"), fmt.pct(sum.quota_used || 0, 2), t("calls.total.quota.hint"))));
   }
 
@@ -861,7 +868,7 @@ views.calls = container => {
     byKey.replaceChildren(h("h2", {}, t("calls.per_key")), table([
       { title: t("common.key"), cell: s => s.group },
       { title: t("common.requests"), num: true, cell: s => stack(fmt.int(s.requests), s.errors ? h("span", { class: "bad" }, t("calls.failed", { count: s.errors })) : null) },
-      { title: t("calls.tokens"), num: true, hint: t("calls.tokens.hint"), cell: s => tokensCell(s) },
+      { title: t("calls.tokens"), num: true, cell: s => tokensCell(s) },
       { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: s => stack(
           [fmt.usd(s.cost_usd), s.unpriced ? term("*", t("calls.unpriced", { count: s.unpriced })) : ""],
           t("calls.quota_share", { pct: fmt.pct(s.quota_used, 2) })) },
@@ -874,16 +881,16 @@ views.calls = container => {
     const page = await api("GET", "requests?" + query({ limit: "100", ...before }));
     rows = more ? rows.concat(page) : page;
     list.replaceChildren(h("div", {}, h("h2", {}, t("calls.requests")), table([
-      { title: t("common.time"), hint: t("calls.time.hint"), cell: r => stack(fmt.time(r.at),
+      { title: t("common.time"), cell: r => stack(fmt.time(r.at),
           r.ttft_ms === null ? fmt.ms(r.duration_ms) : t("calls.time.first_output", { total: fmt.ms(r.duration_ms), first: fmt.ms(r.ttft_ms) })) },
       { title: t("calls.who"), cell: r => stack(r.key,
           [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : ""]) },
-      { title: t("calls.model_mode"), hint: t("calls.model_mode.hint"), cell: r => stack(
+      { title: t("calls.model_mode"), cell: r => stack(
           h("span", { title: r.slug }, r.model),
           r.mode ? [term(r.mode, lookup("mode", r.mode)), r.replay_reason ? [" · ", term(r.replay_reason, lookup("replay", r.replay_reason))] : ""] : null) },
       { title: t("calls.status"), cell: r => r.status === "ok" ? term(r.finish || "ok", lookup("status", r.finish || "ok"))
-          : h("span", { class: "bad term", title: `${lookup("status", r.status) || r.status}\n\n${r.error}` }, r.status) },
-      { title: t("calls.tokens"), num: true, hint: t("calls.tokens.hint"), cell: r => tokensCell(r) },
+          : h("span", { class: "bad", title: joined(lookup("status", r.status), r.error) }, r.status) },
+      { title: t("calls.tokens"), num: true, cell: r => tokensCell(r) },
       { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: r => !r.input && !r.output ? h("span", { class: "muted" }, "—") : stack(fmt.usd(r.cost_usd),
           r.quota_used === null ? term(t("calls.quota_pending"), t("calls.quota_pending.hint")) : t("calls.quota_share", { pct: fmt.pct(r.quota_used, 3) })) },
     ], rows),

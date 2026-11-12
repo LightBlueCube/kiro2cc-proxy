@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,8 +48,8 @@ type Config struct {
 	Recorder Recorder
 	// Budget measures key quota use; it must be set when keys have limits.
 	Budget Budget
-	// Tokens counts prompts against ContextWindows.
-	Tokens         *tokens.Set
+	// ContextCheck turns on the check of prompts against ContextWindows.
+	ContextCheck   bool
 	ContextWindows []ContextWindow
 	Log            *slog.Logger
 }
@@ -67,12 +68,13 @@ type Gateway struct {
 	models   *catalog
 	recorder Recorder
 	budget   Budget
-	prompts  *promptEstimator
 	stop     chan struct{}
 	// idleClose is a time.Duration.
 	idleClose atomic.Int64
-	// windows maps model ids to their context windows in tokens.
-	windows atomic.Pointer[map[string]int]
+	// limits is the context-window check, nil while it is off; limitsMu
+	// serializes its changes.
+	limits   atomic.Pointer[contextLimits]
+	limitsMu sync.Mutex
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
 	mu       sync.Mutex
@@ -132,9 +134,6 @@ func newActiveTurn(sess *session) *activeTurn {
 }
 
 func New(cfg Config) (*Gateway, error) {
-	if cfg.Tokens == nil {
-		return nil, errors.New("gateway: Tokens is required")
-	}
 	snaps, err := openSnapshotStore(filepath.Join(cfg.DataDir, "snapshots.json"), cfg.SnapshotTTL)
 	if err != nil {
 		return nil, err
@@ -147,12 +146,13 @@ func New(cfg Config) (*Gateway, error) {
 		models:   newCatalog(),
 		recorder: cfg.Recorder,
 		budget:   cfg.Budget,
-		prompts:  newPromptEstimator(cfg.Tokens),
 		stop:     make(chan struct{}),
 		sessions: map[string]*session{},
 	}
 	g.idleClose.Store(int64(cfg.IdleClose))
-	g.SetContextWindows(cfg.ContextWindows)
+	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
+		return nil, err
+	}
 	go g.janitor()
 	return g, nil
 }
@@ -160,11 +160,33 @@ func New(cfg Config) (*Gateway, error) {
 // SetIdleClose changes how long an idle session stays open in agy.
 func (g *Gateway) SetIdleClose(d time.Duration) { g.idleClose.Store(int64(d)) }
 
-// SetContextWindows replaces the context windows; models without one are
-// left to upstream's limit.
-func (g *Gateway) SetContextWindows(windows []ContextWindow) {
-	m := windowMap(windows)
-	g.windows.Store(&m)
+// SetContextWindows replaces the context windows and turns their check on
+// or off; models without a window are left to upstream's limit. Turning
+// the check on loads the tokenizers (about 0.2 s and 55 MiB of heap),
+// turning it off drops them.
+func (g *Gateway) SetContextWindows(windows []ContextWindow, check bool) error {
+	g.limitsMu.Lock()
+	defer g.limitsMu.Unlock()
+	if !check {
+		if g.limits.Swap(nil) != nil {
+			// The check is turned off to save memory; hand the tokenizers'
+			// heap back to the OS now instead of over minutes.
+			debug.FreeOSMemory()
+		}
+		return nil
+	}
+	var prompts *promptEstimator
+	if current := g.limits.Load(); current != nil {
+		prompts = current.prompts
+	} else {
+		set, err := tokens.Load()
+		if err != nil {
+			return fmt.Errorf("load tokenizers: %w", err)
+		}
+		prompts = newPromptEstimator(set)
+	}
+	g.limits.Store(&contextLimits{windows: windowMap(windows), prompts: prompts})
+	return nil
 }
 
 // Close stops background work. Running turns end with their processes.
@@ -277,13 +299,18 @@ func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, group stri
 // checkContextWindow refuses a request whose estimated prompt exceeds the
 // model's context window. The message matches the overflow patterns of
 // OpenAI clients (opencode, pi), which then compact the conversation.
-// It returns the estimate, 0 when the model has no window.
+// It returns the estimate, 0 when the check is off or the model has no
+// window.
 func (g *Gateway) checkContextWindow(req conv.Request, t *transcript, modelID string) (int, *conv.Error) {
-	window, limited := (*g.windows.Load())[modelID]
+	limits := g.limits.Load()
+	if limits == nil {
+		return 0, nil
+	}
+	window, limited := limits.windows[modelID]
 	if !limited {
 		return 0, nil
 	}
-	estimate, err := g.prompts.estimate(modelID, req, t)
+	estimate, err := limits.prompts.estimate(modelID, req, t)
 	if err != nil {
 		g.log.Error("prompt token count failed", "model", modelID, "err", err)
 		return 0, &conv.Error{Kind: conv.ErrUnavailable, Message: "could not count the prompt's tokens: " + err.Error()}

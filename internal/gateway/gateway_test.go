@@ -32,8 +32,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-var testTokens = sync.OnceValues(tokens.Load)
-
 type harness struct {
 	t       *testing.T
 	gw      *Gateway
@@ -73,11 +71,7 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 	}
 	records := &recordLog{}
 	budget := &fakeBudget{used: map[string]float64{}}
-	set, err := testTokens()
-	if err != nil {
-		t.Fatal(err)
-	}
-	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Tokens: set, Log: logger})
+	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,28 +352,45 @@ func TestContextWindow(t *testing.T) {
 	long := strings.Repeat("word ", 2000)
 	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(long)}}
 
-	h.gw.SetContextWindows([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 2000}})
+	small := []ContextWindow{{Model: "gemini-3.8-flash", Tokens: 2000}}
+	set := func(windows []ContextWindow, check bool) {
+		t.Helper()
+		if err := h.gw.SetContextWindows(windows, check); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The check is off by default.
+	if r := h.complete(ctx, "carol", req); r.err != nil {
+		t.Fatalf("check off: %+v", r.err)
+	}
+
+	set(small, true)
 	r := h.complete(ctx, "alice", req)
 	if r.err == nil || r.err.Kind != conv.ErrContextLength || !strings.Contains(r.err.Message, "maximum context length is 2000 tokens") {
 		t.Fatalf("over the window: %+v", r.err)
 	}
-	if n := len(h.requests("session/prompt")); n != 0 {
-		t.Fatalf("prompts = %d, want 0 (the refused request reaches no agy)", n)
+	if n := len(h.requests("session/prompt")); n != 1 {
+		t.Fatalf("prompts = %d, want 1 (the refused request reaches no agy)", n)
 	}
 
-	// Under the window, and without one, the request runs.
-	h.gw.SetContextWindows([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 10000}})
+	// Under the window, without one, and with the check off, the request runs.
+	set([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 10000}}, true)
 	if r := h.complete(ctx, "alice", req); r.err != nil {
 		t.Fatalf("under the window: %+v", r.err)
 	}
-	h.gw.SetContextWindows(nil)
+	set(nil, true)
 	if r := h.complete(ctx, "bob", req); r.err != nil {
 		t.Fatalf("no window: %+v", r.err)
+	}
+	set(small, false)
+	if r := h.complete(ctx, "dave", req); r.err != nil {
+		t.Fatalf("check turned off: %+v", r.err)
 	}
 }
 
 func TestPromptEstimate(t *testing.T) {
-	set, err := testTokens()
+	set, err := tokens.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

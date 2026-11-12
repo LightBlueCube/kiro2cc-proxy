@@ -100,10 +100,12 @@ func (m *Monitor) Refresh(ctx context.Context, account *pool.Account) (AccountQu
 	defer m.refreshMu.Unlock()
 	proc, err := account.Proc(ctx, m.cfg.Profile)
 	probe := ""
+	var models []agy.ModelInfo
 	if err == nil {
-		probe, err = proc.EnsureLanguageServer(ctx, agy.SessionSpec{Cwd: account.Workspace()})
+		probe, models, err = proc.EnsureLanguageServer(ctx, agy.SessionSpec{Cwd: account.Workspace()})
 	}
 	if probe != "" {
+		account.SetModels(models)
 		defer m.closeProbe(account.Name(), proc, probe)
 	}
 	if err != nil {
