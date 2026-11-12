@@ -77,8 +77,9 @@ func newGroup(name string, args json.RawMessage, known map[string]bool) (*callGr
 	return group, nil
 }
 
-// groupResult answers a group from the client's tool messages. User
-// messages the client added after the results ride on the last result.
+// groupResult answers a group from the client's tool messages. User and
+// system messages the client added after the results ride on the last
+// result.
 func groupResult(group *callGroup, results map[string]conv.Message, trailing []conv.Message) bridge.Result {
 	parts := make([]bridge.Result, len(group.calls))
 	for i, call := range group.calls {
@@ -104,7 +105,7 @@ func bridgeImages(images []conv.Image) []bridge.Image {
 }
 
 // matchResults checks that delta answers exactly the group's calls, then
-// holds only user messages. OpenAI clients return every result of a
+// holds only user and system messages. OpenAI clients return every result of a
 // tool_calls message before anything else.
 func matchResults(group *callGroup, delta []conv.Message) (map[string]conv.Message, []conv.Message, bool) {
 	if len(delta) < len(group.calls) {
@@ -126,7 +127,7 @@ func matchResults(group *callGroup, delta []conv.Message) (map[string]conv.Messa
 	}
 	trailing := delta[len(group.calls):]
 	for _, m := range trailing {
-		if m.Role != conv.RoleUser {
+		if m.Role != conv.RoleUser && m.Role != conv.RoleSystem {
 			return nil, nil, false
 		}
 	}

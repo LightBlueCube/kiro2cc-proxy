@@ -192,6 +192,13 @@ type acpRequest struct {
 				Text string `json:"text"`
 			} `json:"resource"`
 		} `json:"prompt"`
+		Meta struct {
+			Antigravity struct {
+				SystemPrompt struct {
+					Append string `json:"append"`
+				} `json:"systemPrompt"`
+			} `json:"antigravity"`
+		} `json:"_meta"`
 	} `json:"params"`
 }
 
@@ -404,7 +411,7 @@ func TestPromptEstimate(t *testing.T) {
 
 	gemma := set.For("gemini-3.8-flash")
 	want := agyPromptTokens + gemma.Image("AAAA") + toolsetTokens + toolDeclarationTokens
-	for _, text := range []string{"<client-system>\nbe brief\n</client-system>", renderMessage(messages[1], -1), renderMessage(messages[2], -1),
+	for _, text := range []string{"be brief", renderMessage(messages[1], -1), renderMessage(messages[2], -1),
 		renderMessage(messages[3], -1), renderMessage(messages[4], -1), "read\nRead a file\n{\"type\":\"object\"}"} {
 		n, err := gemma.Count(text)
 		if err != nil {
@@ -456,6 +463,72 @@ func TestPlainReplyThenWarmDelta(t *testing.T) {
 	}
 	if n := len(h.requests("session/new")); n != 2 {
 		t.Fatalf("session/new count = %d, want 2", n)
+	}
+}
+
+func TestSystemMessagePlacement(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	messages := []conv.Message{{Role: conv.RoleSystem, Text: "be brief"}, {Role: conv.RoleSystem, Text: "be kind"}, user("hello")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	opened := h.requests("session/new")
+	if got := opened[0].Params.Meta.Antigravity.SystemPrompt.Append; !strings.HasSuffix(got, "\n\nbe brief\n\nbe kind") {
+		t.Fatalf("append = %q, want the leading system messages at its end", got)
+	}
+	if prompt := h.requests("session/prompt")[0].Params.Prompt[0].Text; prompt != "hello" {
+		t.Fatalf("fresh prompt = %q, want only the user input", prompt)
+	}
+
+	// A later system message stays at its position and keeps the session warm.
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text},
+		conv.Message{Role: conv.RoleSystem, Text: "answer in French"}, user("again"))
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	delta := h.requests("session/prompt")[1].Params.Prompt[0].Resource
+	if n := len(h.requests("session/new")); n != 1 || delta == nil || !strings.Contains(delta.Text, "<system>\nanswer in French\n</system>\n\n<user>\nagain\n</user>") {
+		t.Fatalf("session/new count = %d, delta = %+v; want a warm delta with the system message in place", n, delta)
+	}
+
+	// A different leading system prompt needs a session with that prompt.
+	messages[0].Text = "be terse"
+	if third := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages}); third.err != nil {
+		t.Fatal(third.err)
+	}
+	opened = h.requests("session/new")
+	if len(opened) != 2 || !strings.HasSuffix(opened[1].Params.Meta.Antigravity.SystemPrompt.Append, "\n\nbe terse\n\nbe kind") {
+		t.Fatalf("session/new = %+v, want a second session with the new system prompt", opened)
+	}
+	replay := h.requests("session/prompt")[2].Params.Prompt[0].Text
+	if !strings.Contains(replay, "<system>\nanswer in French\n</system>") || strings.Contains(replay, "be terse") {
+		t.Fatalf("replay = %q, want the later system message in the history only", replay)
+	}
+}
+
+func TestToolResultCarriesLaterSystemMessage(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	messages := []conv.Message{user(`@tool read {}`)}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "contents"},
+		conv.Message{Role: conv.RoleSystem, Text: "the file changed"},
+	)
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	if second.err != nil || !strings.Contains(second.text, "<system>\nthe file changed\n</system>") {
+		t.Fatalf("second = %+v, want the system message on the tool result", second)
+	}
+	if n := len(h.requests("session/prompt")); n != 1 {
+		t.Fatalf("session/prompt count = %d, want 1 (same turn)", n)
 	}
 }
 

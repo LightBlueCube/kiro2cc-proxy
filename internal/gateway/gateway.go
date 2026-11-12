@@ -620,14 +620,13 @@ func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message, steps int)
 		hash = chainHashes(hash, []string{messageKey(*reply)})[1]
 	}
 	snap := snapshot{
-		User:       r.user,
-		Account:    at.account.Name(),
-		SessionID:  at.sess.id,
-		ToolsKey:   toolsKey(r.req.Tools),
-		SystemHash: hashString(r.t.system),
-		Count:      count,
-		Hash:       hash,
-		Steps:      steps,
+		User:      r.user,
+		Account:   at.account.Name(),
+		SessionID: at.sess.id,
+		ToolsKey:  toolsKey(r.req.Tools),
+		Count:     count,
+		Hash:      hash,
+		Steps:     steps,
 	}
 	if err := g.snaps.put(snap); err != nil {
 		g.log.Warn("snapshot not persisted", "err", err)
