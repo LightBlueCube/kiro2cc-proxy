@@ -16,7 +16,7 @@ import (
 )
 
 func TestPrices(t *testing.T) {
-	if p, ok := priceOf(DefaultPrices, "gemini-4-argon"); !ok || p.Input != 2 {
+	if p, ok := priceOf(DefaultPrices, "gemini-4-argon"); !ok || p.Input != 4 {
 		t.Fatalf("argon = %+v %v", p, ok)
 	}
 	if _, ok := priceOf(DefaultPrices, "gpt-oss-120b-medium"); ok {

@@ -431,14 +431,14 @@ views.settings = container => {
     const processMode = h("select", {}, [["per_account", t("settings.process_mode.per_account")], ["per_session", t("settings.process_mode.per_session")]]
       .map(([value, label]) => h("option", { value, selected: value === s.process_mode }, label)));
 
-    const modelInput = value => h("input", { value, list: "settings-models", required: true });
+    const modelInput = value => h("input", { value, list: "settings-models", required: true, style: "width:260px" });
     const number = (min, step) => value => h("input", { type: "number", min, step, value, style: "width:110px" });
     const prices = rowEditor([
       { key: "model", title: t("common.model"), input: modelInput, read: i => i.value.trim() },
       { key: "input", title: t("settings.prices.input"), input: number(0, "any"), read: i => Number(i.value) },
+      { key: "output", title: t("settings.prices.output"), input: number(0, "any"), read: i => Number(i.value) },
       { key: "cached", title: t("settings.prices.cached"), input: number(0, "any"), read: i => Number(i.value) },
       { key: "cache_write", title: t("settings.prices.cache_write"), input: number(0, "any"), read: i => Number(i.value) },
-      { key: "output", title: t("settings.prices.output"), input: number(0, "any"), read: i => Number(i.value) },
     ], s.prices, d.prices, { model: "", input: 0, cached: 0, cache_write: 0, output: 0 }, t("settings.prices.add"));
     const windows = rowEditor([
       { key: "model", title: t("common.model"), input: modelInput, read: i => i.value.trim() },
