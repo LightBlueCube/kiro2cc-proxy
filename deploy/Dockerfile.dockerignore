@@ -1,0 +1,11 @@
+# Only what the image build reads.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!deploy/build.sh
+!deploy/fetch-agy.sh
+!deploy/docker-entrypoint.sh
+!deploy/container.json
+**/*_test.go
