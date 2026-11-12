@@ -492,34 +492,36 @@ func (c *Control) AccountModels(account string) []conv.ModelInfo {
 
 const keyPrefix = "sk-agyrelay-"
 
-// CreateKey stores a new key and returns its plaintext, which is not kept.
-func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate) (string, error) {
+// CreateKey stores a new key and returns its plaintext, which is not kept,
+// and its hash.
+func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate) (token, hash string, err error) {
 	name = strings.TrimSpace(name)
 	if err := validateKeyName(name); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := validateLimits(u.Limits); err != nil {
-		return "", err
+		return "", "", err
 	}
-	token := keyPrefix + rand.Text()
-	_, err := c.cfg.Store.AddKey(ctx, store.Key{
-		Name: name, Hash: keyHash(token), Note: u.Note, Models: cleanModels(u.Models), Limits: u.Limits, CreatedAt: time.Now(),
+	token = keyPrefix + rand.Text()
+	hash = keyHash(token)
+	err = c.cfg.Store.AddKey(ctx, store.Key{
+		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), Limits: u.Limits, CreatedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrExists) {
-		return "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
+		return "", "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return token, c.reloadKeys(ctx)
+	return token, hash, c.reloadKeys(ctx)
 }
 
-func (c *Control) UpdateKey(ctx context.Context, id int64, u store.KeyUpdate) error {
+func (c *Control) UpdateKey(ctx context.Context, hash string, u store.KeyUpdate) error {
 	if err := validateLimits(u.Limits); err != nil {
 		return err
 	}
 	u.Models = cleanModels(u.Models)
-	if err := c.cfg.Store.UpdateKey(ctx, id, u); err != nil {
+	if err := c.cfg.Store.UpdateKey(ctx, hash, u); err != nil {
 		return err
 	}
 	return c.reloadKeys(ctx)
@@ -578,28 +580,27 @@ func validateLimits(limits map[string]float64) error {
 	return nil
 }
 
-func (c *Control) RevokeKey(ctx context.Context, id int64) error {
-	if err := c.cfg.Store.RevokeKey(ctx, id, time.Now()); err != nil {
+func (c *Control) RevokeKey(ctx context.Context, hash string) error {
+	if err := c.cfg.Store.RevokeKey(ctx, hash, time.Now()); err != nil {
 		return err
 	}
 	return c.reloadKeys(ctx)
 }
 
-func (c *Control) RestoreKey(ctx context.Context, id int64) error {
-	if err := c.cfg.Store.RestoreKey(ctx, id); err != nil {
+func (c *Control) RestoreKey(ctx context.Context, hash string) error {
+	if err := c.cfg.Store.RestoreKey(ctx, hash); err != nil {
 		return err
 	}
 	return c.reloadKeys(ctx)
 }
 
-// DeleteKey deletes a revoked key and its quota use, and returns its name
-// and hash.
-func (c *Control) DeleteKey(ctx context.Context, id int64) (name, hash string, err error) {
-	name, hash, err = c.cfg.Store.DeleteKey(ctx, id)
+// DeleteKey deletes a revoked key and its quota use, and returns its name.
+func (c *Control) DeleteKey(ctx context.Context, hash string) (string, error) {
+	name, err := c.cfg.Store.DeleteKey(ctx, hash)
 	if errors.Is(err, store.ErrKeyActive) {
-		return "", "", &InputError{"revoke the key before deleting it"}
+		return "", &InputError{"revoke the key before deleting it"}
 	}
-	return name, hash, err
+	return name, err
 }
 
 func (c *Control) reloadKeys(ctx context.Context) error {

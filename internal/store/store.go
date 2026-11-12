@@ -16,6 +16,10 @@ import (
 
 // migrations[i] moves the schema from version i to i+1.
 var migrations = []string{
+	// api_keys.hash is the key's lowercase hex SHA-256 and identifies it;
+	// requests keep the key's name for display after the key is deleted.
+	// key_usage keeps each key's attributed quota after old requests are
+	// pruned; key limits count it.
 	`CREATE TABLE settings (
 		name  TEXT PRIMARY KEY,
 		value TEXT NOT NULL
@@ -23,15 +27,16 @@ var migrations = []string{
 	CREATE TABLE accounts (
 		name       TEXT PRIMARY KEY,
 		env        TEXT NOT NULL,
-		paused     INTEGER NOT NULL DEFAULT 0,
+		proxy      TEXT NOT NULL,
+		paused     INTEGER NOT NULL,
 		created_at INTEGER NOT NULL
 	);
 	CREATE TABLE api_keys (
-		id         INTEGER PRIMARY KEY,
+		hash       TEXT PRIMARY KEY,
 		name       TEXT NOT NULL UNIQUE,
-		sha256     BLOB NOT NULL UNIQUE,
 		note       TEXT NOT NULL,
 		models     TEXT NOT NULL,
+		limits     TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
 		revoked_at INTEGER
 	);
@@ -63,87 +68,46 @@ var migrations = []string{
 		reset_at  INTEGER NOT NULL,
 		PRIMARY KEY (account, bucket, at)
 	);
-	CREATE TABLE requests (
-		id          INTEGER PRIMARY KEY,
-		at          INTEGER NOT NULL,
-		key_name    TEXT NOT NULL,
-		account     TEXT NOT NULL,
-		model       TEXT NOT NULL,
-		slug        TEXT NOT NULL,
-		api         TEXT NOT NULL,
-		stream      INTEGER NOT NULL,
-		mode        TEXT NOT NULL,
-		status      TEXT NOT NULL,
-		error       TEXT NOT NULL,
-		finish      TEXT NOT NULL,
-		duration_ms INTEGER NOT NULL,
-		ttft_ms     INTEGER,
-		input       INTEGER NOT NULL,
-		cached      INTEGER NOT NULL,
-		output      INTEGER NOT NULL,
-		reasoning   INTEGER NOT NULL,
-		cost_usd    REAL,
-		quota_group TEXT NOT NULL,
-		quota_used  REAL
-	);
-	CREATE INDEX requests_at ON requests (at);
-	CREATE INDEX requests_key_at ON requests (key_name, at);
-	CREATE INDEX requests_account_at ON requests (account, quota_group, at);`,
-
-	`ALTER TABLE accounts ADD COLUMN proxy TEXT NOT NULL DEFAULT '';
-	ALTER TABLE api_keys ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
 	CREATE TABLE quota_cursors (
 		account TEXT NOT NULL,
 		bucket  TEXT NOT NULL,
 		at      INTEGER NOT NULL,
 		PRIMARY KEY (account, bucket)
-	);`,
-
-	// key_usage keeps each key's attributed quota after old requests are
-	// pruned; key limits count it.
-	`CREATE TABLE key_usage (
-		key_name TEXT NOT NULL,
-		grp      TEXT NOT NULL,
-		used     REAL NOT NULL,
-		PRIMARY KEY (key_name, grp)
 	);
-	INSERT INTO key_usage (key_name, grp, used)
-		SELECT key_name, quota_group, SUM(quota_used) FROM requests WHERE quota_used IS NOT NULL GROUP BY 1, 2;`,
-
-	`ALTER TABLE requests ADD COLUMN replay_reason TEXT NOT NULL DEFAULT '';`,
-
-	// A key's hash (lowercase hex SHA-256 of the key) identifies it, so a
-	// deleted key's name can be reused; requests keep the name for display.
-	// AUTOINCREMENT keeps a deleted key's id from being reused, so audit
-	// entries naming an id stay unambiguous.
-	`CREATE TABLE api_keys_new (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		name       TEXT NOT NULL UNIQUE,
-		hash       TEXT NOT NULL UNIQUE,
-		note       TEXT NOT NULL,
-		models     TEXT NOT NULL,
-		limits     TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		revoked_at INTEGER
+	CREATE TABLE requests (
+		id            INTEGER PRIMARY KEY,
+		at            INTEGER NOT NULL,
+		key_hash      TEXT NOT NULL,
+		key_name      TEXT NOT NULL,
+		account       TEXT NOT NULL,
+		model         TEXT NOT NULL,
+		slug          TEXT NOT NULL,
+		api           TEXT NOT NULL,
+		stream        INTEGER NOT NULL,
+		mode          TEXT NOT NULL,
+		replay_reason TEXT NOT NULL,
+		status        TEXT NOT NULL,
+		error         TEXT NOT NULL,
+		finish        TEXT NOT NULL,
+		duration_ms   INTEGER NOT NULL,
+		ttft_ms       INTEGER,
+		input         INTEGER NOT NULL,
+		cached        INTEGER NOT NULL,
+		output        INTEGER NOT NULL,
+		reasoning     INTEGER NOT NULL,
+		cost_usd      REAL,
+		quota_group   TEXT NOT NULL,
+		quota_used    REAL
 	);
-	INSERT INTO api_keys_new SELECT id, name, lower(hex(sha256)), note, models, limits, created_at, revoked_at FROM api_keys;
-	DROP TABLE api_keys;
-	ALTER TABLE api_keys_new RENAME TO api_keys;
-
-	ALTER TABLE requests ADD COLUMN key_hash TEXT NOT NULL DEFAULT '';
-	UPDATE requests SET key_hash = (SELECT hash FROM api_keys WHERE api_keys.name = requests.key_name);
-	DROP INDEX requests_key_at;
+	CREATE INDEX requests_at ON requests (at);
 	CREATE INDEX requests_key_at ON requests (key_hash, at);
-
-	CREATE TABLE key_usage_new (
+	CREATE INDEX requests_account_at ON requests (account, quota_group, at);
+	CREATE TABLE key_usage (
 		key_hash TEXT NOT NULL,
 		grp      TEXT NOT NULL,
 		used     REAL NOT NULL,
 		PRIMARY KEY (key_hash, grp)
-	);
-	INSERT INTO key_usage_new SELECT k.hash, u.grp, u.used FROM key_usage u JOIN api_keys k ON k.name = u.key_name;
-	DROP TABLE key_usage;
-	ALTER TABLE key_usage_new RENAME TO key_usage;`,
+	);`,
 }
 
 // ErrNotFound means the named row does not exist.

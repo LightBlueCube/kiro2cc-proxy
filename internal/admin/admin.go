@@ -13,7 +13,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"agyrelay/internal/control"
@@ -105,10 +104,10 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/models", h.authed(h.listModels))
 	h.mux.HandleFunc("GET /admin/api/keys", h.authed(h.listKeys))
 	h.mux.HandleFunc("POST /admin/api/keys", h.authed(h.createKey))
-	h.mux.HandleFunc("PATCH /admin/api/keys/{id}", h.authed(h.updateKey))
-	h.mux.HandleFunc("POST /admin/api/keys/{id}/revoke", h.authed(h.revokeKey))
-	h.mux.HandleFunc("POST /admin/api/keys/{id}/restore", h.authed(h.restoreKey))
-	h.mux.HandleFunc("DELETE /admin/api/keys/{id}", h.authed(h.deleteKey))
+	h.mux.HandleFunc("PATCH /admin/api/keys/{hash}", h.authed(h.updateKey))
+	h.mux.HandleFunc("POST /admin/api/keys/{hash}/revoke", h.authed(h.revokeKey))
+	h.mux.HandleFunc("POST /admin/api/keys/{hash}/restore", h.authed(h.restoreKey))
+	h.mux.HandleFunc("DELETE /admin/api/keys/{hash}", h.authed(h.deleteKey))
 	h.mux.HandleFunc("GET /admin/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})
@@ -183,11 +182,6 @@ func (h *Handler) audit(r *http.Request, action, detail string) {
 		h.log.Error("audit entry lost", "action", action, "err", err)
 	}
 	h.log.Info("admin action", "action", action, "detail", detail, "ip", entry.IP)
-}
-
-func pathID(r *http.Request) (int64, bool) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	return id, err == nil
 }
 
 func truncate(s string, n int) string {

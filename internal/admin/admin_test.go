@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -278,32 +277,32 @@ func TestChangesNeedCSRFAndSameOrigin(t *testing.T) {
 	if len(list.Keys) != 1 || list.Keys[0].Hash != hex.EncodeToString(sum[:]) {
 		t.Fatalf("keys = %s, want the hash %x", r.raw, sum)
 	}
-	id := itoa(list.Keys[0].ID)
+	hash := list.Keys[0].Hash
 
-	if r := c.do("DELETE", "/admin/api/keys/"+id, nil, nil); r.status != http.StatusBadRequest {
+	if r := c.do("DELETE", "/admin/api/keys/"+hash, nil, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("delete an active key = %d %s", r.status, r.raw)
 	}
-	if r := c.do("POST", "/admin/api/keys/"+id+"/revoke", nil, nil); r.status != http.StatusOK {
+	if r := c.do("POST", "/admin/api/keys/"+hash+"/revoke", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("revoke = %d %s", r.status, r.raw)
 	}
 	if _, ok := e.ctl.Lookup(token); ok {
 		t.Fatal("revoked key still works")
 	}
-	if r := c.do("POST", "/admin/api/keys/"+id+"/restore", nil, nil); r.status != http.StatusOK {
+	if r := c.do("POST", "/admin/api/keys/"+hash+"/restore", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("restore = %d %s", r.status, r.raw)
 	}
 	if _, ok := e.ctl.Lookup(token); !ok {
 		t.Fatal("restored key does not work")
 	}
-	if r := c.do("POST", "/admin/api/keys/"+id+"/restore", nil, nil); r.status != http.StatusNotFound {
+	if r := c.do("POST", "/admin/api/keys/"+hash+"/restore", nil, nil); r.status != http.StatusNotFound {
 		t.Fatalf("restore a valid key = %d", r.status)
 	}
 
-	c.do("POST", "/admin/api/keys/"+id+"/revoke", nil, nil)
-	if r := c.do("DELETE", "/admin/api/keys/"+id, nil, nil); r.status != http.StatusOK {
+	c.do("POST", "/admin/api/keys/"+hash+"/revoke", nil, nil)
+	if r := c.do("DELETE", "/admin/api/keys/"+hash, nil, nil); r.status != http.StatusOK {
 		t.Fatalf("delete = %d %s", r.status, r.raw)
 	}
-	if r := c.do("DELETE", "/admin/api/keys/"+id, nil, nil); r.status != http.StatusNotFound {
+	if r := c.do("DELETE", "/admin/api/keys/"+hash, nil, nil); r.status != http.StatusNotFound {
 		t.Fatalf("delete again = %d", r.status)
 	}
 	// The name is free again; the new key is a different key.
@@ -341,7 +340,7 @@ func TestKeyLimits(t *testing.T) {
 	if len(list.Keys) != 1 || list.Keys[0].Limits["claude-gpt"] != 0.3 || len(list.Groups) != 3 {
 		t.Fatalf("keys = %s", r.raw)
 	}
-	if r := c.do("PATCH", "/admin/api/keys/"+itoa(list.Keys[0].ID), map[string]any{"note": "n", "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
+	if r := c.do("PATCH", "/admin/api/keys/"+list.Keys[0].Hash, map[string]any{"note": "n", "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
 		t.Fatalf("update = %d %s", r.status, r.raw)
 	}
 	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 {
@@ -668,5 +667,3 @@ func TestLogsAndUsageNeedSession(t *testing.T) {
 		t.Fatalf("bad grouping = %d", r.status)
 	}
 }
-
-func itoa(n int64) string { return strconv.FormatInt(n, 10) }
