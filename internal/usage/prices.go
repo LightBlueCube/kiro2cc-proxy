@@ -28,9 +28,10 @@ type Price struct {
 // price, so cache reads cost as much as input. gemini-3.1-pro uses the
 // "Gemini 3.1 Pro Preview" price for prompts up to 200k tokens; longer
 // prompts cost more upstream ($4 / $0.40 / $18). Claude Opus 4.6 has one
-// price, which covers agy's "-thinking" variant. Gemini 4 Carbon and Argon
-// share a price: the one Google lists from 2026-12-01, not the half price
-// it charges until then. Gemini 4 Hydrogen has one price (paid tier,
+// price, which covers agy's "-thinking" variant. Time-limited prices are
+// not used: Gemini 4 Carbon and Argon share the price Google lists from
+// 2026-12-01, Gemini 3.8 Flash the one from 2027-01-01, not the half prices
+// charged until then. Gemini 4 Hydrogen has one price (paid tier,
 // standard).
 //
 // agy reports no cache writes (cachedWriteTokens stays 0 on Claude while
@@ -44,7 +45,7 @@ var DefaultPrices = []Price{
 	{Model: "gemini-4-argon", Input: 4, Cached: 0.2, Output: 20},
 	{Model: "gemini-4-carbon", Input: 4, Cached: 0.2, Output: 20},
 	{Model: "gemini-4-hydrogen", Input: 1.5, Cached: 0.075, Output: 7.5},
-	{Model: "gemini-3.8-flash", Input: 0.75, Cached: 0.075, Output: 3.75},
+	{Model: "gemini-3.8-flash", Input: 1.5, Cached: 0.15, Output: 7.5},
 	{Model: "gemini-3.1-pro", Input: 2, Cached: 0.2, Output: 12},
 	{Model: "claude-opus-5-5", Input: 4, Cached: 0.2, CacheWrite: 5, Output: 20},
 	{Model: "claude-sonnet-5-5", Input: 2, Cached: 0.1, CacheWrite: 2.5, Output: 10},
