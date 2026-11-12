@@ -32,8 +32,10 @@
 #   /etc/systemd/system/agyrelay.service
 #   /var/lib/agyrelay                     database, account sign-ins, patched agy
 #
-# agyrelay serves plain HTTP; its admin UI works only on a loopback address,
-# behind a reverse proxy or tunnel that adds TLS.
+# agyrelay serves plain HTTP; put a reverse proxy or tunnel that adds TLS in
+# front (the admin UI signs in over HTTPS only). Proxies off this host need
+# their network in "trusted_proxies" in the config to report client
+# addresses.
 #
 # Afterwards:
 #   logs            journalctl -u agyrelay

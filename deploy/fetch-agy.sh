@@ -21,6 +21,10 @@ out=$(realpath -m "$1")
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-curl -fL --proto '=https' -o "$tmp/agy.tar.gz" "$url"
+progress=()
+if [[ ! -t 2 ]]; then
+	progress=(--no-progress-meter) # logs, not a terminal
+fi
+curl -fL --proto '=https' "${progress[@]}" -o "$tmp/agy.tar.gz" "$url"
 tar -xzf "$tmp/agy.tar.gz" -C "$tmp" antigravity
 mv "$tmp/antigravity" "$out"

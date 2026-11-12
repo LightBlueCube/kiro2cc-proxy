@@ -1,0 +1,6 @@
+{
+  "listen": ":8787",
+  "data_dir": "/var/lib/agyrelay",
+  "agy_bin": "/var/lib/agyrelay/agy/antigravity",
+  "trusted_proxies": ["127.0.0.0/8", "::1/128", "172.16.0.0/12"]
+}
