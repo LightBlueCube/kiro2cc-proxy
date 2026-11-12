@@ -1,9 +1,12 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"agyrelay/internal/agy"
 	"agyrelay/internal/conv"
@@ -67,6 +70,86 @@ func (g *Gateway) offered() []modelEntry {
 		return fallbackModels
 	}
 	return merged
+}
+
+const (
+	// refreshTimeout bounds one refresh (about 3.5 s offline with agy not
+	// yet running).
+	refreshTimeout = time.Minute
+	// refreshRetry is how long an account a refresh left without a
+	// catalog is not refreshed again for requests.
+	refreshRetry = time.Minute
+)
+
+type refreshCall struct {
+	done     chan struct{}
+	failedAt time.Time // zero while running
+}
+
+// refreshUnreported refreshes every account in rotation that has not
+// reported a catalog since the relay started, and waits for them, so the
+// catalog the request is checked and routed by is complete. Concurrent
+// requests share a refresh. An account still without a catalog is tried
+// with the merged one, as before.
+func (g *Gateway) refreshUnreported(ctx context.Context) {
+	if g.refresh == nil {
+		return
+	}
+	var waits []chan struct{}
+	for _, account := range g.pool.Accounts() {
+		st := account.Status()
+		outOfRotation := st.Paused || st.Disabled != "" || st.Blocked != ""
+		if outOfRotation || account.Models() != nil {
+			continue
+		}
+		if done := g.startRefresh(account); done != nil {
+			waits = append(waits, done)
+		}
+	}
+	for _, done := range waits {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// startRefresh returns the account's running refresh, starting one unless
+// the last left it without a catalog less than refreshRetry ago (nil).
+func (g *Gateway) startRefresh(account *pool.Account) chan struct{} {
+	name := account.Name()
+	g.refreshMu.Lock()
+	defer g.refreshMu.Unlock()
+	if call := g.refreshes[name]; call != nil {
+		if call.failedAt.IsZero() {
+			return call.done
+		}
+		if time.Since(call.failedAt) < refreshRetry {
+			return nil
+		}
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	g.refreshes[name] = call
+	go func() {
+		// Not the request's context: other requests may wait on it.
+		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		defer cancel()
+		err := g.refresh(ctx, account)
+		if err == nil && account.Models() == nil {
+			err = errors.New("agy reported no model catalog")
+		}
+		g.refreshMu.Lock()
+		if err != nil {
+			g.log.Warn("account refresh before routing failed", "account", name, "err", err)
+			call.failedAt = time.Now()
+		} else {
+			delete(g.refreshes, name)
+		}
+		close(call.done)
+		g.refreshMu.Unlock()
+	}()
+	return call.done
 }
 
 func mergeEfforts(a, b []string) []string {

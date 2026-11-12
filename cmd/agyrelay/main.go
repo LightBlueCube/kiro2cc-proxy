@@ -142,14 +142,24 @@ func runServe(args []string) error {
 		return err
 	}
 	defer cloudCode.Close()
+	monitor := usage.NewMonitor(usage.MonitorConfig{
+		Store: st, Pool: accountPool, Profile: gateway.IdleProfile(),
+		OnSample: usage.NewAttributor(st, usageLog).Attribute, Log: usageLog,
+	})
+	go monitor.Run(ctx)
+
 	gw, err := gateway.New(gateway.Config{
-		Pool:           accountPool,
-		Bridge:         tools,
-		DataDir:        cfg.DataDir,
-		SnapshotTTL:    settings.SnapshotTTLDuration(),
-		IdleClose:      settings.SessionIdleCloseDuration(),
-		Recorder:       recorder,
-		Budget:         budget,
+		Pool:        accountPool,
+		Bridge:      tools,
+		DataDir:     cfg.DataDir,
+		SnapshotTTL: settings.SnapshotTTLDuration(),
+		IdleClose:   settings.SessionIdleCloseDuration(),
+		Recorder:    recorder,
+		Budget:      budget,
+		Refresh: func(ctx context.Context, account *pool.Account) error {
+			_, err := monitor.Refresh(ctx, account)
+			return err
+		},
 		ContextCheck:   settings.ContextCheck,
 		ContextWindows: settings.ContextWindows,
 		Log:            log.With("component", "gateway"),
@@ -158,12 +168,6 @@ func runServe(args []string) error {
 		return err
 	}
 	defer gw.Close()
-
-	monitor := usage.NewMonitor(usage.MonitorConfig{
-		Store: st, Pool: accountPool, Profile: gateway.IdleProfile(),
-		OnSample: usage.NewAttributor(st, usageLog).Attribute, Log: usageLog,
-	})
-	go monitor.Run(ctx)
 
 	ctl, err := control.New(ctx, control.Config{
 		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, CloudCode: cloudCode, AgyBin: agyBin, Level: level,

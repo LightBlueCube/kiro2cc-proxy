@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"agyrelay/internal/agy"
 	"agyrelay/internal/agy/agytest"
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/conv"
@@ -721,6 +723,65 @@ func TestModelsRouteToAccountsOfferingThem(t *testing.T) {
 
 	if r := request("gpt-oss-120b", user("x")); r.err == nil || r.err.Kind != conv.ErrUnknownModel {
 		t.Fatalf("model no account offers = %+v", r)
+	}
+}
+
+// Accounts without a catalog are refreshed before the request is routed,
+// once for concurrent requests; one whose refresh fails is not refreshed
+// again right away and is tried as before.
+func TestRequestRefreshesUnreportedAccounts(t *testing.T) {
+	catalogs := map[string]string{"acct0": "gemini-3.8-flash-low", "acct1": "claude-opus-5-5-high"}
+	h := newHarness(t, 3, map[int][]string{
+		0: {"FAKE_AGY_MODELS=" + catalogs["acct0"]},
+		1: {"FAKE_AGY_MODELS=" + catalogs["acct1"]},
+		2: {"FAKE_AGY_MODELS=gemini-3.8-flash-low"}, // its refresh fails
+	})
+	var mu sync.Mutex
+	calls := map[string]int{}
+	h.gw.refresh = func(ctx context.Context, account *pool.Account) error {
+		mu.Lock()
+		calls[account.Name()]++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond) // let the requests meet in it
+		ids, ok := catalogs[account.Name()]
+		if !ok {
+			return errors.New("refresh failed")
+		}
+		account.SetModels([]agy.ModelInfo{{ModelID: ids, Name: ids}})
+		return nil
+	}
+	alice := userPreferring(t, h.p, "acct0")
+
+	var wg sync.WaitGroup
+	results := make([]result, 3)
+	for i := range results {
+		wg.Go(func() {
+			results[i] = h.complete(context.Background(), alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user(fmt.Sprint("c", i))}})
+		})
+	}
+	wg.Wait()
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("request %d = %+v", i, r.err)
+		}
+	}
+	for _, rec := range h.records.all(t, 3) {
+		if rec.Account != "acct1" {
+			t.Errorf("claude went to %s", rec.Account)
+		}
+	}
+	// acct0's catalog was known before routing: no session was opened there.
+	if st := h.p.Account("acct0").Status(); st.Procs != 0 {
+		t.Errorf("acct0 started agy: %+v", st)
+	}
+
+	if r := h.complete(context.Background(), alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("g")}}); r.err != nil {
+		t.Fatalf("gemini = %+v", r.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := map[string]int{"acct0": 1, "acct1": 1, "acct2": 1}; !maps.Equal(calls, want) {
+		t.Errorf("refreshes = %v, want %v", calls, want)
 	}
 }
 
