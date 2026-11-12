@@ -52,6 +52,13 @@ func ValidateContextWindows(windows []ContextWindow) error {
 	return nil
 }
 
+// contextLimits is the context-window check while it is on.
+type contextLimits struct {
+	// windows maps model ids to their context windows in tokens.
+	windows map[string]int
+	prompts *promptEstimator
+}
+
 func windowMap(windows []ContextWindow) map[string]int {
 	m := make(map[string]int, len(windows))
 	for _, w := range windows {

@@ -100,27 +100,28 @@ func (p *Proc) UserStatus(ctx context.Context) (UserStatus, error) {
 
 // EnsureLanguageServer starts the language server when the process has
 // none, by opening an empty session in spec.Cwd. It returns that session's
-// id ("" when a server already ran); the caller closes it when done, so
-// under --process-per-session its worker does not stay behind.
-func (p *Proc) EnsureLanguageServer(ctx context.Context, spec SessionSpec) (string, error) {
+// id and model catalog ("" and nil when a server already ran); the caller
+// closes the session when done, so under --process-per-session its worker
+// does not stay behind.
+func (p *Proc) EnsureLanguageServer(ctx context.Context, spec SessionSpec) (string, []ModelInfo, error) {
 	ports, err := p.lsPorts()
 	if err != nil || len(ports) > 0 {
-		return "", err
+		return "", nil, err
 	}
-	probe, _, err := p.NewSession(ctx, spec)
+	probe, models, err := p.NewSession(ctx, spec)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	deadline := time.Now().Add(lsCallTimeout)
 	for time.Now().Before(deadline) {
 		if ports, err := p.lsPorts(); err != nil || len(ports) > 0 {
-			return probe, err
+			return probe, models, err
 		}
 		select {
 		case <-time.After(100 * time.Millisecond):
 		case <-ctx.Done():
-			return probe, ctx.Err()
+			return probe, models, ctx.Err()
 		}
 	}
-	return probe, errNoLanguageServer
+	return probe, models, errNoLanguageServer
 }

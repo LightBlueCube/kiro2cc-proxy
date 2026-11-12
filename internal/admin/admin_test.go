@@ -10,9 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,11 +25,8 @@ import (
 	"agyrelay/internal/logbuf"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
-	"agyrelay/internal/tokens"
 	"agyrelay/internal/usage"
 )
-
-var testTokens = sync.OnceValues(tokens.Load)
 
 func TestMain(m *testing.M) {
 	if os.Getenv(agytest.EnvRun) == "1" {
@@ -65,11 +62,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	budget := usage.NewBudget(st)
-	set, err := testTokens()
-	if err != nil {
-		t.Fatal(err)
-	}
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Tokens: set, Log: log})
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,9 +416,25 @@ func TestWorkers(t *testing.T) {
 	if a := workers(); len(a.Procs) != 0 || a.Egress == nil || a.Egress.Route != "direct" {
 		t.Fatalf("idle account = %+v", a)
 	}
-	// A quota refresh starts agy.
+	accountModels := func() []modelView {
+		t.Helper()
+		var accounts []accountView
+		json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &accounts)
+		if len(accounts) != 1 {
+			t.Fatalf("accounts = %+v", accounts)
+		}
+		return accounts[0].Models
+	}
+	if m := accountModels(); m != nil {
+		t.Fatalf("models before any session = %+v", m)
+	}
+	// A quota refresh starts agy, and its probe session reports the models.
 	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("refresh = %d %s", r.status, r.raw)
+	}
+	m := accountModels()
+	if len(m) != 2 || m[0].ID != "gemini-3.8-flash" || !slices.Equal(m[0].Efforts, []string{"low", "high"}) || m[1].ID != "claude-opus-5-5" {
+		t.Fatalf("models after refresh = %+v", m)
 	}
 	if a := workers(); len(a.Procs) != 1 || a.Procs[0].PID == 0 || a.Procs[0].RSSBytes == 0 {
 		t.Fatalf("after refresh = %+v", a)

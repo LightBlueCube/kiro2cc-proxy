@@ -70,11 +70,30 @@ func (c *catalog) isLive() bool {
 func (c *catalog) list() []conv.ModelInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]conv.ModelInfo, len(c.entries))
-	for i, e := range c.entries {
+	return modelInfos(c.entries)
+}
+
+func modelInfos(entries []modelEntry) []conv.ModelInfo {
+	out := make([]conv.ModelInfo, len(entries))
+	for i, e := range entries {
 		out[i] = conv.ModelInfo{ID: e.id, Name: e.name, Efforts: slices.Clone(e.efforts)}
 	}
 	return out
+}
+
+// AccountModels lists the models agy last reported for an account, as the
+// gateway serves them; nil before the account's first session or for an
+// unknown account.
+func (g *Gateway) AccountModels(account string) []conv.ModelInfo {
+	a := g.pool.Account(account)
+	if a == nil {
+		return nil
+	}
+	models := a.Models()
+	if models == nil {
+		return nil
+	}
+	return modelInfos(entriesFromACP(models))
 }
 
 // resolve maps a public model id and requested effort to the full ACP slug
