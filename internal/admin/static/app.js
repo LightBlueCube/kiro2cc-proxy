@@ -240,8 +240,8 @@ function spendCell(k, groups) {
     : spendBar(groupName(g), spent(g), k.limits[g]));
 }
 
-// servedModels lists every model on offer: the gateway's catalog plus the
-// models each account reported, each with the accounts that reported it.
+// servedModels lists the gateway's catalog (the union of what accounts
+// reported), each model with the accounts that reported it.
 function servedModels(catalog, accounts) {
   const byId = new Map(catalog.map(m => [m.id, { id: m.id, name: m.name, accounts: [] }]));
   for (const a of accounts) {
@@ -322,9 +322,9 @@ views.keys = container => {
     h("button", { type: "submit" }, t("keys.create")));
 
   async function load() {
-    const [data, catalog, accounts] = await Promise.all([api("GET", "keys"), api("GET", "models"), api("GET", "accounts")]);
+    const [data, catalog] = await Promise.all([api("GET", "keys"), api("GET", "models")]);
     groups = data.groups;
-    offered = servedModels(catalog, accounts).map(m => m.id);
+    offered = catalog.map(m => m.id);
     if (!newLimits) {
       newLimits = limitEditor(groups, { limit_total: null, limits: {} });
       limitsRow.replaceChildren(...newLimits.nodes);

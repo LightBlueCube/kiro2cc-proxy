@@ -635,29 +635,105 @@ func TestEditedToolResultsWarmDelta(t *testing.T) {
 
 func TestQuotaNoticeRetriesOnAnotherAccount(t *testing.T) {
 	h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}})
-	// Find a user whose first-choice account is the exhausted one.
-	name := ""
-	for i := range 100 {
-		candidate := fmt.Sprintf("user%d", i)
-		account, err := h.p.Pick(candidate, "gemini", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		account.Release()
-		if account.Name() == "acct0" {
-			name = candidate
-			break
-		}
-	}
-	if name == "" {
-		t.Fatal("no user prefers acct0")
-	}
+	name := userPreferring(t, h.p, "acct0")
 	r := h.complete(context.Background(), name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
 	if r.err != nil || r.text != "reply to: hi" {
 		t.Fatalf("result = %+v", r)
 	}
 	if err := h.p.Account("acct0").Available("gemini"); err == nil {
 		t.Fatal("acct0 is not cooling down")
+	}
+}
+
+// userPreferring finds a user whose first-choice account is account.
+func userPreferring(t *testing.T, p *pool.Pool, account string) string {
+	t.Helper()
+	for i := range 100 {
+		candidate := fmt.Sprintf("user%d", i)
+		picked, err := p.Pick(candidate, "gemini", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		picked.Release()
+		if picked.Name() == account {
+			return candidate
+		}
+	}
+	t.Fatalf("no user prefers %s", account)
+	return ""
+}
+
+// Accounts offer different models: requests go to an account that has
+// the model, with that account's tiers, and the catalog is their union.
+func TestModelsRouteToAccountsOfferingThem(t *testing.T) {
+	h := newHarness(t, 2, map[int][]string{
+		0: {"FAKE_AGY_MODELS=gemini-3.8-flash-low,gemini-3.8-flash-high"},
+		1: {"FAKE_AGY_MODELS=gemini-3.8-flash-medium,claude-opus-5-5-high"},
+	})
+	ctx := context.Background()
+	alice := userPreferring(t, h.p, "acct0")
+	request := func(model string, messages ...conv.Message) result {
+		return h.complete(ctx, alice, conv.Request{Model: model, Messages: messages})
+	}
+
+	// No catalog is reported yet: acct0, alice's first choice, reports it
+	// has no claude when its session opens, so acct1 serves the request at
+	// the tier its own catalog has.
+	if r := request("claude-opus-5-5", user("c")); r.err != nil {
+		t.Fatalf("claude = %+v", r.err)
+	}
+	if got := h.records.all(t, 1)[0]; got.Account != "acct1" || got.Slug != "claude-opus-5-5-high" {
+		t.Fatalf("claude record = %+v", got)
+	}
+
+	// Both reported now; acct0 lacks claude, acct1 lacks gemini low.
+	first := request("gemini-3.8-flash", user("one"))
+	if first.err != nil {
+		t.Fatalf("gemini = %+v", first.err)
+	}
+	ids := []string{}
+	for _, m := range h.gw.Models() {
+		ids = append(ids, m.ID+fmt.Sprint(m.Efforts))
+	}
+	if want := []string{"gemini-3.8-flash[low medium high]", "claude-opus-5-5[high]"}; !slices.Equal(ids, want) {
+		t.Fatalf("models = %v, want %v", ids, want)
+	}
+	if r := request("gemini-3.8-flash-medium", user("m")); r.err != nil {
+		t.Fatalf("pinned medium = %+v", r.err)
+	}
+
+	// The conversation lives on acct0; switching it to claude replays it
+	// on acct1 instead of failing there.
+	messages := []conv.Message{user("one"), {Role: conv.RoleAssistant, Text: first.text}, user("two")}
+	if r := request("claude-opus-5-5", messages...); r.err != nil {
+		t.Fatalf("switch = %+v", r.err)
+	}
+	records := h.records.all(t, 4)
+	want := []struct{ account, slug string }{{"acct1", "claude-opus-5-5-high"}, {"acct0", "gemini-3.8-flash-low"}, {"acct1", "gemini-3.8-flash-medium"}, {"acct1", "claude-opus-5-5-high"}}
+	for i, w := range want {
+		if records[i].Account != w.account || records[i].Slug != w.slug {
+			t.Errorf("record %d = %s %s, want %s %s", i, records[i].Account, records[i].Slug, w.account, w.slug)
+		}
+	}
+	if records[3].Mode != ModeReplay {
+		t.Errorf("switch mode = %q, want replay", records[3].Mode)
+	}
+
+	if r := request("gpt-oss-120b", user("x")); r.err == nil || r.err.Kind != conv.ErrUnknownModel {
+		t.Fatalf("model no account offers = %+v", r)
+	}
+}
+
+// A model on the fallback list that the account's catalog turns out not to
+// have is an unknown model, not an unavailable account.
+func TestFallbackModelMissingFromCatalogIsUnknown(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	r := h.complete(context.Background(), "alice", conv.Request{Model: "gpt-oss-120b", Messages: []conv.Message{user("x")}})
+	if r.err == nil || r.err.Kind != conv.ErrUnknownModel {
+		t.Fatalf("result = %+v", r)
+	}
+	if r := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("y")}}); r.err != nil {
+		t.Fatalf("after = %+v", r.err)
 	}
 }
 
@@ -865,8 +941,9 @@ func TestRecordsDescribeRequests(t *testing.T) {
 	if tool.Finish != conv.FinishToolCalls || tool.Usage != nil || tool.Account != "acct0" || tool.Model != model || tool.QuotaGroup != "gemini" {
 		t.Errorf("tool-call record = %+v", tool)
 	}
-	if tool.Effort != "medium" || records[3].Effort != "high" || records[3].Slug != model+"-high" {
-		t.Errorf("efforts = %q, %q (slug %q), want medium, high", tool.Effort, records[3].Effort, records[3].Slug)
+	// The fake offers low and high: no effort picks the first.
+	if tool.Effort != "low" || tool.Slug != model+"-low" || records[3].Effort != "high" || records[3].Slug != model+"-high" {
+		t.Errorf("efforts = %q (slug %q), %q (slug %q), want low, high", tool.Effort, tool.Slug, records[3].Effort, records[3].Slug)
 	}
 	if done.Finish != conv.FinishStop || done.Usage == nil || done.TimeToFirstOutput <= 0 || done.Duration < done.TimeToFirstOutput {
 		t.Errorf("final record = %+v", done)

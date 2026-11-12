@@ -67,7 +67,6 @@ type Gateway struct {
 	pool     *pool.Pool
 	bridge   *bridge.Server
 	snaps    *snapshotStore
-	models   *catalog
 	recorder Recorder
 	budget   Budget
 	stop     chan struct{}
@@ -104,9 +103,10 @@ type session struct {
 type activeTurn struct {
 	sess    *session
 	account *pool.Account
-	// choice is the model and effort as the client asked for them; the
-	// resolved slug may change once the live catalog arrives.
-	choice string
+	// choice is the model and effort as the client asked for them; slug
+	// and tier are what the account resolved them to.
+	choice     string
+	slug, tier string
 	// turn is nil while the claim is being prepared.
 	turn   *agy.Turn
 	groups map[string]*callGroup
@@ -145,7 +145,6 @@ func New(cfg Config) (*Gateway, error) {
 		pool:     cfg.Pool,
 		bridge:   cfg.Bridge,
 		snaps:    snaps,
-		models:   newCatalog(),
 		recorder: cfg.Recorder,
 		budget:   cfg.Budget,
 		stop:     make(chan struct{}),
@@ -197,8 +196,6 @@ func (g *Gateway) Close() { close(g.stop) }
 // SetSnapshotTTL changes how long idle sessions stay reusable.
 func (g *Gateway) SetSnapshotTTL(ttl time.Duration) { g.snaps.setTTL(ttl) }
 
-func (g *Gateway) Models() []conv.ModelInfo { return g.models.list() }
-
 // Complete runs req for the caller's API key. The channel yields
 // output events and ends with exactly one Finish or Err event. An Err
 // before any output means nothing was produced, so the HTTP layer may
@@ -235,11 +232,13 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if err := validate(req, t); err != nil {
 		return err
 	}
-	slug, modelID, effort, ok := g.models.resolve(req.Model, req.Effort)
+	offered := g.offered()
+	model, ok := lookupModel(offered, req.Model, req.Effort)
 	if !ok {
 		return &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", req.Model)}
 	}
-	rec.Model, rec.Slug, rec.Effort, rec.QuotaGroup = modelID, slug, effort, pool.QuotaGroup(slug)
+	modelID := model.id
+	rec.Model, rec.QuotaGroup = modelID, pool.QuotaGroup(modelID)
 	if !caller.Allows(modelID) {
 		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf("this API key may not use model %q", modelID)}
 	}
@@ -251,13 +250,13 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		return err
 	}
 
-	r := &run{user: caller.KeyHash, req: req, t: t, slug: slug, group: pool.QuotaGroup(slug), exclude: map[string]bool{}, reuse: true}
+	r := &run{user: caller.KeyHash, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
 	attempts := min(maxAttempts, len(g.pool.Accounts()))
 	for attempt := 1; ; attempt++ {
 		at, failure := g.start(ctx, r)
 		if failure == nil {
 			g.mu.Lock()
-			rec.Account, rec.Mode, rec.ReplayReason = at.account.Name(), r.mode, r.replayReason
+			rec.Account, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
 			g.mu.Unlock()
 			failure = g.consume(ctx, at, r, w)
 		}
@@ -363,10 +362,12 @@ func validate(req conv.Request, t *transcript) *conv.Error {
 
 // run is one request's planning state across attempts.
 type run struct {
-	user    string
-	req     conv.Request
-	t       *transcript
-	slug    string
+	user  string
+	req   conv.Request
+	t     *transcript
+	model modelChoice
+	// offered is the merged catalog the model was found in.
+	offered []modelEntry
 	group   string
 	exclude map[string]bool
 	// reuse allows continuing or warming a session; a retry replays fresh.
