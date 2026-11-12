@@ -100,7 +100,7 @@
   "settings.prices.summary": { "one": "API list prices ({count} model, USD per 1M tokens)", "other": "API list prices ({count} models, USD per 1M tokens)" },
   "settings.prices.note": "Input is uncached prompt tokens; output includes reasoning. agy does not report cache writes, so when a model has a cache-write price, all its uncached input is priced at it.",
   "settings.prices.input": "Input",
-  "settings.prices.cached": "Cached input",
+  "settings.prices.cached": "Cache read",
   "settings.prices.cache_write": "Cache write",
   "settings.prices.output": "Output",
   "settings.prices.add": "Add price",
