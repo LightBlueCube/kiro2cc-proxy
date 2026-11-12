@@ -159,4 +159,6 @@ type ModelInfo struct {
 	ID      string
 	Name    string
 	Efforts []string
+	// Slugs are the agy model ids it runs as, one per effort tier.
+	Slugs []string
 }

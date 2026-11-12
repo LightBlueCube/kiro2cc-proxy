@@ -16,10 +16,31 @@ const catalog = `{
         "retry_model_capacity_exhausted": {"boolValue": true}
       }}
     },
-    "tab_flash_lite_preview": {"maxTokens": 16384, "maxOutputTokens": 4096}
+    "tab_flash_lite_preview": {"maxTokens": 16384, "maxOutputTokens": 4096},
+    "gemini-4-hydrogen-disabled": {"displayName": "Gemini 4 Hydrogen", "maxTokens": 1048576, "disabled": true, "tagTitle": "Unavailable",
+      "supportedMimeTypes": {"image/png": true}}
   },
-  "defaultAgentModelId": "gemini-3.8-flash-high"
+  "defaultAgentModelId": "gemini-3.8-flash-high",
+  "agentModelSorts": [{"displayName": "Recommended", "groups": [{"modelIds": ["gemini-3.8-flash-high", "gemini-4-hydrogen-disabled"]}]}]
 }`
+
+func TestAgentModelsKeepsTheRecordsAsSent(t *testing.T) {
+	models, err := agentModels([]byte(catalog))
+	if err != nil || len(models) != 2 {
+		t.Fatalf("models %+v, err %v", models, err)
+	}
+	flash, hydrogen := models[0], models[1]
+	// Before the rewrite: the upstream window, not disabledModelWindow.
+	if flash.Slug != "gemini-3.8-flash-high" || flash.Disabled || flash.Fields["maxTokens"] != json.Number("1048576") {
+		t.Fatalf("flash %+v", flash)
+	}
+	if _, ok := flash.Fields["modelExperiments"]; ok {
+		t.Fatal("experiments must be left out")
+	}
+	if hydrogen.Slug != "gemini-4-hydrogen" || !hydrogen.Disabled || hydrogen.Fields["tagTitle"] != "Unavailable" || hydrogen.Fields["supportedMimeTypes"] != nil {
+		t.Fatalf("hydrogen %+v", hydrogen)
+	}
+}
 
 func TestRewriteCatalogDisablesCheckpointer(t *testing.T) {
 	body, changed, err := rewriteCatalog([]byte(catalog))

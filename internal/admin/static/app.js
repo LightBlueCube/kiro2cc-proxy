@@ -240,19 +240,6 @@ function spendCell(k, groups) {
     : spendBar(groupName(g), spent(g), k.limits[g]));
 }
 
-// servedModels lists the gateway's catalog (the union of what accounts
-// reported), each model with the accounts that reported it.
-function servedModels(catalog, accounts) {
-  const byId = new Map(catalog.map(m => [m.id, { id: m.id, name: m.name, accounts: [] }]));
-  for (const a of accounts) {
-    for (const m of a.models || []) {
-      if (!byId.has(m.id)) byId.set(m.id, { id: m.id, name: m.name, accounts: [] });
-      byId.get(m.id).accounts.push(a);
-    }
-  }
-  return [...byId.values()];
-}
-
 // modelPicker lists model ids as checkboxes; none checked allows every
 // model. Other ids can be typed in; selected ids not on offer stay listed,
 // so saving does not drop them.
@@ -698,35 +685,114 @@ views.accounts = container => {
         } }, t("common.remove"))));
   }
 
-  // offeredBy shows the first account in rotation that reported a model and
-  // how many more there are, "main (+2)"; every reporting account, with
-  // why it is out of rotation, shows on hover.
-  function offeredBy(m) {
-    const outOfRotation = a => a.paused ? t("account.paused") : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy") : "";
-    const ready = m.accounts.filter(a => !outOfRotation(a));
-    const hover = m.accounts.map(a => joined(a.name, outOfRotation(a))).join("\n");
-    if (!ready.length) return h("span", { class: "muted", title: hover || null }, "—");
+  const outOfRotation = a => a.paused ? t("account.paused") : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy") : "";
+
+  // accountSet shows the first account in rotation and how many more
+  // there are, "main (+2)"; all of them, with why one is out of rotation,
+  // show on hover.
+  function accountSet(accounts) {
+    const ready = accounts.filter(a => !outOfRotation(a));
+    const hover = accounts.map(a => joined(a.name, outOfRotation(a))).join("\n");
+    if (!ready.length) return h("span", { class: "muted", title: hover }, t("accounts.models.none_ready"));
     return h("span", { title: hover }, ready[0].name, ready.length > 1 ? ` (+${ready.length - 1})` : "");
   }
 
-  function renderModels(catalog, accounts) {
-    const unreported = accounts.filter(a => !a.models).length;
-    modelsCard.replaceChildren(h("h2", {}, t("accounts.models.title")),
-      table([
-        { title: t("common.model"), cell: m => stack(h("span", { class: "mono" }, m.id), m.name !== m.id ? m.name : "") },
-        { title: t("accounts.models.accounts"), hint: t("accounts.models.accounts.hint"), cell: offeredBy },
-      ], servedModels(catalog, accounts)),
-      unreported ? h("p", { class: "muted" }, t("accounts.models.unreported", { count: unreported })) : null);
+  // modelGroups gathers the models accounts reported (available) and those
+  // their upstream catalogs list as disabled while no account has them
+  // (unavailable), each grouped by the set of accounts. A model is
+  // {id, name, efforts, upstream, accounts, disabledOn}.
+  function modelGroups(accounts) {
+    const available = new Map();
+    const disabled = new Map();
+    const add = (byId, m, a) => {
+      if (!byId.has(m.id)) byId.set(m.id, { ...m, accounts: [], disabledOn: [] });
+      const entry = byId.get(m.id);
+      entry.accounts.push(a);
+      entry.upstream ||= m.upstream;
+    };
+    for (const a of accounts) {
+      for (const m of a.models || []) add(available, m, a);
+      for (const m of a.unavailable) add(disabled, m, a);
+    }
+    for (const [id, m] of disabled) {
+      if (!available.has(id)) continue;
+      available.get(id).disabledOn = m.accounts;
+      disabled.delete(id);
+    }
+    const group = byId => {
+      const groups = new Map();
+      for (const m of byId.values()) {
+        const key = m.accounts.map(a => a.name).join("\n");
+        if (!groups.has(key)) groups.set(key, { accounts: m.accounts, models: [] });
+        groups.get(key).models.push(m);
+      }
+      return [...groups.values()];
+    };
+    return { available: group(available), unavailable: group(disabled), counts: [available.size, disabled.size] };
   }
 
+  // upstreamText lists a model's upstream record, one field per line.
+  const upstreamText = record => Object.entries(record || {})
+    .map(([key, value]) => `${key}: ${typeof value === "object" ? JSON.stringify(value) : value}`).join("\n");
+
+  function modelTable(models, unavailable) {
+    const up = (m, key) => m.upstream && m.upstream[key];
+    const notice = m => {
+      const tag = up(m, "tagDescription") || "";
+      const elsewhere = m.disabledOn.length ? t("accounts.models.disabled_on", { accounts: m.disabledOn.map(a => a.name).join(", ") }) : "";
+      return h("span", { class: unavailable ? "warn" : "muted" }, joined(tag, elsewhere));
+    };
+    return h("div", { class: "compact" }, table([
+      { title: t("common.model"), cell: m => h("span", { title: upstreamText(m.upstream) || null },
+          h("span", { class: "mono" }, m.id), m.name && m.name !== m.id ? h("span", { class: "muted" }, " " + m.name) : "") },
+      { title: t("accounts.models.context"), num: true, cell: m => up(m, "maxTokens") ? fmt.compact(Number(up(m, "maxTokens"))) : "—" },
+      { title: t("accounts.models.output"), num: true, cell: m => up(m, "maxOutputTokens") ? fmt.compact(Number(up(m, "maxOutputTokens"))) : "—" },
+      { title: t("accounts.models.tiers"), cell: m => m.efforts.join("/") },
+      { title: t("accounts.models.notice"), cell: notice },
+    ], models));
+  }
+
+  // The model list keeps its open/closed state across reloads.
+  const modelsSummary = h("summary");
+  const modelsBody = h("div");
+  const modelsFold = h("details", { class: "card fold models" }, modelsSummary, modelsBody);
+
+  function renderModels(accounts) {
+    const { available, unavailable, counts } = modelGroups(accounts);
+    const unreported = accounts.filter(a => !a.models).length;
+    modelsSummary.textContent = joined(t("accounts.models.title"), t("accounts.models.available", { count: counts[0] }),
+      counts[1] ? t("accounts.models.unavailable", { count: counts[1] }) : "");
+    modelsBody.replaceChildren(
+      ...available.map(g => h("div", { class: "model-group" }, h("h3", {}, accountSet(g.accounts)), modelTable(g.models, false))),
+      ...unavailable.map(g => h("div", { class: "model-group" },
+        h("h3", { class: "warn" }, t("accounts.models.unavailable_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
+      ...(unreported ? [h("p", { class: "muted" }, t("accounts.models.unreported", { count: unreported }))] : []),
+      h("p", { class: "muted" }, t("accounts.models.hint")));
+  }
+
+  let accounts = [];
   async function load() {
-    const [accounts, catalog] = await Promise.all([api("GET", "accounts"), api("GET", "models")]);
+    accounts = await api("GET", "accounts");
     for (const a of accounts) if (a.login_pending === false) signins.delete(a.name);
-    renderModels(catalog, accounts);
+    renderModels(accounts);
     cards.replaceChildren(...(accounts.length ? accounts.map(card) : [h("p", { class: "muted" }, t("accounts.empty"))]));
   }
 
-  container.append(h("h1", {}, t("accounts.title")), h("div", { class: "card" }, form), modelsCard, cards);
+  // refreshAll refreshes every account; the server runs them one at a time.
+  function refreshAll(button) {
+    guarded(async () => {
+      const results = await Promise.allSettled(accounts.map(a => api("POST", `accounts/${encodeURIComponent(a.name)}/refresh`)));
+      const failed = results.flatMap((r, i) => r.status === "rejected" && r.reason.status !== 401 ? [`${accounts[i].name}: ${r.reason.message}`] : []);
+      if (failed.length) toast(failed.join("; "), true);
+      else toast(t("accounts.refreshed_all", { count: results.length }));
+      await load();
+    }, button);
+  }
+
+  container.append(
+    h("div", { class: "row" }, h("h1", { class: "grow" }, t("accounts.title")),
+      h("button", { onclick: e => refreshAll(e.target) }, t("accounts.refresh_all"))),
+    h("div", { class: "card" }, form), modelsFold, cards);
   // Re-render on a timer unless a sign-in is being typed.
   return polling(container, 10000, async () => { if (signins.size === 0) await load(); });
 };

@@ -38,6 +38,40 @@ type accountView struct {
 	SampleErr string               `json:"sample_error"`
 	// Models is nil until agy opens a session for the account.
 	Models []modelView `json:"models"`
+	// Unavailable is the agent models the account's upstream catalog lists
+	// as disabled.
+	Unavailable []modelView `json:"unavailable"`
+}
+
+// accountModels returns the account's models, each with its upstream
+// record (its first tier's), and the models upstream lists as disabled.
+func (h *Handler) accountModels(account string) (models, unavailable []modelView) {
+	upstream := map[string]map[string]any{}
+	unavailable = []modelView{}
+	for _, m := range h.control.UpstreamModels(account) {
+		if !m.Disabled {
+			upstream[m.Slug] = m.Fields
+			continue
+		}
+		name, _ := m.Fields["displayName"].(string)
+		unavailable = append(unavailable, modelView{ID: m.Slug, Name: name, Efforts: []string{}, Upstream: m.Fields})
+	}
+	served := h.control.AccountModels(account)
+	if served == nil {
+		return nil, unavailable
+	}
+	models = []modelView{}
+	for _, m := range served {
+		v := modelView{ID: m.ID, Name: m.Name, Efforts: m.Efforts}
+		for _, slug := range m.Slugs {
+			if fields, ok := upstream[slug]; ok {
+				v.Upstream = fields
+				break
+			}
+		}
+		models = append(models, v)
+	}
+	return models, unavailable
 }
 
 func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
@@ -72,12 +106,7 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 			v.SampleErr = q.Err
 		}
-		if models := h.control.AccountModels(st.Name); models != nil {
-			v.Models = []modelView{}
-			for _, m := range models {
-				v.Models = append(v.Models, modelView{ID: m.ID, Name: m.Name, Efforts: m.Efforts})
-			}
-		}
+		v.Models, v.Unavailable = h.accountModels(st.Name)
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

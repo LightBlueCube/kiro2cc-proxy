@@ -166,7 +166,14 @@ func mergeEfforts(a, b []string) []string {
 func modelInfos(entries []modelEntry) []conv.ModelInfo {
 	out := make([]conv.ModelInfo, len(entries))
 	for i, e := range entries {
-		out[i] = conv.ModelInfo{ID: e.id, Name: e.name, Efforts: slices.Clone(e.efforts)}
+		slugs := []string{e.id}
+		if len(e.efforts) > 0 {
+			slugs = nil
+			for _, tier := range e.efforts {
+				slugs = append(slugs, e.id+"-"+tier)
+			}
+		}
+		out[i] = conv.ModelInfo{ID: e.id, Name: e.name, Efforts: append([]string{}, e.efforts...), Slugs: slugs}
 	}
 	return out
 }

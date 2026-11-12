@@ -37,6 +37,9 @@ type modelView struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Efforts []string `json:"efforts"`
+	// Upstream is the model's record in the upstream catalog, on account
+	// views; nil when the catalog has none.
+	Upstream map[string]any `json:"upstream,omitempty"`
 }
 
 func (h *Handler) listModels(w http.ResponseWriter, r *http.Request) {
