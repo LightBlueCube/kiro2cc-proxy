@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -49,9 +48,8 @@ func (h *Handler) listModels(w http.ResponseWriter, r *http.Request) {
 }
 
 type keyView struct {
-	ID     int64    `json:"id"`
-	Name   string   `json:"name"`
 	Hash   string   `json:"hash"`
+	Name   string   `json:"name"`
 	Note   string   `json:"note"`
 	Models []string `json:"models"`
 	// Limits and Usage are weekly-quota shares (0.3 = 30%) by quota group.
@@ -85,7 +83,7 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	out := keysView{Keys: []keyView{}, Groups: usage.Groups}
 	for _, k := range keys {
-		v := keyView{ID: k.ID, Name: k.Name, Hash: k.Hash, Note: k.Note, Models: k.Models, Limits: k.Limits, Usage: map[string]useView{}, CreatedAt: k.CreatedAt}
+		v := keyView{Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, Limits: k.Limits, Usage: map[string]useView{}, CreatedAt: k.CreatedAt}
 		if v.Models == nil {
 			v.Models = []string{}
 		}
@@ -120,73 +118,59 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	token, err := h.control.CreateKey(r.Context(), req.Name, req.update())
+	token, hash, err := h.control.CreateKey(r.Context(), req.Name, req.update())
 	if err != nil {
 		h.fail(w, "create key", err)
 		return
 	}
-	h.audit(r, "key_created", req.Name)
+	h.audit(r, "key_created", req.Name+" "+hash)
 	writeJSON(w, http.StatusOK, map[string]string{"key": token})
 }
 
+// updateKey and the other key routes name the key by its hash; an unknown
+// hash is not found.
 func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(r)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
+	hash := r.PathValue("hash")
 	var req keyRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := h.control.UpdateKey(r.Context(), id, req.update()); err != nil {
+	if err := h.control.UpdateKey(r.Context(), hash, req.update()); err != nil {
 		h.fail(w, "update key", err)
 		return
 	}
-	h.audit(r, "key_updated", strconv.FormatInt(id, 10))
+	h.audit(r, "key_updated", hash)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 func (h *Handler) revokeKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(r)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if err := h.control.RevokeKey(r.Context(), id); err != nil {
+	hash := r.PathValue("hash")
+	if err := h.control.RevokeKey(r.Context(), hash); err != nil {
 		h.fail(w, "revoke key", err)
 		return
 	}
-	h.audit(r, "key_revoked", strconv.FormatInt(id, 10))
+	h.audit(r, "key_revoked", hash)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 func (h *Handler) restoreKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(r)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if err := h.control.RestoreKey(r.Context(), id); err != nil {
+	hash := r.PathValue("hash")
+	if err := h.control.RestoreKey(r.Context(), hash); err != nil {
 		h.fail(w, "restore key", err)
 		return
 	}
-	h.audit(r, "key_restored", strconv.FormatInt(id, 10))
+	h.audit(r, "key_restored", hash)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 func (h *Handler) deleteKey(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(r)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	name, hash, err := h.control.DeleteKey(r.Context(), id)
+	hash := r.PathValue("hash")
+	name, err := h.control.DeleteKey(r.Context(), hash)
 	if err != nil {
 		h.fail(w, "delete key", err)
 		return
 	}
-	h.audit(r, "key_deleted", fmt.Sprintf("%d %s sha256:%s", id, name, hash))
+	h.audit(r, "key_deleted", name+" "+hash)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 

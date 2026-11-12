@@ -71,11 +71,9 @@ func (s *Store) RemoveAccount(ctx context.Context, name string) error {
 
 // Key is an API key, stored as its hash.
 type Key struct {
-	ID   int64
-	Name string
-	// Hash is the lowercase hex SHA-256 of the key; it identifies the key
-	// in requests and quota use.
+	// Hash is the lowercase hex SHA-256 of the key; it identifies the key.
 	Hash string
+	Name string
 	Note string
 	// Models limits the key to these client model names; empty allows all.
 	Models []string
@@ -89,7 +87,7 @@ type Key struct {
 }
 
 func (s *Store) Keys(ctx context.Context) ([]Key, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, hash, note, models, limits, created_at, revoked_at FROM api_keys ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT hash, name, note, models, limits, created_at, revoked_at FROM api_keys ORDER BY created_at, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +98,7 @@ func (s *Store) Keys(ctx context.Context) ([]Key, error) {
 		var models, limits string
 		var created int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&k.ID, &k.Name, &k.Hash, &k.Note, &models, &limits, &created, &revoked); err != nil {
+		if err := rows.Scan(&k.Hash, &k.Name, &k.Note, &models, &limits, &created, &revoked); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(models), &k.Models); err != nil {
@@ -118,22 +116,18 @@ func (s *Store) Keys(ctx context.Context) ([]Key, error) {
 	return out, rows.Err()
 }
 
-// AddKey inserts k and returns its id.
-func (s *Store) AddKey(ctx context.Context, k Key) (int64, error) {
+func (s *Store) AddKey(ctx context.Context, k Key) error {
 	models, err := json.Marshal(nonNil(k.Models))
 	if err != nil {
-		return 0, err
+		return err
 	}
 	limits, err := json.Marshal(nonNilMap(k.Limits))
 	if err != nil {
-		return 0, err
+		return err
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (name, hash, note, models, limits, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		k.Name, k.Hash, k.Note, string(models), string(limits), k.CreatedAt.Unix())
-	if err != nil {
-		return 0, uniqueErr(err)
-	}
-	return res.LastInsertId()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, limits, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		k.Hash, k.Name, k.Note, string(models), string(limits), k.CreatedAt.Unix())
+	return uniqueErr(err)
 }
 
 // KeyUpdate is what the admin can change on a key.
@@ -143,7 +137,7 @@ type KeyUpdate struct {
 	Limits map[string]float64
 }
 
-func (s *Store) UpdateKey(ctx context.Context, id int64, u KeyUpdate) error {
+func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
 	models, err := json.Marshal(nonNil(u.Models))
 	if err != nil {
 		return err
@@ -152,50 +146,50 @@ func (s *Store) UpdateKey(ctx context.Context, id int64, u KeyUpdate) error {
 	if err != nil {
 		return err
 	}
-	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, limits = ? WHERE id = ?`,
-		u.Note, string(models), string(limits), id))
+	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, limits = ? WHERE hash = ?`,
+		u.Note, string(models), string(limits), hash))
 }
 
-func (s *Store) RevokeKey(ctx context.Context, id int64, at time.Time) error {
-	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, at.Unix(), id))
+func (s *Store) RevokeKey(ctx context.Context, hash string, at time.Time) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = ? WHERE hash = ? AND revoked_at IS NULL`, at.Unix(), hash))
 }
 
 // RestoreKey makes a revoked key valid again.
-func (s *Store) RestoreKey(ctx context.Context, id int64) error {
-	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE id = ? AND revoked_at IS NOT NULL`, id))
+func (s *Store) RestoreKey(ctx context.Context, hash string) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE hash = ? AND revoked_at IS NOT NULL`, hash))
 }
 
 // ErrKeyActive means the key must be revoked first.
 var ErrKeyActive = errors.New("key is not revoked")
 
 // DeleteKey deletes a revoked key and its quota use, freeing its name, and
-// returns the name and hash. Its requests stay, labeled with the name.
-func (s *Store) DeleteKey(ctx context.Context, id int64) (name, hash string, err error) {
+// returns the name. Its requests stay, labeled with the name.
+func (s *Store) DeleteKey(ctx context.Context, hash string) (name string, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	defer tx.Rollback()
 
 	var revoked sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT name, hash, revoked_at FROM api_keys WHERE id = ?`, id).Scan(&name, &hash, &revoked)
+	err = tx.QueryRowContext(ctx, `SELECT name, revoked_at FROM api_keys WHERE hash = ?`, hash).Scan(&name, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", ErrNotFound
+		return "", ErrNotFound
 	}
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if !revoked.Valid {
-		return "", "", ErrKeyActive
+		return "", ErrKeyActive
 	}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id); err != nil {
-		return "", "", err
+	if _, err := tx.ExecContext(ctx, `DELETE FROM api_keys WHERE hash = ?`, hash); err != nil {
+		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM key_usage WHERE key_hash = ?`, hash); err != nil {
-		return "", "", err
+		return "", err
 	}
-	return name, hash, tx.Commit()
+	return name, tx.Commit()
 }
 
 func nonNil(list []string) []string {

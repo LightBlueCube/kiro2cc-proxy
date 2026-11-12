@@ -305,7 +305,7 @@ views.keys = container => {
     const save = event => {
       event.preventDefault();
       guarded(async () => {
-        await api("PATCH", `keys/${k.id}`, { note: noteInput.value, models: models.read(), limits: limits.read() });
+        await api("PATCH", `keys/${k.hash}`, { note: noteInput.value, models: models.read(), limits: limits.read() });
         editor.replaceChildren();
         toast(t("common.saved"));
         await load();
@@ -325,16 +325,16 @@ views.keys = container => {
 
   function revoke(k, button) {
     if (!confirm(t("keys.revoke.confirm", { name: k.name }))) return;
-    guarded(async () => { await api("POST", `keys/${k.id}/revoke`); await load(); }, button);
+    guarded(async () => { await api("POST", `keys/${k.hash}/revoke`); await load(); }, button);
   }
 
   function restore(k, button) {
-    guarded(async () => { await api("POST", `keys/${k.id}/restore`); await load(); }, button);
+    guarded(async () => { await api("POST", `keys/${k.hash}/restore`); await load(); }, button);
   }
 
   function remove(k, button) {
     if (!confirm(t("keys.delete.confirm", { name: k.name }))) return;
-    guarded(async () => { await api("DELETE", `keys/${k.id}`); await load(); }, button);
+    guarded(async () => { await api("DELETE", `keys/${k.hash}`); await load(); }, button);
   }
 
   container.append(h("h1", {}, t("keys.title")), h("div", { class: "card" }, form), created, editor, h("div", { class: "card" }, list));
