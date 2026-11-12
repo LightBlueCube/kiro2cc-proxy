@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+
+	"agyrelay/internal/guard"
 )
 
 // config is the startup configuration file. Accounts, API keys, and
@@ -17,12 +19,20 @@ import (
 //	{
 //	  "listen": "127.0.0.1:8787",
 //	  "data_dir": "./data",
-//	  "agy_bin": "/opt/agy-1.5.3/antigravity"
+//	  "agy_bin": "/opt/agy-1.5.3/antigravity",
+//	  "trusted_proxies": ["127.0.0.0/8", "::1/128"]
 //	}
+//
+// trusted_proxies are the networks of the reverse proxies or tunnels in
+// front, whose forwarding headers name the client; the default is
+// loopback.
 type config struct {
-	Listen  string `json:"listen"`
-	DataDir string `json:"data_dir"`
-	AgyBin  string `json:"agy_bin"`
+	Listen         string   `json:"listen"`
+	DataDir        string   `json:"data_dir"`
+	AgyBin         string   `json:"agy_bin"`
+	TrustedProxies []string `json:"trusted_proxies"`
+
+	proxies guard.Proxies
 }
 
 const defaultListen = "127.0.0.1:8787"
@@ -54,12 +64,22 @@ func loadConfig(path string) (*config, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = defaultListen
 	}
+	cfg.proxies = guard.LoopbackProxies
+	if cfg.TrustedProxies != nil {
+		cfg.proxies = make(guard.Proxies, 0, len(cfg.TrustedProxies))
+		for _, s := range cfg.TrustedProxies {
+			prefix, err := netip.ParsePrefix(s)
+			if err != nil {
+				return nil, fmt.Errorf("%s: trusted_proxies: %w", path, err)
+			}
+			cfg.proxies = append(cfg.proxies, prefix.Masked())
+		}
+	}
 	return &cfg, nil
 }
 
 // loopbackOnly reports whether the listen address accepts local
-// connections only. The admin UI needs it: without TLS of its own, it is
-// reachable from outside only through a tunnel or proxy that adds TLS.
+// connections only.
 func (c *config) loopbackOnly() bool {
 	host, _, err := net.SplitHostPort(c.Listen)
 	if err != nil {

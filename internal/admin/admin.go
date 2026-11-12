@@ -35,6 +35,8 @@ type Config struct {
 	Monitor *usage.Monitor
 	Logs    *logbuf.Buffer
 	Log     *slog.Logger
+	// Proxies may name the client of a request and its scheme.
+	Proxies guard.Proxies
 }
 
 type Handler struct {
@@ -44,6 +46,7 @@ type Handler struct {
 	monitor      *usage.Monitor
 	logs         *logbuf.Buffer
 	log          *slog.Logger
+	proxies      guard.Proxies
 	loginLimiter *guard.Limiter
 	hashing      chan struct{}
 	mux          *http.ServeMux
@@ -57,6 +60,7 @@ func New(cfg Config) *Handler {
 		monitor:      cfg.Monitor,
 		logs:         cfg.Logs,
 		log:          cfg.Log,
+		proxies:      cfg.Proxies,
 		loginLimiter: guard.NewLimiter(loginLimits),
 		hashing:      make(chan struct{}, maxHashing),
 		mux:          http.NewServeMux(),
@@ -129,7 +133,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("Cross-Origin-Opener-Policy", "same-origin")
 	header.Set("Cross-Origin-Resource-Policy", "same-origin")
 	header.Set("Cache-Control", "no-store")
-	if guard.ViaHTTPS(r) {
+	if h.proxies.ViaHTTPS(r) {
 		header.Set("Strict-Transport-Security", "max-age=31536000")
 	}
 	h.mux.ServeHTTP(w, r)
@@ -178,7 +182,7 @@ func (h *Handler) fail(w http.ResponseWriter, what string, err error) {
 
 // audit records an admin action; a failure is logged, not shown.
 func (h *Handler) audit(r *http.Request, action, detail string) {
-	entry := store.AuditEntry{At: time.Now(), IP: guard.ClientIP(r).String(), Action: action, Detail: detail}
+	entry := store.AuditEntry{At: time.Now(), IP: h.proxies.ClientIP(r).String(), Action: action, Detail: detail}
 	if err := h.store.Audit(r.Context(), entry); err != nil {
 		h.log.Error("audit entry lost", "action", action, "err", err)
 	}

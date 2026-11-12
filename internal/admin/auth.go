@@ -143,7 +143,7 @@ type loginRequest struct {
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
-	ip := guard.ClientIP(r)
+	ip := h.proxies.ClientIP(r)
 	if !sameOrigin(r) {
 		writeError(w, http.StatusForbidden, "cross-site request refused")
 		return
@@ -200,7 +200,7 @@ func (h *Handler) startSession(w http.ResponseWriter, r *http.Request) (string, 
 		CreatedAt: now,
 		SeenAt:    now,
 		ExpiresAt: now.Add(sessionLifetime),
-		IP:        guard.ClientIP(r).String(),
+		IP:        h.proxies.ClientIP(r).String(),
 		UserAgent: truncate(r.UserAgent(), 200),
 	}
 	if err := h.store.PruneAdminSessions(r.Context(), now, now.Add(-sessionIdle)); err != nil {
@@ -306,7 +306,7 @@ type passwordChange struct {
 // changePassword needs the current password; it signs out every other
 // session and renews this one.
 func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
-	ip := guard.ClientIP(r)
+	ip := h.proxies.ClientIP(r)
 	if ok, wait := h.loginLimiter.Allow(ip); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 		writeError(w, http.StatusTooManyRequests, "too many wrong passwords")

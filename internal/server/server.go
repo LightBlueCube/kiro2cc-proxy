@@ -24,12 +24,15 @@ type Config struct {
 	OpenAI *openai.Handler
 	// Admin serves /admin/; nil leaves the admin UI off.
 	Admin http.Handler
+	// Proxies may name the client of a request.
+	Proxies guard.Proxies
 }
 
 type Server struct {
 	keys    Keys
 	openai  *openai.Handler
 	limiter *guard.Limiter
+	proxies guard.Proxies
 	mux     *http.ServeMux
 }
 
@@ -38,7 +41,7 @@ type Server struct {
 var apiKeyLimits = guard.Config{PerClient: 20, Global: 500, Window: 10 * time.Minute, Lockout: 10 * time.Minute, MaxLockout: 24 * time.Hour}
 
 func New(cfg Config) *Server {
-	s := &Server{keys: cfg.Keys, openai: cfg.OpenAI, limiter: guard.NewLimiter(apiKeyLimits), mux: http.NewServeMux()}
+	s := &Server{keys: cfg.Keys, openai: cfg.OpenAI, limiter: guard.NewLimiter(apiKeyLimits), proxies: cfg.Proxies, mux: http.NewServeMux()}
 	s.mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		if caller, ok := s.authenticate(w, r); ok {
 			s.openai.Chat(w, r, caller)
@@ -65,7 +68,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 
 // authenticate resolves the bearer token (or x-api-key) to its caller.
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (conv.Caller, bool) {
-	addr := guard.ClientIP(r)
+	addr := s.proxies.ClientIP(r)
 	if ok, wait := s.limiter.Allow(addr); !ok {
 		seconds := int(wait.Seconds()) + 1
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))

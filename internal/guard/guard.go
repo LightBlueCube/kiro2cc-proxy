@@ -6,31 +6,67 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
 
-// ClientIP is the address a request came from. Behind a Cloudflare Tunnel
-// cloudflared connects from loopback and CF-Connecting-IP carries the
-// visitor's address; the header is trusted only on loopback connections,
-// so a direct client cannot set it.
-func ClientIP(r *http.Request) netip.Addr {
-	peer := peerAddr(r)
-	if peer.IsLoopback() {
-		if forwarded, err := netip.ParseAddr(r.Header.Get("CF-Connecting-IP")); err == nil {
-			return forwarded.Unmap()
+// Proxies are the peer networks trusted to report the client: a reverse
+// proxy or tunnel connecting from them names the client in its forwarding
+// headers. Anyone else is the client, whatever headers it sends.
+type Proxies []netip.Prefix
+
+// LoopbackProxies trusts processes on the same host only.
+var LoopbackProxies = Proxies{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+
+func (p Proxies) trusts(peer netip.Addr) bool {
+	for _, prefix := range p {
+		if prefix.Contains(peer) {
+			return true
 		}
+	}
+	return false
+}
+
+// ClientIP is the address a request came from. From a trusted proxy it is
+// the last X-Forwarded-For hop (the one the proxy added; earlier ones come
+// from the client), else CF-Connecting-IP (cloudflared), else the proxy.
+// An unreadable last hop leaves the proxy: CF-Connecting-IP could then be
+// the client's own.
+func (p Proxies) ClientIP(r *http.Request) netip.Addr {
+	peer := peerAddr(r)
+	if !p.trusts(peer) {
+		return peer
+	}
+	if hops := r.Header.Values("X-Forwarded-For"); len(hops) > 0 {
+		if hop, err := lastHop(hops); err == nil {
+			return hop
+		}
+		return peer
+	}
+	if forwarded, err := netip.ParseAddr(r.Header.Get("CF-Connecting-IP")); err == nil {
+		return forwarded.Unmap()
 	}
 	return peer
 }
 
+// lastHop is the last entry of X-Forwarded-For, given as repeated headers.
+func lastHop(headers []string) (netip.Addr, error) {
+	last := headers[len(headers)-1]
+	if i := strings.LastIndexByte(last, ','); i >= 0 {
+		last = last[i+1:]
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(last))
+	return addr.Unmap(), err
+}
+
 // ViaHTTPS reports whether the client reached us over HTTPS: through a
-// loopback proxy that says so, or directly over TLS.
-func ViaHTTPS(r *http.Request) bool {
+// trusted proxy that says so, or directly over TLS.
+func (p Proxies) ViaHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return peerAddr(r).IsLoopback() && r.Header.Get("X-Forwarded-Proto") == "https"
+	return p.trusts(peerAddr(r)) && r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
 func peerAddr(r *http.Request) netip.Addr {

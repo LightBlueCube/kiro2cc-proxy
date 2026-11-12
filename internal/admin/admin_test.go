@@ -23,6 +23,7 @@ import (
 	"agyrelay/internal/control"
 	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
+	"agyrelay/internal/guard"
 	"agyrelay/internal/logbuf"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
@@ -93,7 +94,7 @@ func newEnv(t *testing.T) *env {
 	}
 	logs := logbuf.NewBuffer(100)
 	slog.New(logbuf.NewHandler(logs, slog.NewTextHandler(io.Discard, nil), slog.LevelDebug)).With("component", "test").Warn("hello", "account", "main")
-	srv := httptest.NewServer(New(Config{Store: st, Control: ctl, Pool: p, Monitor: monitor, Logs: logs, Log: log}))
+	srv := httptest.NewServer(New(Config{Store: st, Control: ctl, Pool: p, Monitor: monitor, Logs: logs, Log: log, Proxies: guard.LoopbackProxies}))
 	t.Cleanup(func() {
 		srv.Close()
 		outbound.Close()
