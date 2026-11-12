@@ -96,11 +96,10 @@ var Models = []map[string]string{
 }
 
 type fake struct {
-	geminiDir  string
-	perSession bool
-	started    string // log file timestamp
-	log        *os.File
-	lsOnce     sync.Once
+	geminiDir string
+	started   string // log file timestamp
+	log       *os.File
+	lsOnce    sync.Once
 
 	outMu sync.Mutex
 	out   *bufio.Writer
@@ -131,17 +130,13 @@ func Main() {
 		if arg == "--gemini-dir" && i+1 < len(os.Args) {
 			f.geminiDir = os.Args[i+1]
 		}
-		if arg == "--process-per-session" {
-			f.perSession = true
-		}
 	}
 	if slices.Contains(os.Args, "--login") {
 		login()
 		return
 	}
-	if f.perSession {
-		f.appendLog("acp-front", fmt.Sprintf("front: started worker 1 (pid %d)", os.Getpid()))
-	}
+	// The fake is its own only worker (agy acp --process-per-session).
+	f.appendLog("acp-front", fmt.Sprintf("front: started worker 1 (pid %d)", os.Getpid()))
 	if path := os.Getenv("FAKE_AGY_LOG"); path != "" {
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
@@ -280,9 +275,7 @@ func (f *fake) open(id string, p sessionParams, steps []string) {
 	f.sessions[id] = s
 	f.saveLocked(id, s)
 	f.mu.Unlock()
-	if f.perSession {
-		f.appendLog("acp-front", fmt.Sprintf("front: session %s served by worker 1", id))
-	}
+	f.appendLog("acp-front", fmt.Sprintf("front: session %s served by worker 1", id))
 }
 
 // addSteps appends steps to the session's trajectory.
@@ -320,11 +313,7 @@ func (f *fake) startLanguageServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /exa.language_server_pb.LanguageServerService/{method}", f.serveLanguageServer)
 	go http.Serve(listener, mux)
-	kind := "acp-server"
-	if f.perSession {
-		kind = "acp-worker"
-	}
-	f.appendLog(kind, fmt.Sprintf("Language server listening on random port at %d for HTTP", listener.Addr().(*net.TCPAddr).Port))
+	f.appendLog("acp-worker", fmt.Sprintf("Language server listening on random port at %d for HTTP", listener.Addr().(*net.TCPAddr).Port))
 }
 
 func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {

@@ -19,12 +19,11 @@ import (
 // id is the ACP sessionId) as a list of steps. Facts verified against agy
 // 1.5.3 with a signed-in account:
 //
-//   - The server starts with the process's first session. Its log
-//     <gemini-dir>/antigravity-cli/log/acp-server-<ts>-<pid>.log has the line
-//     "Language server listening on random port at <port> for HTTP".
-//   - With --process-per-session each worker runs its own server and logs to
-//     acp-worker-<ts>-<workerPid>.log; the front's acp-front-<ts>-<pid>.log
-//     has "started worker N (pid P)" and "session <id> served by worker N".
+//   - Each worker runs its own server, started with its session, and logs
+//     "Language server listening on random port at <port> for HTTP" to
+//     <gemini-dir>/antigravity-cli/log/acp-worker-<ts>-<workerPid>.log; the
+//     front's acp-front-<ts>-<pid>.log has "started worker N (pid P)" and
+//     "session <id> served by worker N".
 //   - Calls are unauthenticated JSON POSTs to lsServicePath + method.
 //   - GetCascadeTrajectorySteps{cascadeId, stepOffset} lists the steps from
 //     stepOffset on. A finished turn ends with a PLANNER_RESPONSE step.
@@ -152,8 +151,8 @@ func lsPost(ctx context.Context, port, method string, params, out any) error {
 var errNoLanguageServer = errors.New("no language server yet")
 
 // accountCall calls an account-level method on any of the process's
-// language servers, newest first; under --process-per-session workers
-// retire, so earlier ones may be gone.
+// language servers, newest first; workers exit with their sessions, so
+// earlier ones may be gone.
 func (p *Proc) accountCall(ctx context.Context, method string, out any) error {
 	ports, err := p.lsPorts()
 	if err != nil {
@@ -174,8 +173,8 @@ func (p *Proc) accountCall(ctx context.Context, method string, out any) error {
 }
 
 // HasLanguageServer reports whether one of the process's language servers
-// runs. It starts with the first session; under --process-per-session it
-// exits with the last worker, e.g. when idle sessions were closed.
+// runs. It starts with the first session and exits with the last worker,
+// e.g. when idle sessions were closed.
 func (p *Proc) HasLanguageServer() (bool, error) {
 	ports, err := p.lsPorts()
 	return len(ports) > 0, err
@@ -185,13 +184,6 @@ func (p *Proc) HasLanguageServer() (bool, error) {
 // newest first.
 func (p *Proc) lsPorts() ([]string, error) {
 	pid := p.cmd.Process.Pid
-	if !p.cfg.ProcessPerSession {
-		port, err := p.listenPort("acp-server", pid)
-		if err != nil {
-			return nil, nil // not started yet
-		}
-		return []string{port}, nil
-	}
 	front, err := p.readLog("acp-front", pid)
 	if err != nil {
 		return nil, err
@@ -210,9 +202,6 @@ func (p *Proc) lsPorts() ([]string, error) {
 // It reads the logs on every call: a worker may have been replaced.
 func (p *Proc) lsPort(sessionID string) (string, error) {
 	pid := p.cmd.Process.Pid
-	if !p.cfg.ProcessPerSession {
-		return p.listenPort("acp-server", pid)
-	}
 	front, err := p.readLog("acp-front", pid)
 	if err != nil {
 		return "", err

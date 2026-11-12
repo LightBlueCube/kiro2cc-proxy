@@ -421,7 +421,7 @@ func TestAccountProxy(t *testing.T) {
 	settings := func(fallback string, direct bool) reply {
 		t.Helper()
 		s := map[string]any{"turns_per_account": 1, "snapshot_ttl": "24h", "session_idle_close": "5m", "log_level": "info", "retention_days": 90,
-			"prices": []any{}, "fallback_proxy": fallback, "allow_direct": direct, "process_mode": "per_account"}
+			"prices": []any{}, "fallback_proxy": fallback, "allow_direct": direct}
 		return c.do("PUT", "/admin/api/settings", s, nil)
 	}
 	if r := settings("socks5://127.0.0.1:1", false); r.status != http.StatusBadRequest {
@@ -561,7 +561,7 @@ func TestSettingsValidation(t *testing.T) {
 		t.Fatalf("bad settings = %d %s", r.status, r.raw)
 	}
 	good := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30,
-		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}, "process_mode": "per_session"}
+		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
 	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30,
 		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}, {"model": "m", "input": 2, "cached": 0.1, "output": 2}}}
 	if r := c.do("PUT", "/admin/api/settings", badPrice, nil); r.status != http.StatusBadRequest {
@@ -570,7 +570,7 @@ func TestSettingsValidation(t *testing.T) {
 	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK || r.body["turns_per_account"] != float64(3) {
 		t.Fatalf("good settings = %d %s", r.status, r.raw)
 	}
-	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || !got.PerSession() {
+	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.TurnsPerAccount != 3 {
 		t.Fatalf("applied = %+v", got)
 	}
 }

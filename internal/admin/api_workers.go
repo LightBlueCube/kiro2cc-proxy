@@ -27,7 +27,6 @@ type procView struct {
 	PID        int          `json:"pid"`
 	Agent      string       `json:"agent"`
 	Started    time.Time    `json:"started"`
-	PerSession bool         `json:"per_session"`
 	RSSBytes   int64        `json:"rss_bytes"`
 	CPUSeconds float64      `json:"cpu_seconds"`
 	Workers    []workerView `json:"workers"`
@@ -115,7 +114,7 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 		workerOf := map[string]int{}
 		for _, proc := range account.LiveProcs() {
 			info, err := proc.Inspect()
-			pv := procView{PID: info.PID, Agent: info.Agent, Started: info.Started, PerSession: info.PerSession,
+			pv := procView{PID: info.PID, Agent: info.Agent, Started: info.Started,
 				RSSBytes: info.Resources.RSSBytes, CPUSeconds: info.Resources.CPUSeconds, Workers: []workerView{}}
 			if err != nil {
 				pv.Error = err.Error()
