@@ -45,11 +45,6 @@ type harness struct {
 // environment per account index.
 func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness {
 	t.Helper()
-	return newHarnessMode(t, accounts, extraEnv, false)
-}
-
-func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSession bool) *harness {
-	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "acp.jsonl")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -65,7 +60,7 @@ func newHarnessMode(t *testing.T, accounts int, extraEnv map[int][]string, perSe
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := pool.New(pool.Config{Bin: os.Args[0], Accounts: configs, TurnsPerAccount: 4, ProcessPerSession: perSession, Log: logger})
+	p, err := pool.New(pool.Config{Bin: os.Args[0], Accounts: configs, TurnsPerAccount: 4, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +227,7 @@ var readTool = conv.ToolSpec{Name: "read", Description: "Read a file", Parameter
 func user(text string) conv.Message { return conv.Message{Role: conv.RoleUser, Text: text} }
 
 func TestInspectAndCloseSession(t *testing.T) {
-	h := newHarnessMode(t, 1, nil, true)
+	h := newHarness(t, 1, nil)
 	ctx := context.Background()
 	messages := []conv.Message{user("hello")}
 	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
@@ -245,7 +240,7 @@ func TestInspectAndCloseSession(t *testing.T) {
 		t.Fatalf("sessions = %+v", list)
 	}
 	info, err := h.p.Accounts()[0].LiveProcs()[0].Inspect()
-	if err != nil || !info.PerSession || info.Resources.RSSBytes == 0 || len(info.Workers) != 1 || info.Workers[0].Sessions[0] != list[0].ID {
+	if err != nil || info.Resources.RSSBytes == 0 || len(info.Workers) != 1 || info.Workers[0].Sessions[0] != list[0].ID {
 		t.Fatalf("inspect = %+v, %v", info, err)
 	}
 	if err := h.gw.CancelTurn("acct0", list[0].ID); !errors.Is(err, ErrNoSession) {
@@ -282,53 +277,6 @@ func TestInspectAndCloseSession(t *testing.T) {
 	}
 	if n := len(h.requests("session/new")); n != 1 {
 		t.Fatalf("session/new = %d, want 1 (reopened, not replayed)", n)
-	}
-}
-
-func TestProcessModeSwitchRetiresProcesses(t *testing.T) {
-	h := newHarness(t, 1, nil)
-	ctx := context.Background()
-	messages := []conv.Message{user("hello")}
-	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
-	if first.err != nil {
-		t.Fatalf("first = %+v", first)
-	}
-	old := h.p.Accounts()[0].LiveProcs()[0]
-
-	// bob's turn runs while the mode changes.
-	bobCtx, cancelBob := context.WithCancel(ctx)
-	bobDone := make(chan result)
-	go func() {
-		bobDone <- h.complete(bobCtx, "bob", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}})
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for !slices.ContainsFunc(h.gw.Sessions(), func(s SessionInfo) bool { return s.KeyHash == "hash-bob" && s.Turn != nil }) {
-		if time.Now().After(deadline) {
-			t.Fatal("bob's turn never started")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	h.p.SetProcessPerSession(true)
-	if !old.Alive() {
-		t.Fatal("a process with a running turn must live until the turn ends")
-	}
-	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
-	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
-	if second.err != nil || second.text != "reply to: again" || len(h.requests("session/resume")) != 1 {
-		t.Fatalf("after switch = %+v, resumes %d", second, len(h.requests("session/resume")))
-	}
-	procs := h.p.Accounts()[0].LiveProcs()
-	if len(procs) != 1 || procs[0] == old || !procs[0].PerSession() {
-		t.Fatalf("procs after switch = %v", procs)
-	}
-
-	cancelBob()
-	<-bobDone
-	select {
-	case <-old.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("the retired process outlived its last turn")
 	}
 }
 
@@ -725,46 +673,42 @@ func (h *harness) assertRewound(sessionID string, keep int) {
 }
 
 func TestRegenerateRewindsSession(t *testing.T) {
-	for _, perSession := range []bool{false, true} {
-		t.Run(fmt.Sprintf("perSession=%v", perSession), func(t *testing.T) {
-			h := newHarnessMode(t, 1, nil, perSession)
-			ctx := context.Background()
-			messages := []conv.Message{user("one")}
-			first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
-			messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("two"))
-			second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
-			if first.err != nil || second.err != nil {
-				t.Fatalf("first = %+v, second = %+v", first, second)
-			}
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	messages := []conv.Message{user("one")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("two"))
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil || second.err != nil {
+		t.Fatalf("first = %+v, second = %+v", first, second)
+	}
 
-			// The client regenerates the second reply with another input.
-			retry := append(slices.Clone(messages[:2]), user("@steps"))
-			r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: retry})
-			if r.err != nil || r.text != "steps: 2" {
-				t.Fatalf("regenerated = %+v, want the session rewound to 2 steps", r)
-			}
-			sessionID := h.requests("session/prompt")[0].Params.SessionID
-			h.assertRewound(sessionID, 2)
-			if n := len(h.requests("session/new")); n != 1 {
-				t.Fatalf("session/new count = %d, want 1", n)
-			}
+	// The client regenerates the second reply with another input.
+	retry := append(slices.Clone(messages[:2]), user("@steps"))
+	r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: retry})
+	if r.err != nil || r.text != "steps: 2" {
+		t.Fatalf("regenerated = %+v, want the session rewound to 2 steps", r)
+	}
+	sessionID := h.requests("session/prompt")[0].Params.SessionID
+	h.assertRewound(sessionID, 2)
+	if n := len(h.requests("session/new")); n != 1 {
+		t.Fatalf("session/new count = %d, want 1", n)
+	}
 
-			// The discarded branch's own position is gone; continuing it
-			// rewinds to the shared one again and sends the rest as delta.
-			discarded := append(slices.Clone(messages), conv.Message{Role: conv.RoleAssistant, Text: second.text}, user("three"))
-			if r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: discarded}); r.err != nil {
-				t.Fatal(r.err)
-			}
-			if n := len(h.requests("ls/RevertToCascadeStep")); n != 2 {
-				t.Fatalf("revert count = %d, want 2", n)
-			}
-			h.assertRewound(sessionID, 2)
-			prompts := h.requests("session/prompt")
-			delta := prompts[len(prompts)-1].Params.Prompt[0]
-			if delta.Resource == nil || !strings.Contains(delta.Resource.Text, "two") {
-				t.Fatalf("delta = %+v, want the discarded branch from message 3 on", delta)
-			}
-		})
+	// The discarded branch's own position is gone; continuing it rewinds
+	// to the shared one again and sends the rest as delta.
+	discarded := append(slices.Clone(messages), conv.Message{Role: conv.RoleAssistant, Text: second.text}, user("three"))
+	if r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: discarded}); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if n := len(h.requests("ls/RevertToCascadeStep")); n != 2 {
+		t.Fatalf("revert count = %d, want 2", n)
+	}
+	h.assertRewound(sessionID, 2)
+	prompts := h.requests("session/prompt")
+	delta := prompts[len(prompts)-1].Params.Prompt[0]
+	if delta.Resource == nil || !strings.Contains(delta.Resource.Text, "two") {
+		t.Fatalf("delta = %+v, want the discarded branch from message 3 on", delta)
 	}
 }
 

@@ -51,7 +51,6 @@ type ProcConfig struct {
 	Agent string
 	// CloudCodeEndpoint, when set, points agy at a loopback Cloud Code proxy.
 	CloudCodeEndpoint string
-	ProcessPerSession bool
 	// Env is appended to the minimal environment (HOME, PATH, LANG).
 	Env []string
 	Log *slog.Logger
@@ -114,7 +113,13 @@ func ImageBlock(data, mimeType string) ContentBlock {
 	return ContentBlock{Type: "image", Data: data, MimeType: mimeType}
 }
 
-// Proc is one running `agy acp` process.
+// Proc is one running `agy acp --process-per-session` front process; each
+// session runs in its own worker process.
+//
+// Sessions must not share a process: agy serves every session's MCP
+// "client" tools from the first such server registered in the process
+// (its tool list and its calls, verified on 1.5.3), so a second session
+// would call the first session's tools.
 type Proc struct {
 	cfg   ProcConfig
 	log   *slog.Logger
@@ -134,10 +139,6 @@ type Proc struct {
 	listeners  map[string]func(json.RawMessage)
 	suppressed map[string]bool
 	live       map[string]bool
-	// turns counts turns not yet settled; a retiring process is killed
-	// when it reaches 0.
-	turns    int
-	retiring bool
 }
 
 // StartProc spawns agy and completes the initialize handshake.
@@ -146,15 +147,12 @@ func StartProc(ctx context.Context, cfg ProcConfig) (*Proc, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	args := []string{"acp", "--gemini-dir", cfg.GeminiDir, "--disable-telemetry", "--sandbox"}
+	args := []string{"acp", "--gemini-dir", cfg.GeminiDir, "--disable-telemetry", "--sandbox", "--process-per-session"}
 	if cfg.Agent != "" {
 		args = append(args, "--agent", cfg.Agent)
 	}
 	if cfg.CloudCodeEndpoint != "" {
 		args = append(args, "--cloud_code_endpoint", cfg.CloudCodeEndpoint)
-	}
-	if cfg.ProcessPerSession {
-		args = append(args, "--process-per-session")
 	}
 
 	cmd := exec.Command(cfg.Bin, args...)
@@ -283,49 +281,11 @@ func (p *Proc) Err() error {
 
 func (p *Proc) Alive() bool { return p.Err() == nil }
 
-// PID is the process id (the front process under --process-per-session).
+// PID is the front process id.
 func (p *Proc) PID() int { return p.cmd.Process.Pid }
 
 // Agent is the profile this process runs.
 func (p *Proc) Agent() string { return p.cfg.Agent }
-
-// PerSession reports whether the process runs --process-per-session.
-func (p *Proc) PerSession() bool { return p.cfg.ProcessPerSession }
-
-// Retire kills the process once its running turns (parked ones included)
-// have ended. Its sessions must be reopened elsewhere.
-func (p *Proc) Retire() {
-	p.mu.Lock()
-	p.retiring = true
-	idle := p.turns == 0
-	p.mu.Unlock()
-	if idle {
-		p.Kill()
-	}
-}
-
-// Retiring reports whether Retire was called.
-func (p *Proc) Retiring() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.retiring
-}
-
-func (p *Proc) turnStarted() {
-	p.mu.Lock()
-	p.turns++
-	p.mu.Unlock()
-}
-
-func (p *Proc) turnEnded() {
-	p.mu.Lock()
-	p.turns--
-	retired := p.retiring && p.turns == 0
-	p.mu.Unlock()
-	if retired {
-		p.Kill()
-	}
-}
 
 // Kill terminates the process group: SIGTERM, then SIGKILL after a grace.
 func (p *Proc) Kill() {

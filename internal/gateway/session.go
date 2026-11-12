@@ -177,8 +177,7 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 				return nil, ctx.Err()
 			}
 		}
-		held := sess != nil && sess.proc.Alive() && sess.proc.HasSession(snap.SessionID)
-		live := held && !sess.proc.Retiring()
+		live := sess != nil && sess.proc.Alive() && sess.proc.HasSession(snap.SessionID)
 		if sess == nil {
 			sess = &session{ref: ref, id: snap.SessionID, user: snap.User, account: account}
 			g.sessions[ref] = sess
@@ -189,18 +188,7 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 		if live {
 			return at, nil
 		}
-		var err error
-		if held {
-			// A retiring process (the process mode changed) still holds
-			// it; one process at a time may hold a session.
-			if err = sess.proc.CloseSession(ctx, snap.SessionID); err != nil {
-				err = fmt.Errorf("close session in retiring process: %w", err)
-			}
-		}
-		if err == nil {
-			err = g.reopen(ctx, sess, tools)
-		}
-		if err != nil {
+		if err := g.reopen(ctx, sess, tools); err != nil {
 			g.mu.Lock()
 			if sess.binding != nil {
 				sess.binding.Close()

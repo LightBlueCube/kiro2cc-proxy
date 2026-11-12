@@ -35,12 +35,11 @@ type Worker struct {
 
 // ProcInfo describes a running agy process.
 type ProcInfo struct {
-	PID        int
-	Agent      string
-	Started    time.Time
-	PerSession bool
-	Resources  Resources
-	// Workers are the live workers under --process-per-session.
+	PID       int
+	Agent     string
+	Started   time.Time
+	Resources Resources
+	// Workers are the front's live workers.
 	Workers []Worker
 }
 
@@ -49,15 +48,12 @@ var servedBy = regexp.MustCompile(`session (\S+) served by worker (\d+)`)
 // Inspect reports the process, its live workers, and their resources.
 func (p *Proc) Inspect() (ProcInfo, error) {
 	pid := p.cmd.Process.Pid
-	info := ProcInfo{PID: pid, Agent: p.cfg.Agent, Started: p.started, PerSession: p.cfg.ProcessPerSession}
+	info := ProcInfo{PID: pid, Agent: p.cfg.Agent, Started: p.started}
 	res, _, err := readResources(pid)
 	if err != nil {
 		return info, err
 	}
 	info.Resources = res
-	if !p.cfg.ProcessPerSession {
-		return info, nil
-	}
 	front, err := p.readLog("acp-front", pid)
 	if err != nil {
 		return info, nil // no worker started yet
@@ -128,9 +124,8 @@ func readResources(pid int) (Resources, int, error) {
 	return res, group, nil
 }
 
-// CloseSession ends the session in this process; under
-// --process-per-session its worker exits. The conversation stays on disk,
-// so ReopenSession can bring it back.
+// CloseSession ends the session in this process, and its worker exits.
+// The conversation stays on disk, so ReopenSession can bring it back.
 func (p *Proc) CloseSession(ctx context.Context, sessionID string) error {
 	ctx, cancel := context.WithTimeout(ctx, sessionOpTimeout)
 	defer cancel()

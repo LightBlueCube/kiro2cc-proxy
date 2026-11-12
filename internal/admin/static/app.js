@@ -428,8 +428,6 @@ views.settings = container => {
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
     const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
-    const processMode = h("select", {}, [["per_account", t("settings.process_mode.per_account")], ["per_session", t("settings.process_mode.per_session")]]
-      .map(([value, label]) => h("option", { value, selected: value === s.process_mode }, label)));
 
     const modelInput = value => h("input", { value, list: "settings-models", required: true, style: "width:260px" });
     const number = (min, step) => value => h("input", { type: "number", min, step, value, style: "width:110px" });
@@ -451,7 +449,7 @@ views.settings = container => {
         await api("PUT", "settings", {
           turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
           retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
-          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, process_mode: processMode.value,
+          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
         });
         toast(t("common.saved"));
         await loadGeneral();
@@ -464,9 +462,6 @@ views.settings = container => {
         h("label", { title: t("settings.idle_close.hint") }, t("settings.idle_close"), withReset(idleClose, d.session_idle_close)),
         h("label", {}, t("settings.log_level"), withReset(level, d.log_level)),
         h("label", {}, t("settings.retention"), withReset(retention, d.retention_days))),
-      h("div", { class: "row" },
-        h("label", { title: t("settings.process_mode.hint") }, t("settings.process_mode"), withReset(processMode, d.process_mode))),
-      h("p", { class: "muted" }, t("settings.process_mode.note")),
       h("h3", {}, t("settings.outbound")),
       h("div", { class: "row" },
         h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
@@ -697,9 +692,7 @@ views.workers = container => {
     if (!a.procs.length) return h("p", { class: "muted" }, t("workers.no_procs"));
     const rows = [];
     for (const p of a.procs) {
-      const kind = p.per_session ? "front" : "agy";
-      const label = p.per_session ? t("workers.kind.front") : t("workers.kind.agy");
-      rows.push({ kind, label, pid: p.pid, agent: p.agent, up: fmt.span(p.started, now), rss: p.rss_bytes, cpu: p.cpu_seconds, sessions: "", error: p.error });
+      rows.push({ kind: "front", label: t("workers.kind.front"), pid: p.pid, agent: p.agent, up: fmt.span(p.started, now), rss: p.rss_bytes, cpu: p.cpu_seconds, sessions: "", error: p.error });
       for (const w of p.workers) {
         rows.push({ kind: "worker", label: t("workers.kind.worker", { number: w.number }), pid: w.pid, agent: "", up: "", rss: w.rss_bytes, cpu: w.cpu_seconds,
           sessions: w.sessions.map(id => id.slice(0, 8)).join(", ") });

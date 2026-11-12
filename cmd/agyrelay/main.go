@@ -120,10 +120,9 @@ func runServe(args []string) error {
 	defer tools.Close()
 
 	accountPool, err := pool.New(pool.Config{
-		Bin:               agyBin,
-		TurnsPerAccount:   settings.TurnsPerAccount,
-		ProcessPerSession: settings.PerSession(),
-		Log:               log.With("component", "pool"),
+		Bin:             agyBin,
+		TurnsPerAccount: settings.TurnsPerAccount,
+		Log:             log.With("component", "pool"),
 	})
 	if err != nil {
 		return err
