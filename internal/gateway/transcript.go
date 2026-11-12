@@ -149,7 +149,7 @@ func renderMessage(m conv.Message, imageBase int) string {
 			parts = append(parts, "<assistant>\n"+text+"\n</assistant>")
 		}
 		for _, call := range m.ToolCalls {
-			parts = append(parts, fmt.Sprintf("<assistant-tool-call name=%q id=%q>\n%s\n</assistant-tool-call>", modelToolName(call.Name), call.ID, canonicalJSON(call.Arguments)))
+			parts = append(parts, fmt.Sprintf("<assistant-tool-call name=%q id=%q>\n%s\n</assistant-tool-call>", modelToolName(call.Name), call.ID, canonicalJSON(withToolSummary(call.Arguments))))
 		}
 		return strings.Join(parts, "\n\n")
 	}
@@ -164,6 +164,27 @@ func modelToolName(name string) string {
 		return ""
 	}
 	return agy.ModelToolName(name)
+}
+
+// toolSummaryParam is the argument agy adds as required to every client
+// tool and strips before the call reaches the client; "" passes its check
+// (verified on 1.5.3).
+const toolSummaryParam = "toolSummary"
+
+// withToolSummary adds an empty toolSummary to a past call's arguments, so
+// history shows calls as the model must make them. The value is fixed to
+// keep replays byte-identical for prompt caching.
+func withToolSummary(args json.RawMessage) json.RawMessage {
+	var object map[string]any
+	if json.Unmarshal(args, &object) != nil || object == nil {
+		return args
+	}
+	if _, ok := object[toolSummaryParam]; ok {
+		return args
+	}
+	object[toolSummaryParam] = ""
+	out, _ := json.Marshal(object) // decoded JSON always re-encodes
+	return out
 }
 
 func nonEmpty(values []string) []string {
