@@ -65,7 +65,7 @@ func toolPolicy(tools []conv.ToolSpec) string {
 	return strings.Join([]string{
 		fmt.Sprintf("The client's tools in this session, served by the %s MCP server (you call them as mcp_%s_<name>; the transcript names them without the prefix):", agy.BridgeServer, agy.BridgeServer),
 		strings.Join(names, ", "),
-		fmt.Sprintf("For two or more independent, non-conflicting client tool calls, use %s once with {calls: [{name, arguments}, ...]} instead of issuing them sequentially. Never nest %s.", parallelToolName, parallelToolName),
+		fmt.Sprintf("For two or more independent, non-conflicting client tool calls, call mcp_%s_%s once with {calls: [{name, arguments}, ...]}, names without the prefix, instead of issuing them sequentially. Never nest %s.", agy.BridgeServer, parallelToolName, parallelToolName),
 	}, "\n")
 }
 
