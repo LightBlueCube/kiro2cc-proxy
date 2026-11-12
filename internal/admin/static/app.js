@@ -240,19 +240,50 @@ function spendCell(k, groups) {
     : spendBar(groupName(g), spent(g), k.limits[g]));
 }
 
-// modelPicker lists the catalog's model ids as checkboxes; none checked
-// allows every model. Selected ids missing from the catalog stay listed,
+// servedModels lists every model on offer: the gateway's catalog plus the
+// models each account reported, each with the accounts that reported it.
+function servedModels(catalog, accounts) {
+  const byId = new Map(catalog.map(m => [m.id, { id: m.id, name: m.name, accounts: [] }]));
+  for (const a of accounts) {
+    for (const m of a.models || []) {
+      if (!byId.has(m.id)) byId.set(m.id, { id: m.id, name: m.name, accounts: [] });
+      byId.get(m.id).accounts.push(a);
+    }
+  }
+  return [...byId.values()];
+}
+
+// modelPicker lists model ids as checkboxes; none checked allows every
+// model. Other ids can be typed in; selected ids not on offer stay listed,
 // so saving does not drop them.
-function modelPicker(catalog, selected) {
-  const known = new Set(catalog.map(m => m.id));
-  const ids = [...new Set([...known, ...selected])];
-  const boxes = ids.map(id => h("input", { type: "checkbox", value: id, checked: selected.includes(id) }));
+function modelPicker(offered, selected) {
+  const known = new Set(offered);
+  const boxes = [];
+  const list = h("div", { class: "picker" });
+  const add = (id, checked) => {
+    const existing = boxes.find(b => b.value === id);
+    if (existing) { existing.checked ||= checked; return; }
+    const box = h("input", { type: "checkbox", value: id, checked });
+    boxes.push(box);
+    list.append(h("label", { class: "check", title: known.has(id) ? null : t("keys.models.not_offered") }, box, h("span", { class: "mono" }, id)));
+  };
+  offered.forEach(id => add(id, selected.includes(id)));
+  selected.forEach(id => add(id, true));
+
+  const typed = h("input", { class: "mono", placeholder: t("keys.models.other"), style: "width:260px" });
+  const addTyped = () => {
+    const id = typed.value.trim();
+    if (!id) return;
+    add(id, true);
+    typed.value = "";
+  };
+  // Enter adds the typed id instead of submitting the form.
+  typed.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); addTyped(); } });
   return {
-    node: h("div", { class: "picker" },
-      ids.length ? ids.map((id, i) => h("label", { class: "check", title: known.has(id) ? null : t("keys.models.not_in_catalog") },
-        boxes[i], h("span", { class: "mono" }, id)))
-        : h("span", { class: "muted" }, t("keys.models.none_known"))),
-    read: () => boxes.filter(b => b.checked).map(b => b.value),
+    node: h("div", {}, list,
+      h("div", { class: "row", style: "margin-top:6px" }, typed, h("button", { type: "button", onclick: addTyped }, t("keys.models.add")))),
+    // An id typed but not yet added still counts.
+    read: () => { addTyped(); return boxes.filter(b => b.checked).map(b => b.value); },
   };
 }
 
@@ -261,7 +292,7 @@ views.keys = container => {
   const editor = h("div");
   const list = h("div");
   let groups = [];
-  let catalog = [];
+  let offered = [];
   let newLimits = null;
   let newModels = null;
 
@@ -291,15 +322,15 @@ views.keys = container => {
     h("button", { type: "submit" }, t("keys.create")));
 
   async function load() {
-    const [data, models] = await Promise.all([api("GET", "keys"), api("GET", "models")]);
+    const [data, catalog, accounts] = await Promise.all([api("GET", "keys"), api("GET", "models"), api("GET", "accounts")]);
     groups = data.groups;
-    catalog = models;
+    offered = servedModels(catalog, accounts).map(m => m.id);
     if (!newLimits) {
       newLimits = limitEditor(groups, { limit_total: null, limits: {} });
       limitsRow.replaceChildren(...newLimits.nodes);
     }
     if (!newModels) {
-      newModels = modelPicker(catalog, []);
+      newModels = modelPicker(offered, []);
       modelsBox.replaceChildren(newModels.node);
     }
     list.replaceChildren(table([
@@ -321,7 +352,7 @@ views.keys = container => {
 
   function editKey(k) {
     const noteInput = h("input", { value: k.note });
-    const models = modelPicker(catalog, k.models);
+    const models = modelPicker(offered, k.models);
     const limits = limitEditor(groups, k);
     const save = event => {
       event.preventDefault();
@@ -547,6 +578,7 @@ function accountBadge(a, ready) {
 
 views.accounts = container => {
   const cards = h("div", { class: "grid" });
+  const modelsCard = h("div", { class: "card" });
   const signins = new Map(); // account name → {url, code}
 
   const name = h("input", { required: true, maxlength: 64, placeholder: t("accounts.name.placeholder"), pattern: "[A-Za-z0-9][A-Za-z0-9_.\\-]*" });
@@ -666,13 +698,35 @@ views.accounts = container => {
         } }, t("common.remove"))));
   }
 
+  // offeredBy shows the first account in rotation that reported a model and
+  // how many more there are, "main (+2)"; every reporting account, with
+  // why it is out of rotation, shows on hover.
+  function offeredBy(m) {
+    const outOfRotation = a => a.paused ? t("account.paused") : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy") : "";
+    const ready = m.accounts.filter(a => !outOfRotation(a));
+    const hover = m.accounts.map(a => joined(a.name, outOfRotation(a))).join("\n");
+    if (!ready.length) return h("span", { class: "muted", title: hover || null }, "—");
+    return h("span", { title: hover }, ready[0].name, ready.length > 1 ? ` (+${ready.length - 1})` : "");
+  }
+
+  function renderModels(catalog, accounts) {
+    const unreported = accounts.filter(a => !a.models).length;
+    modelsCard.replaceChildren(h("h2", {}, t("accounts.models.title")),
+      table([
+        { title: t("common.model"), cell: m => stack(h("span", { class: "mono" }, m.id), m.name !== m.id ? m.name : "") },
+        { title: t("accounts.models.accounts"), hint: t("accounts.models.accounts.hint"), cell: offeredBy },
+      ], servedModels(catalog, accounts)),
+      unreported ? h("p", { class: "muted" }, t("accounts.models.unreported", { count: unreported })) : null);
+  }
+
   async function load() {
-    const accounts = await api("GET", "accounts");
+    const [accounts, catalog] = await Promise.all([api("GET", "accounts"), api("GET", "models")]);
     for (const a of accounts) if (a.login_pending === false) signins.delete(a.name);
+    renderModels(catalog, accounts);
     cards.replaceChildren(...(accounts.length ? accounts.map(card) : [h("p", { class: "muted" }, t("accounts.empty"))]));
   }
 
-  container.append(h("h1", {}, t("accounts.title")), h("div", { class: "card" }, form), cards);
+  container.append(h("h1", {}, t("accounts.title")), h("div", { class: "card" }, form), modelsCard, cards);
   // Re-render on a timer unless a sign-in is being typed.
   return polling(container, 10000, async () => { if (signins.size === 0) await load(); });
 };
