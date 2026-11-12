@@ -4,10 +4,10 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 
 	"agyrelay/internal/agy"
 	"agyrelay/internal/conv"
+	"agyrelay/internal/pool"
 )
 
 // agy's catalog lists one slug per effort tier ("gemini-3.8-flash-low").
@@ -39,38 +39,45 @@ var fallbackModels = []modelEntry{
 	{id: "gpt-oss-120b", name: "GPT-OSS 120B", efforts: []string{"medium"}},
 }
 
-type catalog struct {
-	mu      sync.Mutex
-	entries []modelEntry
-	live    bool
-}
+// Models lists what the accounts offer.
+func (g *Gateway) Models() []conv.ModelInfo { return modelInfos(g.offered()) }
 
-func newCatalog() *catalog {
-	return &catalog{entries: slices.Clone(fallbackModels)}
-}
-
-// update replaces the catalog with an account's live list.
-func (c *catalog) update(models []agy.ModelInfo) {
-	entries := entriesFromACP(models)
-	if len(entries) == 0 {
-		return
+// offered merges the catalogs agy reported for the accounts, a model's
+// tiers being those of any account; before any report it is the fallback
+// list.
+func (g *Gateway) offered() []modelEntry {
+	var merged []modelEntry
+	reported := false
+	for _, account := range g.pool.Accounts() {
+		models := account.Models()
+		if models == nil {
+			continue
+		}
+		reported = true
+		for _, e := range entriesFromACP(models) {
+			i := slices.IndexFunc(merged, func(m modelEntry) bool { return m.id == e.id })
+			if i < 0 {
+				merged = append(merged, e)
+				continue
+			}
+			merged[i].efforts = mergeEfforts(merged[i].efforts, e.efforts)
+		}
 	}
-	c.mu.Lock()
-	c.entries = entries
-	c.live = true
-	c.mu.Unlock()
+	if !reported {
+		return fallbackModels
+	}
+	return merged
 }
 
-func (c *catalog) isLive() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.live
-}
-
-func (c *catalog) list() []conv.ModelInfo {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return modelInfos(c.entries)
+func mergeEfforts(a, b []string) []string {
+	out := slices.Clone(a)
+	for _, tier := range b {
+		if !slices.Contains(out, tier) {
+			out = append(out, tier)
+		}
+	}
+	slices.SortFunc(out, func(x, y string) int { return slices.Index(effortOrder, x) - slices.Index(effortOrder, y) })
+	return out
 }
 
 func modelInfos(entries []modelEntry) []conv.ModelInfo {
@@ -96,29 +103,59 @@ func (g *Gateway) AccountModels(account string) []conv.ModelInfo {
 	return modelInfos(entriesFromACP(models))
 }
 
-// resolve maps a public model id and requested effort to the full ACP slug,
-// the public id, and the effort tier sent ("" for a model without tiers).
-// A tier slug ("gemini-3.8-flash-high") is accepted as is.
-func (c *catalog) resolve(model, effort string) (slug, id, tier string, ok bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, e := range c.entries {
+// modelChoice is a requested model as found in the catalog: the public id,
+// the requested effort, and the tier a tier slug ("gemini-3.8-flash-high")
+// pins, "" when the effort picks it.
+type modelChoice struct {
+	id, effort, pinned string
+}
+
+// lookupModel finds a public model id, or a tier slug, in entries.
+func lookupModel(entries []modelEntry, model, effort string) (modelChoice, bool) {
+	for _, e := range entries {
 		if e.id == model {
-			if len(e.efforts) == 0 {
-				return e.id, e.id, "", true
-			}
-			tier := pickEffort(effort, e.efforts)
-			return e.id + "-" + tier, e.id, tier, true
+			return modelChoice{id: e.id, effort: effort}, true
 		}
 	}
 	if m := tierPattern.FindStringSubmatch(model); m != nil {
-		for _, e := range c.entries {
+		for _, e := range entries {
 			if e.id == m[1] && slices.Contains(e.efforts, m[2]) {
-				return model, e.id, m[2], true
+				return modelChoice{id: e.id, effort: effort, pinned: m[2]}, true
 			}
 		}
 	}
-	return "", "", "", false
+	return modelChoice{}, false
+}
+
+// slugIn resolves the choice to the full ACP slug and the effort tier sent
+// ("" for a model without tiers) in entries; ok is false when entries do
+// not have the model or the pinned tier.
+func (c modelChoice) slugIn(entries []modelEntry) (slug, tier string, ok bool) {
+	i := slices.IndexFunc(entries, func(e modelEntry) bool { return e.id == c.id })
+	if i < 0 {
+		return "", "", false
+	}
+	efforts := entries[i].efforts
+	switch {
+	case len(efforts) == 0:
+		return c.id, "", c.pinned == ""
+	case c.pinned != "":
+		return c.id + "-" + c.pinned, c.pinned, slices.Contains(efforts, c.pinned)
+	}
+	tier = pickEffort(c.effort, efforts)
+	return c.id + "-" + tier, tier, true
+}
+
+// slugOn resolves the run's model on account by the catalog agy reported
+// for it; an account that has not reported one is tried with what the
+// accounts offer, and agy refuses a slug it lacks before any model call
+// (verified on 1.5.3). ok is false when the account does not offer it.
+func slugOn(account *pool.Account, r *run) (slug, tier string, ok bool) {
+	models := account.Models()
+	if models == nil {
+		return r.model.slugIn(r.offered)
+	}
+	return r.model.slugIn(entriesFromACP(models))
 }
 
 // pickEffort maps a requested effort onto the available tiers: the wanted

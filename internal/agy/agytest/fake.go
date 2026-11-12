@@ -26,6 +26,8 @@
 //	FAKE_AGY_LOG    append every request as a JSON line; language server
 //	                calls have the method "ls/<Name>"
 //	FAKE_AGY_QUOTA  answer every prompt with agy's quota notice
+//	FAKE_AGY_MODELS report these comma-separated model ids instead of
+//	                Models
 package agytest
 
 import (
@@ -93,6 +95,19 @@ var Models = []map[string]string{
 	{"modelId": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)"},
 	{"modelId": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)"},
 	{"modelId": "claude-opus-5-5-high", "name": "Claude Opus 5.5 (High)"},
+}
+
+// catalog is Models, or the ids FAKE_AGY_MODELS lists.
+func catalog() []map[string]string {
+	ids := os.Getenv("FAKE_AGY_MODELS")
+	if ids == "" {
+		return Models
+	}
+	var out []map[string]string
+	for _, id := range strings.Split(ids, ",") {
+		out = append(out, map[string]string{"modelId": id, "name": id})
+	}
+	return out
 }
 
 type fake struct {
@@ -219,7 +234,7 @@ func (f *fake) handle(msg rpcMessage) {
 		f.mu.Unlock()
 		os.MkdirAll(filepath.Dir(f.store(id)), 0o700)
 		f.open(id, p, nil)
-		f.reply(msg.ID, map[string]any{"sessionId": id, "models": map[string]any{"availableModels": Models}})
+		f.reply(msg.ID, map[string]any{"sessionId": id, "models": map[string]any{"availableModels": catalog()}})
 	case "session/resume", "session/load":
 		var p sessionParams
 		json.Unmarshal(msg.Params, &p)
@@ -240,6 +255,17 @@ func (f *fake) handle(msg rpcMessage) {
 		f.mu.Unlock()
 		f.reply(msg.ID, map[string]any{})
 	case "session/set_config_option":
+		var p struct {
+			ConfigID string `json:"configId"`
+			Value    string `json:"value"`
+		}
+		json.Unmarshal(msg.Params, &p)
+		offered := slices.ContainsFunc(catalog(), func(m map[string]string) bool { return m["modelId"] == p.Value })
+		if p.ConfigID == "model" && !offered {
+			// agy 1.5.3's answer to a slug outside the account's catalog.
+			f.fail(msg.ID, -32602, "Unknown model ID: "+p.Value)
+			return
+		}
 		f.reply(msg.ID, map[string]any{"configOptions": []any{}})
 	case "session/prompt":
 		f.prompt(msg)

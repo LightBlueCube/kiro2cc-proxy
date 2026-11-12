@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"agyrelay/internal/agy"
@@ -86,6 +87,10 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 	if err := account.Available(r.group); err != nil {
 		return nil, err
 	}
+	slug, tier, ok := slugOn(account, r)
+	if !ok {
+		return nil, fmt.Errorf("account %s does not offer model %s", snap.Account, r.req.Model)
+	}
 	at, err := g.claimSession(ctx, snap, account, r)
 	if err != nil {
 		if !errors.Is(err, errSessionBusy) && ctx.Err() == nil {
@@ -111,7 +116,7 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 		g.releaseClaim(at)
 		return nil, err
 	}
-	g.launch(at, account, r, deltaPromptBlocks(r.t.body[snap.Count:]), snap.Steps)
+	g.launch(at, account, r, slug, tier, deltaPromptBlocks(r.t.body[snap.Count:]), snap.Steps)
 	return at, nil
 }
 
@@ -221,27 +226,54 @@ func (g *Gateway) reopen(ctx context.Context, sess *session, r *run) error {
 	return nil
 }
 
-// startFresh opens a new session on the best account and replays the
-// transcript; reason says why, when it has history. Accounts that fail to
-// open one are skipped.
+// startFresh opens a new session on the best account that offers the
+// model and replays the transcript; reason says why, when it has history.
+// Accounts that fail to open one are skipped.
 func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (*activeTurn, *attemptFailure) {
 	var lastErr error
+	var lacking []string
 	for {
 		account, err := g.pool.Pick(r.user, r.group, r.exclude)
 		if err != nil {
+			// Catalogs that sessions just reported may show no account
+			// has the model, as the fallback list had promised.
+			if _, offered := lookupModel(g.offered(), r.req.Model, r.req.Effort); !offered {
+				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", r.req.Model)}}
+			}
 			message := err.Error()
+			if len(lacking) > 0 {
+				message += fmt.Sprintf("; model %s is not offered by %s", r.req.Model, strings.Join(lacking, ", "))
+			}
 			if lastErr != nil {
 				message += "; last error: " + lastErr.Error()
 			}
 			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnavailable, Message: message}}
 		}
+		skip := func() {
+			account.Release()
+			r.exclude[account.Name()] = true
+			lacking = append(lacking, account.Name())
+		}
+		if _, _, ok := slugOn(account, r); !ok {
+			skip()
+			continue
+		}
 		at, err := g.openSession(ctx, r, account)
 		if err == nil {
+			// The new session reported the account's catalog, so this is
+			// exact even for an account that had not reported one; the
+			// unused session is closed when idle.
+			slug, tier, ok := slugOn(account, r)
+			if !ok {
+				g.releaseClaim(at)
+				skip()
+				continue
+			}
 			r.mode, r.replayReason = ModeFresh, ""
 			if newestInput(r.t.body) > 0 {
 				r.mode, r.replayReason = ModeReplay, reason
 			}
-			g.launch(at, account, r, freshPrompt(r.t), 0)
+			g.launch(at, account, r, slug, tier, freshPrompt(r.t), 0)
 			return at, nil
 		}
 		account.Release()
@@ -273,7 +305,6 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 		binding.Close()
 		return nil, err
 	}
-	g.models.update(models)
 	account.SetModels(models)
 	sess.id, sess.ref, sess.binding = id, sessionRef(account.Name(), id), binding
 	at := newActiveTurn(sess)
@@ -284,13 +315,13 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 	return at, nil
 }
 
-// launch starts the prompt on a claimed session that has at least
-// baseSteps native steps. The slot on account is held until the turn
-// settles.
-func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, prompt []agy.ContentBlock, baseSteps int) {
+// launch starts the prompt with the model slug (effort tier) on a claimed
+// session that has at least baseSteps native steps. The slot on account is
+// held until the turn settles.
+func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, slug, tier string, prompt []agy.ContentBlock, baseSteps int) {
 	g.mu.Lock()
-	at.account, at.choice, at.consuming, at.baseSteps, at.started = account, r.choice(), true, baseSteps, time.Now()
-	at.turn = at.sess.proc.RunTurn(agy.TurnSpec{SessionID: at.sess.id, Model: r.slug, Prompt: prompt})
+	at.account, at.choice, at.slug, at.tier, at.consuming, at.baseSteps, at.started = account, r.choice(), slug, tier, true, baseSteps, time.Now()
+	at.turn = at.sess.proc.RunTurn(agy.TurnSpec{SessionID: at.sess.id, Model: slug, Prompt: prompt})
 	at.sess.lastUsed = time.Now()
 	g.mu.Unlock()
 	go g.watch(at)
