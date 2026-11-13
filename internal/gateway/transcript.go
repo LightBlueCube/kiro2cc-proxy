@@ -167,8 +167,9 @@ func modelToolName(name string) string {
 }
 
 // toolSummaryParam is the argument agy adds as required to every client
-// tool and strips before the call reaches the client; "" passes its check
-// (verified on 1.5.3).
+// tool and strips from a call before it reaches the bridge; "" passes its
+// check (verified on 1.5.3). Models also put it in the calls of a parallel
+// batch, which agy leaves alone, so parseParallel strips it there.
 const toolSummaryParam = "toolSummary"
 
 // withToolSummary adds an empty toolSummary to a past call's arguments, so

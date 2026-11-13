@@ -23,57 +23,71 @@ import (
 //	                     └─ else (cancel what runs there, rewind
 //	                        to a rewindable position) ──────────▶ warm delta
 //	no hit, or warm failed ─────────────────────────────────────▶ fresh replay
+//
+// Input past a position that cannot be rewound to removes it, so a
+// cancelled turn's input is never sent again on top of itself: the next
+// request plans from an earlier rewindable position.
 func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailure) {
 	if !r.reuse {
 		return g.startFresh(ctx, r, ReplayRetry)
 	}
-	snap, ok := g.anchoredSnapshot(r.t)
-	if !ok {
-		snap, ok = g.snaps.lookup(r.user, r.t)
+	for {
+		snap, ok := g.anchoredSnapshot(r.t)
+		if !ok {
+			snap, ok = g.snaps.lookup(r.user, r.t)
+		}
+		if !ok {
+			return g.startFresh(ctx, r, ReplayNoSnapshot)
+		}
+		if snap.ToolsKey != toolsKey(r.req.Tools) {
+			return g.startFresh(ctx, r, ReplayToolsChanged)
+		}
+		if at := g.tryContinue(snap, r); at != nil {
+			r.mode = ModeContinue
+			return at, nil
+		}
+		at, err := g.startWarm(ctx, snap, r)
+		if err == nil {
+			return at, nil
+		}
+		if errors.Is(err, errPositionGone) {
+			continue
+		}
+		if ctx.Err() != nil {
+			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
+		}
+		g.log.Info("warm session unusable; replaying fresh", "session", snap.SessionID, "err", err)
+		return g.startFresh(ctx, r, ReplayWarmFailed)
 	}
-	if !ok {
-		return g.startFresh(ctx, r, ReplayNoSnapshot)
-	}
-	if snap.ToolsKey != toolsKey(r.req.Tools) {
-		return g.startFresh(ctx, r, ReplayToolsChanged)
-	}
-	if at := g.tryContinue(snap, r); at != nil {
-		r.mode = ModeContinue
-		return at, nil
-	}
-	at, err := g.startWarm(ctx, snap, r)
-	if err == nil {
-		return at, nil
-	}
-	if ctx.Err() != nil {
-		return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
-	}
-	g.log.Info("warm session unusable; replaying fresh", "session", snap.SessionID, "err", err)
-	return g.startFresh(ctx, r, ReplayWarmFailed)
 }
 
 // tryContinue hands the client's tool results to a parked turn whose
 // boundary snapshot is the request's prefix.
 func (g *Gateway) tryContinue(snap snapshot, r *run) *activeTurn {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	sess := g.sessions[sessionRef(snap.Account, snap.SessionID)]
 	if sess == nil || sess.turn == nil {
+		g.mu.Unlock()
 		return nil
 	}
 	at := sess.turn
 	sameTurn := at.parked != nil && !at.finished && at.choice == r.choice()
 	if !sameTurn {
+		g.mu.Unlock()
 		return nil
 	}
 	results, trailing, ok := matchResults(at.parked, r.t.body[snap.Count:])
 	if !ok {
+		g.mu.Unlock()
 		return nil
 	}
 	group := at.parked
 	at.parked = nil
 	at.parkTimer.Stop()
 	at.consuming = true
+	g.mu.Unlock()
+
+	g.movedPast(snap.Account, snap.SessionID)
 	group.settle(groupResult(group, results, trailing), nil)
 	return at
 }
@@ -97,6 +111,12 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 			g.forget(snap.Account, snap.SessionID)
 		}
 		return nil, err
+	}
+	// Claiming may have waited for a cancelled turn that took input past
+	// snap.
+	if _, ok := g.snaps.position(snap.Account, snap.SessionID, snap.Count, snap.Hash); !ok {
+		g.releaseClaim(at)
+		return nil, errPositionGone
 	}
 	r.mode = ModeWarm
 	if snap.Steps > 0 {
@@ -319,6 +339,7 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 // session that has at least baseSteps native steps. The slot on account is
 // held until the turn settles.
 func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, slug, tier string, prompt []agy.ContentBlock, baseSteps int) {
+	g.movedPast(account.Name(), at.sess.id)
 	g.mu.Lock()
 	at.account, at.choice, at.slug, at.tier, at.consuming, at.baseSteps, at.started = account, r.choice(), slug, tier, true, baseSteps, time.Now()
 	at.usageSteps = baseSteps

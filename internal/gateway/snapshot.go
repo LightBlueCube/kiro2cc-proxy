@@ -148,6 +148,23 @@ func (s *snapshotStore) rewound(account, sessionID string, count int) error {
 	return s.save()
 }
 
+// movedPast forgets the session's positions it cannot be rewound to: the
+// session took input past them. If the turn that took it is cancelled,
+// the input stays in the session, and starting from such a position again
+// would send the input a second time.
+func (s *snapshotStore) movedPast(account, sessionID string) error {
+	ref := sessionRef(account, sessionID)
+	s.mu.Lock()
+	before := len(s.bySession[ref])
+	s.keepLocked(ref, func(old snapshot) bool { return old.Steps > 0 })
+	changed := len(s.bySession[ref]) != before
+	s.mu.Unlock()
+	if !changed {
+		return nil
+	}
+	return s.save()
+}
+
 // drop forgets a session: its native state no longer matches any client
 // transcript we know.
 func (s *snapshotStore) drop(account, sessionID string) error {
