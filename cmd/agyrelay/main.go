@@ -232,6 +232,9 @@ func deriveAgy(cfg *config, log *slog.Logger) (string, error) {
 	// The check held the whole executable (~250 MB) in memory.
 	debug.FreeOSMemory()
 	log.Info("agy patched", "agy_version", report.Version(), "agy_sha256", report.SHA256, "derived", path)
+	if err := agybin.RemoveStale(cfg.derivedAgyDir(), path); err != nil {
+		log.Warn("old patched agy copies not deleted", "dir", cfg.derivedAgyDir(), "err", err)
+	}
 	return path, nil
 }
 

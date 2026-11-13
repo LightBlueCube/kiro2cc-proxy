@@ -162,6 +162,27 @@ func (s *snapshotStore) drop(account, sessionID string) error {
 	return s.save()
 }
 
+// live returns the sessions whose newest position is younger than the TTL
+// plus margin, and forgets the others.
+func (s *snapshotStore) live(margin time.Duration) (map[string]bool, error) {
+	refs := map[string]bool{}
+	dropped := false
+	s.mu.Lock()
+	for ref, positions := range s.bySession {
+		if time.Since(positions[len(positions)-1].UpdatedAt) > s.ttl()+margin {
+			s.keepLocked(ref, func(snapshot) bool { return false })
+			dropped = true
+			continue
+		}
+		refs[ref] = true
+	}
+	s.mu.Unlock()
+	if !dropped {
+		return refs, nil
+	}
+	return refs, s.save()
+}
+
 // keepLocked removes the session's positions that keep rejects.
 func (s *snapshotStore) keepLocked(ref string, keep func(snapshot) bool) {
 	var kept []snapshot

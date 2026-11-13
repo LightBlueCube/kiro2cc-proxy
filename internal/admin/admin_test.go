@@ -637,6 +637,14 @@ func TestImportSignIn(t *testing.T) {
 	if !slices.Contains(actions, "signin_imported main as "+agytest.LoginEmail) {
 		t.Fatalf("audit = %v", actions)
 	}
+
+	// Removing the account deletes its sign-in with its HOME.
+	if r := c.do("DELETE", "/admin/api/accounts/main", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("remove = %d %s", r.status, r.raw)
+	}
+	if _, err := os.Stat(filepath.Join(e.accounts, "main")); !os.IsNotExist(err) {
+		t.Fatalf("HOME after removal: %v", err)
+	}
 }
 
 func TestAccountSignIn(t *testing.T) {

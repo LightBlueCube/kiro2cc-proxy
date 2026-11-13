@@ -9,6 +9,7 @@
 #
 # Run (IMAGE: e.g. ghcr.io/OWNER/REPO:BRANCH):
 #   docker run -d --name agyrelay --restart unless-stopped \
+#     --log-opt max-size=10m --log-opt max-file=5 \
 #     -p 127.0.0.1:8787:8787 -v agyrelay:/var/lib/agyrelay IMAGE
 #   docker exec -it agyrelay agyrelay passwd -config /etc/agyrelay.json
 #   docker logs -f agyrelay

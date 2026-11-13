@@ -468,6 +468,78 @@ func TestPlainReplyThenWarmDelta(t *testing.T) {
 	}
 }
 
+func TestPruneDeletesSessionsNobodyCanContinue(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	messages := []conv.Message{user("hello")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	account := h.p.Accounts()[0]
+	sessionID := h.gw.Sessions()[0].ID
+	dir := filepath.Join(account.GeminiDir(), "antigravity-cli")
+	old := time.Now().Add(-2 * conversationGrace)
+	age := func(path string) {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path string) {
+		os.MkdirAll(filepath.Dir(path), 0o700)
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(dir, "conversations", "probe.db"))
+	write(filepath.Join(dir, "brain", "probe", "scratch", "x"))
+	age(filepath.Join(dir, "conversations", "probe.db"))
+	write(filepath.Join(dir, "conversations", "starting.db"))
+	age(account.ConversationStore(sessionID))
+	exists := func(id string) bool {
+		_, err := os.Stat(filepath.Join(dir, "conversations", id+".db"))
+		return err == nil
+	}
+
+	h.gw.pruneConversations()
+	if exists("probe") || !exists("starting") || !exists(sessionID) {
+		t.Fatalf("after prune: probe %v, starting %v, open session %v", exists("probe"), exists("starting"), exists(sessionID))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "brain", "probe")); err == nil {
+		t.Fatal("the probe's brain directory stayed")
+	}
+
+	// Closed, its snapshot still lets alice continue it.
+	if err := h.gw.CloseSession(ctx, account.Name(), sessionID); err != nil {
+		t.Fatal(err)
+	}
+	h.gw.pruneConversations()
+	if !exists(sessionID) {
+		t.Fatal("a session with a live snapshot was deleted")
+	}
+
+	// Past the TTL and the grace, nobody can continue it.
+	h.gw.snaps.mu.Lock()
+	for ref, positions := range h.gw.snaps.bySession {
+		for i := range positions {
+			positions[i].UpdatedAt = time.Now().Add(-time.Hour - 2*conversationGrace)
+		}
+		h.gw.snaps.bySession[ref] = positions
+	}
+	h.gw.snaps.mu.Unlock()
+	h.gw.pruneConversations()
+	if exists(sessionID) {
+		t.Fatal("a session past its snapshot's expiry stayed")
+	}
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
+	if second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages}); second.err != nil {
+		t.Fatal(second.err)
+	}
+	if n := len(h.requests("session/new")); n != 2 {
+		t.Fatalf("session/new count = %d, want 2 (replayed)", n)
+	}
+}
+
 func TestSystemMessagePlacement(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()
