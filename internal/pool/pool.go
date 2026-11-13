@@ -168,9 +168,20 @@ func (p *Pool) Remove(name string) error {
 	a.mu.Lock()
 	a.removed = true
 	a.mu.Unlock()
-	a.killProcs()
+	// The caller deletes the account's files next; agy must be gone.
+	for _, proc := range a.killProcs() {
+		select {
+		case <-proc.Done():
+		case <-time.After(removeWait):
+			return fmt.Errorf("agy (pid %d) of account %q did not exit", proc.PID(), name)
+		}
+	}
 	return nil
 }
+
+// removeWait bounds how long Remove waits for agy to exit after its kill,
+// which escalates to SIGKILL within a second.
+const removeWait = 5 * time.Second
 
 // SetTurnsPerAccount changes the per-account turn cap; turns running
 // above a lowered cap finish normally.
@@ -419,15 +430,19 @@ func (a *Account) LiveProcs() []*agy.Proc {
 
 // killProcs kills the running processes and forgets them at once, so the
 // next Proc starts a new one instead of returning a process still dying.
-func (a *Account) killProcs() {
+// It returns the killed processes.
+func (a *Account) killProcs() []*agy.Proc {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	var killed []*agy.Proc
 	for name, slot := range a.procs {
 		if slot.proc != nil {
 			slot.proc.Kill()
+			killed = append(killed, slot.proc)
 			delete(a.procs, name)
 		}
 	}
+	return killed
 }
 
 // Proc returns the live process for profile, starting it when needed.

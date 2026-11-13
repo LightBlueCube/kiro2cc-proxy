@@ -185,7 +185,7 @@
   "accounts.refreshed_all": { "one": "Refreshed {count} account", "other": "Refreshed {count} accounts" },
   "accounts.pause": "Pause",
   "accounts.resume": "Resume",
-  "accounts.remove.confirm": "Remove {name}? Its running turns fail. Its files stay on disk, so adding it again under the same name keeps its sign-in.",
+  "accounts.remove.confirm": "Remove {name}? Its running turns fail, and its sign-in and stored sessions are deleted from disk.",
 
   "process.front": "The agy front process (one per account and client tool set); it hands each session to its own worker process",
   "process.worker": "A worker process, running the session listed",

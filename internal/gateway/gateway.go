@@ -717,10 +717,12 @@ func (g *Gateway) agentError(at *activeTurn) *conv.Error {
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if
-// shorter) and drops sessions agy no longer holds.
+// shorter), drops sessions agy no longer holds, and now and then deletes
+// agy's files of sessions nobody can continue.
 func (g *Gateway) janitor() {
 	ticker := time.NewTicker(janitorInterval)
 	defer ticker.Stop()
+	var pruned time.Time
 	for {
 		select {
 		case <-g.stop:
@@ -728,6 +730,10 @@ func (g *Gateway) janitor() {
 		case <-ticker.C:
 		}
 		g.sweep()
+		if time.Since(pruned) >= conversationPruneEvery {
+			g.pruneConversations()
+			pruned = time.Now()
+		}
 	}
 }
 

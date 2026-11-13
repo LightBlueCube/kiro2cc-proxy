@@ -107,6 +107,26 @@ func Derive(src, dir string) (string, *Report, error) {
 	return path, report, nil
 }
 
+// RemoveStale deletes the copies in dir other than current, left by other
+// agy versions or patch sets (each about 250 MB), with their checksums.
+func RemoveStale(dir, current string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		ours := strings.HasPrefix(entry.Name(), "agy-")
+		if !ours || path == current || path == current+".sha256" {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // inspect reads the executable and patches it in memory.
 func inspect(path string) (*Report, []byte, error) {
 	data, err := os.ReadFile(path)

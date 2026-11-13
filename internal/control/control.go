@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"time"
 	"unicode"
 
+	"agyrelay/internal/agy"
 	"agyrelay/internal/cloudcode"
 	"agyrelay/internal/conv"
 	"agyrelay/internal/egress"
@@ -297,13 +299,26 @@ func (c *Control) applyRoutes(ctx context.Context) error {
 // pruneEvery is how often records past the retention are deleted.
 const pruneEvery = 6 * time.Hour
 
-// RunRetention deletes old records now and then every pruneEvery until ctx
-// ends.
+// agyLogRetention is how long agy's own logs and crash reports stay. They
+// only help debugging; the retention setting covers the relay's records.
+const agyLogRetention = 7 * 24 * time.Hour
+
+// RunRetention deletes old records and agy logs now and then every
+// pruneEvery until ctx ends.
 func (c *Control) RunRetention(ctx context.Context) {
 	for {
 		days := c.Settings().RetentionDays
 		if err := c.cfg.Store.Prune(ctx, time.Now().AddDate(0, 0, -days)); err != nil && ctx.Err() == nil {
 			c.log.Error("pruning old records failed", "err", err)
+		}
+		for _, account := range c.cfg.Pool.Accounts() {
+			removed, err := agy.PruneLogs(account.GeminiDir(), time.Now().Add(-agyLogRetention))
+			if err != nil {
+				c.log.Warn("pruning agy logs failed", "account", account.Name(), "err", err)
+			}
+			if removed > 0 {
+				c.log.Info("old agy logs deleted", "account", account.Name(), "count", removed)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -416,7 +431,8 @@ func cleanProxy(raw string) (string, error) {
 	return (&url.URL{Scheme: u.Scheme, User: u.User, Host: u.Host}).String(), nil
 }
 
-// RemoveAccount unregisters the account; its HOME directory stays.
+// RemoveAccount unregisters the account and deletes its HOME directory:
+// its sign-in and agy's sessions go with it.
 func (c *Control) RemoveAccount(ctx context.Context, name string) error {
 	if err := c.cfg.Store.RemoveAccount(ctx, name); err != nil {
 		return err
@@ -428,6 +444,9 @@ func (c *Control) RemoveAccount(ctx context.Context, name string) error {
 	}
 	c.cfg.CloudCode.Forget(name)
 	c.cfg.Egress.Forget(name)
+	if err := os.RemoveAll(c.accountHome(name)); err != nil {
+		return fmt.Errorf("account removed, but deleting its files failed: %w", err)
+	}
 	return nil
 }
 
