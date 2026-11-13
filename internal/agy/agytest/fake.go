@@ -19,7 +19,8 @@
 // QuotaPerPrompt for every prompt the process served.
 //
 // Like agy, the fake runs a language server with the session's steps
-// (stored in its conversation file) and logs its port. After
+// (stored in its conversation file) and logs its port. Each model call
+// step reports Step* tokens, and a turn's usage sums them. After
 // RevertToCascadeStep the next prompt replies "stale stream" unless the
 // session was resumed, as agy streams stale text then. Environment:
 //
@@ -55,6 +56,21 @@ const (
 	// stepErrorMessage records a failed model call.
 	stepErrorMessage = "CORTEX_STEP_TYPE_ERROR_MESSAGE"
 )
+
+// Tokens of each model call (PLANNER_RESPONSE step): uncached input,
+// cache reads, and output, which includes the thoughts.
+const (
+	StepInput   = 60
+	StepCached  = 40
+	StepOutput  = 10
+	StepThought = 5
+)
+
+// stepModelUsage is a step's metadata.modelUsage, in agy's format.
+var stepModelUsage = map[string]string{
+	"inputTokens": fmt.Sprint(StepInput), "cacheReadTokens": fmt.Sprint(StepCached),
+	"outputTokens": fmt.Sprint(StepOutput), "thinkingOutputTokens": fmt.Sprint(StepThought),
+}
 
 // OverflowError is the model error of the "@overflow" prompt, as agy
 // records it for Gemini.
@@ -412,9 +428,21 @@ func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
 	switch r.PathValue("method") {
 	case "GetCascadeTrajectorySteps":
 		steps := []map[string]any{}
-		for _, step := range s.steps[min(req.StepOffset, len(s.steps)):] {
-			entry := map[string]any{"type": step}
-			if step == stepErrorMessage {
+		execution := ""
+		for i, step := range s.steps {
+			// Like agy, each prompt's steps share an executionId.
+			if step == stepUserInput {
+				execution = fmt.Sprintf("exec-%d", i)
+			}
+			if i < req.StepOffset {
+				continue
+			}
+			metadata := map[string]any{"executionId": execution}
+			entry := map[string]any{"type": step, "metadata": metadata}
+			switch step {
+			case stepPlanner:
+				metadata["modelUsage"] = stepModelUsage
+			case stepErrorMessage:
 				entry["errorMessage"] = map[string]any{"error": map[string]any{"modelErrorMessage": OverflowError, "errorCode": 400}}
 			}
 			steps = append(steps, entry)
@@ -501,7 +529,19 @@ func (f *fake) prompt(msg rpcMessage) {
 	}
 	f.addSteps(p.SessionID, s, stepPlanner)
 	f.chunk(p.SessionID, "agent_message_chunk", text)
-	f.reply(msg.ID, map[string]any{"stopReason": "end_turn", "usage": map[string]int{"inputTokens": 100, "outputTokens": 10, "thoughtTokens": 5, "cachedReadTokens": 40, "totalTokens": 115}})
+
+	// Like agy's, the turn's usage sums its model calls.
+	f.mu.Lock()
+	calls := int64(0)
+	for _, step := range s.steps[stepsBefore:] {
+		if step == stepPlanner {
+			calls++
+		}
+	}
+	f.mu.Unlock()
+	f.reply(msg.ID, map[string]any{"stopReason": "end_turn", "usage": map[string]int64{
+		"inputTokens": calls * StepInput, "cachedReadTokens": calls * StepCached, "outputTokens": calls * StepOutput,
+		"thoughtTokens": calls * StepThought, "totalTokens": calls * (StepInput + StepCached + StepOutput)}})
 }
 
 func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input string) (string, error) {

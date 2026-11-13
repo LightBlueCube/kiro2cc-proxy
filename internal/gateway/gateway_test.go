@@ -441,8 +441,8 @@ func TestPlainReplyThenWarmDelta(t *testing.T) {
 	if first.err != nil || first.finish != conv.FinishStop || first.text != "reply to: hello" {
 		t.Fatalf("first = %+v", first)
 	}
-	if first.usage == nil || first.usage.PromptTokens != 140 || first.usage.CachedTokens != 40 || first.usage.CompletionTokens != 15 {
-		t.Fatalf("usage = %+v", first.usage)
+	if first.usage == nil || *first.usage != oneCall {
+		t.Fatalf("usage = %+v, want %+v", first.usage, oneCall)
 	}
 
 	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
@@ -465,6 +465,86 @@ func TestPlainReplyThenWarmDelta(t *testing.T) {
 	}
 	if n := len(h.requests("session/new")); n != 2 {
 		t.Fatalf("session/new count = %d, want 2", n)
+	}
+}
+
+// oneCall is the usage of one model call of the fake agy.
+var oneCall = conv.Usage{
+	PromptTokens:     agytest.StepInput + agytest.StepCached,
+	CompletionTokens: agytest.StepOutput,
+	ReasoningTokens:  agytest.StepThought,
+	CachedTokens:     agytest.StepCached,
+}
+
+// Each response of an agent loop reports its own model calls, not the
+// turn's sum, so clients see the context size.
+func TestToolLoopResponsesReportTheirOwnCalls(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	var messages []conv.Message
+	for turn := range 2 {
+		messages = append(messages, user(`@tool read {}`))
+		call := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+		if call.finish != conv.FinishToolCalls || call.usage == nil || *call.usage != oneCall {
+			t.Fatalf("turn %d tool-call response: finish %q usage %+v, want %+v", turn, call.finish, call.usage, oneCall)
+		}
+		messages = append(messages,
+			conv.Message{Role: conv.RoleAssistant, ToolCalls: call.calls},
+			conv.Message{Role: conv.RoleTool, ToolCallID: call.calls[0].ID, Text: "x"})
+		done := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+		if done.finish != conv.FinishStop || done.usage == nil || *done.usage != oneCall {
+			t.Fatalf("turn %d final response: finish %q usage %+v, want %+v (the turn's total less the first call)", turn, done.finish, done.usage, oneCall)
+		}
+		messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: done.text})
+	}
+	if n := len(h.requests("session/new")); n != 1 {
+		t.Fatalf("session/new count = %d, want 1 (the second turn runs on the same session)", n)
+	}
+}
+
+// A position the client left mid-turn has no step count, so the next turn
+// launches knowing only a lower bound; its tool-call response still counts
+// only its own calls.
+func TestToolCallUsageSkipsEarlierTurns(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+	messages := []conv.Message{user("hello")}
+	first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("@hang"))
+	hangCtx, cancel := context.WithCancel(ctx)
+	done := make(chan result)
+	go func() {
+		done <- h.complete(hangCtx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(h.requests("session/prompt")) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("second prompt never sent")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	messages = append(messages, user(`@tool read {}`))
+	call := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+	if call.finish != conv.FinishToolCalls || call.usage == nil || *call.usage != oneCall {
+		t.Fatalf("tool-call response: finish %q usage %+v, want %+v", call.finish, call.usage, oneCall)
+	}
+	if n := len(h.requests("session/new")); n != 1 {
+		t.Fatalf("session/new count = %d, want 1 (the turns share a session)", n)
+	}
+
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: call.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: call.calls[0].ID, Text: "x"})
+	end := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+	if end.finish != conv.FinishStop || end.usage == nil || *end.usage != oneCall {
+		t.Fatalf("final response: finish %q usage %+v, want %+v", end.finish, end.usage, oneCall)
 	}
 }
 
@@ -1071,14 +1151,14 @@ func TestRecordsDescribeRequests(t *testing.T) {
 		}
 	}
 	tool, done := records[0], records[1]
-	if tool.Finish != conv.FinishToolCalls || tool.Usage != nil || tool.Account != "acct0" || tool.Model != model || tool.QuotaGroup != "gemini" {
+	if tool.Finish != conv.FinishToolCalls || tool.Usage == nil || *tool.Usage != oneCall || tool.Account != "acct0" || tool.Model != model || tool.QuotaGroup != "gemini" {
 		t.Errorf("tool-call record = %+v", tool)
 	}
 	// The fake offers low and high: no effort picks the first.
 	if tool.Effort != "low" || tool.Slug != model+"-low" || records[3].Effort != "high" || records[3].Slug != model+"-high" {
 		t.Errorf("efforts = %q (slug %q), %q (slug %q), want low, high", tool.Effort, tool.Slug, records[3].Effort, records[3].Slug)
 	}
-	if done.Finish != conv.FinishStop || done.Usage == nil || done.TimeToFirstOutput <= 0 || done.Duration < done.TimeToFirstOutput {
+	if done.Finish != conv.FinishStop || done.Usage == nil || *done.Usage != oneCall || done.TimeToFirstOutput <= 0 || done.Duration < done.TimeToFirstOutput {
 		t.Errorf("final record = %+v", done)
 	}
 	if bad := records[4]; bad.Err == nil || bad.Err.Kind != conv.ErrUnknownModel || bad.Account != "" {

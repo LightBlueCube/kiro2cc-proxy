@@ -27,6 +27,13 @@ import (
 //   - Calls are unauthenticated JSON POSTs to lsServicePath + method.
 //   - GetCascadeTrajectorySteps{cascadeId, stepOffset} lists the steps from
 //     stepOffset on. A finished turn ends with a PLANNER_RESPONSE step.
+//   - Every step of one session/prompt has the same metadata.executionId.
+//     Each model call is a PLANNER_RESPONSE step whose metadata.modelUsage
+//     holds that call's tokens as decimal strings, zero ones left out:
+//     inputTokens (uncached), cacheReadTokens, and outputTokens, which
+//     include thinkingOutputTokens. A turn's PromptResponse.usage is the
+//     sum over its calls. When agy calls a client tool, the step of the
+//     call that asked for it already has its modelUsage.
 //   - RevertToCascadeStep{cascadeId, stepIndex, conversationOnly} keeps steps
 //     0..stepIndex. It fails for sessions the process has not loaded. A
 //     prompt that follows it streams stale text until session/resume.
@@ -52,6 +59,48 @@ func (p *Proc) StepCount(ctx context.Context, sessionID string, known int) (int,
 		return 0, err
 	}
 	return known + len(result.Steps), nil
+}
+
+// TurnUsage sums the model calls of the session's running turn from step
+// from on (a lower bound is fine: earlier turns' steps are skipped), and
+// returns the sum with the session's step count.
+func (p *Proc) TurnUsage(ctx context.Context, sessionID string, from int) (Usage, int, error) {
+	var result struct {
+		Steps []struct {
+			Metadata struct {
+				ExecutionID string `json:"executionId"`
+				ModelUsage  *struct {
+					InputTokens     int64 `json:"inputTokens,string"`
+					CacheReadTokens int64 `json:"cacheReadTokens,string"`
+					OutputTokens    int64 `json:"outputTokens,string"`
+					ThinkingTokens  int64 `json:"thinkingOutputTokens,string"`
+				} `json:"modelUsage"`
+			} `json:"metadata"`
+		} `json:"steps"`
+	}
+	err := p.lsCall(ctx, sessionID, "GetCascadeTrajectorySteps", map[string]any{"cascadeId": sessionID, "stepOffset": from}, &result)
+	if err != nil {
+		return Usage{}, 0, err
+	}
+	steps := result.Steps
+	if len(steps) == 0 {
+		return Usage{}, from, nil
+	}
+
+	// The newest step belongs to the running turn.
+	turn := steps[len(steps)-1].Metadata.ExecutionID
+	var sum Usage
+	for _, step := range steps {
+		u := step.Metadata.ModelUsage
+		if u == nil || step.Metadata.ExecutionID != turn {
+			continue
+		}
+		sum.InputTokens += u.InputTokens
+		sum.CachedReadTokens += u.CacheReadTokens
+		sum.OutputTokens += u.OutputTokens
+		sum.ThoughtTokens += u.ThinkingTokens
+	}
+	return sum, from + len(steps), nil
 }
 
 // StepError is the model API failure an ERROR_MESSAGE step records.
