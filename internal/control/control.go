@@ -620,6 +620,11 @@ func (c *Control) RestartAccount(name string) error {
 // Egress is the account's outbound traffic and route.
 func (c *Control) Egress(account string) (egress.Stats, bool) { return c.cfg.Egress.Stats(account) }
 
+// KeyTotals is every key's successful requests and tokens by model.
+func (c *Control) KeyTotals(ctx context.Context) ([]store.KeyTotal, error) {
+	return c.cfg.Store.KeyTotals(ctx)
+}
+
 // KeySpends is every key's list-price spend in USD by quota group.
 func (c *Control) KeySpends(ctx context.Context) (map[string]map[string]float64, error) {
 	return c.cfg.Budget.Spends(ctx, "")

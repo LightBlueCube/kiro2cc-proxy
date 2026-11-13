@@ -39,10 +39,14 @@ type Request struct {
 	QuotaUsed *float64
 }
 
+// StatusOK is the Status of a request that succeeded.
+const StatusOK = "ok"
+
 const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used`
 
-// AddRequest stores the request and adds its cost to the key's spend.
+// AddRequest stores the request, adds its cost to the key's spend, and
+// counts it in the key's totals when it succeeded.
 func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	var ttft sql.NullInt64
 	if r.TTFT != nil {
@@ -63,6 +67,13 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	if r.CostUSD != nil && *r.CostUSD > 0 {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_hash, grp, cost_usd) VALUES (?, ?, ?)
 			ON CONFLICT (key_hash, grp) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd`, r.KeyHash, r.QuotaGroup, *r.CostUSD); err != nil {
+			return err
+		}
+	}
+	if r.Status == StatusOK {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO key_totals (key_hash, model, requests, input, output) VALUES (?, ?, 1, ?, ?)
+			ON CONFLICT (key_hash, model) DO UPDATE SET requests = requests + 1, input = input + excluded.input, output = output + excluded.output`,
+			r.KeyHash, r.Model, r.Input, r.Output); err != nil {
 			return err
 		}
 	}
@@ -343,6 +354,34 @@ func (s *Store) KeySpends(ctx context.Context, keyHash string) ([]KeySpend, erro
 	for rows.Next() {
 		var k KeySpend
 		if err := rows.Scan(&k.KeyHash, &k.Group, &k.CostUSD); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// KeyTotal counts a key's successful requests to one model and their
+// tokens since the key was created; pruning requests keeps it.
+type KeyTotal struct {
+	KeyHash  string
+	Model    string
+	Requests int64
+	Input    int64
+	Output   int64
+}
+
+// KeyTotals lists every key's totals by key hash, then by most tokens.
+func (s *Store) KeyTotals(ctx context.Context) ([]KeyTotal, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, model, requests, input, output FROM key_totals ORDER BY key_hash, input + output DESC, model`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KeyTotal
+	for rows.Next() {
+		var k KeyTotal
+		if err := rows.Scan(&k.KeyHash, &k.Model, &k.Requests, &k.Input, &k.Output); err != nil {
 			return nil, err
 		}
 		out = append(out, k)

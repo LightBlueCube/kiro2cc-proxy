@@ -19,7 +19,8 @@ var migrations = []string{
 	// api_keys.hash is the key's lowercase hex SHA-256 and identifies it;
 	// requests keep the key's name for display after the key is deleted.
 	// key_usage keeps each key's list-price spend after old requests are
-	// pruned; key limits count it.
+	// pruned; key limits count it. key_totals likewise keeps each key's
+	// successful requests and tokens by model.
 	`CREATE TABLE settings (
 		name  TEXT PRIMARY KEY,
 		value TEXT NOT NULL
@@ -109,6 +110,14 @@ var migrations = []string{
 		grp      TEXT NOT NULL,
 		cost_usd REAL NOT NULL,
 		PRIMARY KEY (key_hash, grp)
+	);
+	CREATE TABLE key_totals (
+		key_hash TEXT NOT NULL,
+		model    TEXT NOT NULL,
+		requests INTEGER NOT NULL,
+		input    INTEGER NOT NULL,
+		output   INTEGER NOT NULL,
+		PRIMARY KEY (key_hash, model)
 	);`,
 }
 
