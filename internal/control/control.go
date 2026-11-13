@@ -382,6 +382,20 @@ func (c *Control) addToPool(name string, env []string, accountProxy string) (*po
 			return
 		}
 		account.SetVerification(true, v.URL)
+	}, func(session string, callErr *cloudcode.CallError) {
+		account := c.cfg.Pool.Account(name)
+		if account == nil {
+			return
+		}
+		if callErr == nil {
+			account.RecordModelCall(session, nil)
+			return
+		}
+		failure := &pool.ModelFailure{Code: callErr.Code, Message: callErr.Message}
+		if callErr.RetryAfter > 0 {
+			failure.Reset = time.Now().Add(callErr.RetryAfter)
+		}
+		account.RecordModelCall(session, failure)
 	})
 	if err != nil {
 		c.cfg.Egress.Forget(name)

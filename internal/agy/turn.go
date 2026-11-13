@@ -273,10 +273,6 @@ func (t *Turn) onUpdate(raw json.RawMessage) {
 func (t *Turn) applyLocked(update mappedUpdate) {
 	switch update.kind {
 	case updateText:
-		if isRetryNotice(update.text) {
-			t.pushLocked(Event{Kind: EventThought, Text: "\n" + retryNotice + " agy retries.\n"})
-			return
-		}
 		if text := t.text.push(update.text); text != "" {
 			t.pushLocked(Event{Kind: EventText, Text: text})
 		}

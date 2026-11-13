@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -26,11 +28,9 @@ import (
 
 const (
 	// parkTTL cancels a turn whose client never returns its tool results.
-	parkTTL = 30 * time.Minute
-	// defaultQuotaCooldown applies when a quota notice names no reset time.
-	defaultQuotaCooldown = time.Hour
-	maxAttempts          = 3
-	janitorInterval      = 30 * time.Second
+	parkTTL         = 30 * time.Minute
+	maxAttempts     = 3
+	janitorInterval = 30 * time.Second
 )
 
 type Config struct {
@@ -450,17 +450,28 @@ func (w *response) fail(err *conv.Error) {
 // consume streams the turn into one response until the turn ends or calls
 // client tools.
 func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *response) *attemptFailure {
-	// Only text can be a notice; reasoning streams as it comes.
-	var guard noticeGuard
-	var text strings.Builder
-	emitText := func(delta string) bool {
-		if delta == "" {
+	// What agy sends after a failed model call, before the response sent
+	// anything, waits until a later call succeeds or the turn ends: if the
+	// turn failed, another account may still serve the request.
+	var held []conv.Event
+	release := func() bool {
+		for _, ev := range held {
+			if !w.send(ev) {
+				return false
+			}
+		}
+		held = nil
+		return true
+	}
+	send := func(ev conv.Event) bool {
+		if !w.emitted && at.account.ModelFailure(at.sess.id) != nil {
+			held = append(held, ev)
 			return true
 		}
-		text.WriteString(delta)
-		return w.send(conv.Event{Text: delta})
+		return release() && w.send(ev)
 	}
 
+	var text strings.Builder
 	for {
 		ev, ok := at.turn.Next(ctx)
 		if !ok {
@@ -468,11 +479,12 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 		}
 		switch ev.Kind {
 		case agy.EventText:
-			if !emitText(guard.push(ev.Text)) {
+			text.WriteString(ev.Text)
+			if !send(conv.Event{Text: ev.Text}) {
 				return g.abandon(at, r)
 			}
 		case agy.EventThought:
-			if !w.send(conv.Event{Reasoning: ev.Text}) {
+			if !send(conv.Event{Reasoning: ev.Text}) {
 				return g.abandon(at, r)
 			}
 		case agy.EventNativeTool:
@@ -480,21 +492,17 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 			if ev.Failed {
 				line = fmt.Sprintf("\n[agy tool %s failed]\n", ev.Tool)
 			}
-			if !w.send(conv.Event{Reasoning: line}) {
+			if !send(conv.Event{Reasoning: line}) {
 				return g.abandon(at, r)
 			}
 		case agy.EventExternal:
-			// A notice never precedes a tool call: held text is a reply.
-			rest := guard.flush()
-			if !emitText(rest) {
-				return g.abandon(at, r)
-			}
 			group := ev.Payload.(*callGroup)
 			reply := conv.Message{Role: conv.RoleAssistant, Text: text.String(), ToolCalls: group.toolCalls()}
 			usage := g.partUsage(at)
 			g.park(at, group)
 			mark := g.record(at, r, &reply, 0)
-			if !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.sendUsage(usage) || !w.send(conv.Event{Anchor: mark}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
+			// The model call that made the tool calls succeeded.
+			if !release() || !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.sendUsage(usage) || !w.send(conv.Event{Anchor: mark}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
 				g.log.Info("client left after tool calls; turn stays parked", "session", at.sess.id)
 			}
 			return nil
@@ -504,13 +512,16 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 		return g.abandon(at, r)
 	}
 	<-at.turn.Done()
-	return g.finish(at, r, w, &guard, &text)
+	return g.finish(at, r, w, release, &text)
 }
 
-// finish handles the settled turn: errors, notices, and the final reply.
-func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard, text *strings.Builder) *attemptFailure {
+// finish handles the settled turn: errors, a failed last model call, and
+// the final reply. release sends the output held back so far.
+func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() bool, text *strings.Builder) *attemptFailure {
 	outcome := at.turn.Outcome()
 	account := at.account.Name()
+	failure := at.account.ModelFailure(at.sess.id)
+	at.account.ForgetModelFailure(at.sess.id)
 	if outcome.Err != nil {
 		g.forget(at.account.Name(), at.sess.id)
 		if agy.IsAuthError(outcome.Err) {
@@ -522,30 +533,16 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "the Antigravity turn was cancelled by a newer request for this conversation"}}
 	}
 
-	reply := guard.flush()
-	switch kind, reset, message := classifyNotice(reply, time.Now()); kind {
-	case noticeQuota:
-		g.forget(at.account.Name(), at.sess.id)
-		if reset.IsZero() {
-			reset = time.Now().Add(defaultQuotaCooldown)
-		}
-		at.account.Cool(r.group, reset)
-		retryAfter := int(time.Until(reset).Seconds())
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrQuota, Message: message, RetryAfterSeconds: retryAfter}, account: account, retry: true}
-	case noticeCapacity:
-		g.forget(at.account.Name(), at.sess.id)
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: message}, account: account}
-	case noticeAgentError:
+	// agy ends a turn whose model call failed for good with end_turn and
+	// a line about the error as the reply.
+	if failure != nil {
 		// The session holds the failed input now.
-		g.forget(at.account.Name(), at.sess.id)
-		return &attemptFailure{err: g.agentError(at), account: account}
+		g.forget(account, at.sess.id)
+		return g.modelFailure(at, r, failure)
 	}
 
-	if reply != "" {
-		text.WriteString(reply)
-		if !w.send(conv.Event{Text: reply}) {
-			return nil
-		}
+	if !release() {
+		return nil
 	}
 	<-at.closed // endSteps is set
 	mark := g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()}, at.endSteps)
@@ -733,21 +730,33 @@ func (g *Gateway) countSteps(at *activeTurn) int {
 	return steps
 }
 
-// agentError maps the model error that ended the turn. Messages pass
-// through: clients recognize overflow by their text as well.
-func (g *Gateway) agentError(at *activeTurn) *conv.Error {
-	g.mu.Lock()
-	proc := at.sess.proc
-	g.mu.Unlock()
-	cause, err := proc.LastError(context.Background(), at.sess.id, at.baseSteps)
-	if err != nil {
-		g.log.Warn("cause of agy's turn error unavailable", "session", at.sess.id, "err", err)
-		return &conv.Error{Kind: conv.ErrUpstream, Message: agentErrorNotice + " (cause unavailable: " + err.Error() + ")"}
+// contextOverflow matches the model errors seen for a conversation over
+// the window (agy 1.5.3):
+//
+//	Gemini:       The input token count exceeds the maximum number of tokens allowed (1048576).
+//	gpt-oss-120b: Requested token count exceeds the model's maximum context length of 131072 tokens. …
+//	gpt-oss-120b: The input (183641 tokens) is longer than the model's context length (131072 tokens).
+var contextOverflow = regexp.MustCompile(`exceeds the maximum number of tokens allowed|exceeds the model's maximum context length|is longer than the model's context length`)
+
+// modelFailure maps the failed model call that ended the turn. Messages
+// pass through: clients recognize overflow by their text as well. A 429
+// that names a retry time is the account's quota: the account cools down
+// until then and another one may serve the request. agy retries a 429
+// without one itself before it gives up.
+func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailure) *attemptFailure {
+	account := at.account.Name()
+	switch {
+	case failure.Code == http.StatusBadRequest && contextOverflow.MatchString(failure.Message):
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrContextLength, Message: failure.Message}, account: account}
+	case failure.Code == http.StatusTooManyRequests:
+		wait := time.Until(failure.Reset)
+		if wait <= 0 {
+			return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account}
+		}
+		at.account.Cool(r.group, failure.Reset)
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}, account: account, retry: true}
 	}
-	if cause.Code == http.StatusBadRequest && contextOverflow.MatchString(cause.Message) {
-		return &conv.Error{Kind: conv.ErrContextLength, Message: cause.Message}
-	}
-	return &conv.Error{Kind: conv.ErrUpstream, Message: cause.Message}
+	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, account: account}
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if
@@ -776,13 +785,12 @@ func (g *Gateway) sweep() {
 	limit := min(time.Duration(g.idleClose.Load()), g.snaps.ttl())
 	var idle []*activeTurn
 	g.mu.Lock()
-	for ref, sess := range g.sessions {
+	for _, sess := range g.sessions {
 		if sess.turn != nil {
 			continue
 		}
 		if !sess.proc.Alive() || !sess.proc.HasSession(sess.id) {
-			sess.binding.Close()
-			delete(g.sessions, ref)
+			g.dropSessionLocked(sess)
 			continue
 		}
 		if time.Since(sess.lastUsed) > limit {
@@ -814,11 +822,22 @@ func (g *Gateway) closeClaimed(ctx context.Context, claim *activeTurn) error {
 	sess := claim.sess
 	err := sess.proc.CloseSession(ctx, sess.id)
 	g.mu.Lock()
-	sess.binding.Close()
-	delete(g.sessions, sess.ref)
+	g.dropSessionLocked(sess)
 	g.mu.Unlock()
 	close(claim.closed)
 	return err
+}
+
+// dropSessionLocked forgets a session agy no longer runs: closed, its
+// process gone, or never reopened. agy makes no more model calls for it,
+// so the failure its account keeps for it goes too: a turn the client
+// left after a failed or cancelled call never read it. It needs g.mu.
+func (g *Gateway) dropSessionLocked(sess *session) {
+	if sess.binding != nil { // nil when reopening failed
+		sess.binding.Close()
+	}
+	delete(g.sessions, sess.ref)
+	sess.account.ForgetModelFailure(sess.id)
 }
 
 var errSessionBusy = errors.New("session is starting a turn for another request")

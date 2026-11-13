@@ -82,7 +82,10 @@ type Account struct {
 	// removed accounts start no processes.
 	removed  bool
 	cooldown map[string]time.Time
-	procs    map[string]*procSlot
+	// modelFailures holds, by session, the failure of its latest
+	// generation call; sessions whose latest call succeeded are absent.
+	modelFailures map[string]ModelFailure
+	procs         map[string]*procSlot
 	// models is the ACP model catalog agy last reported for the account,
 	// nil until it opens a session.
 	models []agy.ModelInfo
@@ -154,6 +157,7 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 		proxy:             ac.Proxy,
 		cloudCodeEndpoint: ac.CloudCodeEndpoint,
 		cooldown:          map[string]time.Time{},
+		modelFailures:     map[string]ModelFailure{},
 		procs:             map[string]*procSlot{},
 	}
 	if err := os.MkdirAll(a.workspace, 0o700); err != nil {
@@ -339,6 +343,48 @@ func (a *Account) Cool(group string, until time.Time) {
 	a.cooldown[group] = until
 	a.mu.Unlock()
 	a.pool.log.Warn("account quota cooling down", "account", a.name, "group", group, "until", until)
+}
+
+// ModelFailure is a generation call agy made for a session that failed.
+type ModelFailure struct {
+	// Code is the HTTP status agy got.
+	Code int
+	// Message is the error as agy words it, e.g. "RESOURCE_EXHAUSTED
+	// (code 429): Individual quota reached. … Resets in 139h30m19s."
+	Message string
+	// Reset is when Google said to retry; zero when it named no time.
+	Reset time.Time
+}
+
+// RecordModelCall notes how the session's latest generation call went;
+// failure is nil when it succeeded.
+func (a *Account) RecordModelCall(session string, failure *ModelFailure) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if failure == nil {
+		delete(a.modelFailures, session)
+		return
+	}
+	a.modelFailures[session] = *failure
+}
+
+// ModelFailure returns the failure of the session's latest generation
+// call, nil when that call succeeded or none was recorded.
+func (a *Account) ModelFailure(session string) *ModelFailure {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	failure, ok := a.modelFailures[session]
+	if !ok {
+		return nil
+	}
+	return &failure
+}
+
+// ForgetModelFailure drops the session's recorded failure.
+func (a *Account) ForgetModelFailure(session string) {
+	a.mu.Lock()
+	delete(a.modelFailures, session)
+	a.mu.Unlock()
 }
 
 // Disable takes the account out of rotation (e.g. its sign-in expired).

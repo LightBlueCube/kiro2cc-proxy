@@ -10,7 +10,8 @@
 // them raised, so agy neither summarizes ("auto-compacts") a long
 // conversation nor drops its oldest history. Everything else, generation
 // streams included, passes through unchanged; refusals of accounts that
-// need verifying are read on the way for Google's link (verify.go).
+// need verifying are read on the way for Google's link (verify.go), and
+// each generation call's outcome for the session it serves (calls.go).
 package cloudcode
 
 import (
@@ -88,6 +89,7 @@ type accountProxy struct {
 	proxy          *httputil.ReverseProxy
 	transport      *http.Transport
 	onVerification VerificationFunc
+	onModelCall    ModelCallFunc
 }
 
 // Start listens on a loopback port and forwards to upstream.
@@ -117,8 +119,8 @@ func (s *Server) Close() error { return s.http.Close() }
 // Register routes the account's Cloud Code traffic through egressURL (its
 // egress proxy URL with credentials) and returns the endpoint its agy
 // must use. onVerification learns whether Google wants the account
-// verified.
-func (s *Server) Register(name, egressURL string, onVerification VerificationFunc) (string, error) {
+// verified; onModelCall learns how each generation call went.
+func (s *Server) Register(name, egressURL string, onVerification VerificationFunc, onModelCall ModelCallFunc) (string, error) {
 	egress, err := url.Parse(egressURL)
 	if err != nil {
 		return "", fmt.Errorf("egress URL for %s: %w", name, err)
@@ -130,7 +132,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 	prefix := "/" + name
-	ap := &accountProxy{transport: transport, onVerification: onVerification}
+	ap := &accountProxy{transport: transport, onVerification: onVerification, onModelCall: onModelCall}
 	ap.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Path = strings.TrimPrefix(r.In.URL.Path, prefix)
@@ -146,6 +148,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
 			s.watchVerification(name, resp)
+			ap.watchModelCall(resp)
 			if !isCatalog(resp.Request) || resp.StatusCode != http.StatusOK {
 				return nil
 			}
@@ -153,6 +156,9 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Error("cloud code request failed", "account", name, "path", r.URL.Path, "err", err)
+			if session := callSession(r); session != "" {
+				ap.onModelCall(session, &CallError{Code: http.StatusBadGateway, Message: "Cloud Code request failed: " + err.Error()})
+			}
 			http.Error(w, "agyrelay: Cloud Code upstream request failed", http.StatusBadGateway)
 		},
 	}
@@ -195,6 +201,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ap == nil {
 		http.Error(w, "agyrelay: unknown account", http.StatusNotFound)
 		return
+	}
+	if isGeneration(r) {
+		tagged, err := s.withSession(name, r)
+		if err != nil {
+			s.log.Warn("generation call unreadable", "account", name, "err", err)
+			http.Error(w, "agyrelay: request body unreadable", http.StatusBadRequest)
+			return
+		}
+		r = tagged
 	}
 	ap.proxy.ServeHTTP(w, r)
 }
