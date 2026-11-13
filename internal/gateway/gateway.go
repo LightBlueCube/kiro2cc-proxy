@@ -672,6 +672,14 @@ func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message, steps int)
 	return anchor{Account: snap.Account, SessionID: snap.SessionID, Count: count, Hash: hash}.encode()
 }
 
+// movedPast drops the session's positions it cannot be rewound to, before
+// it takes input past them.
+func (g *Gateway) movedPast(account, sessionID string) {
+	if err := g.snaps.movedPast(account, sessionID); err != nil {
+		g.log.Warn("snapshot removal not persisted", "err", err)
+	}
+}
+
 // forget drops the session's snapshot: its native state no longer matches
 // a transcript the client holds.
 func (g *Gateway) forget(account, sessionID string) {
@@ -814,3 +822,7 @@ func (g *Gateway) closeClaimed(ctx context.Context, claim *activeTurn) error {
 }
 
 var errSessionBusy = errors.New("session is starting a turn for another request")
+
+// errPositionGone means the session moved past the planned position while
+// the request claimed it; the request plans again.
+var errPositionGone = errors.New("session moved past the planned position")

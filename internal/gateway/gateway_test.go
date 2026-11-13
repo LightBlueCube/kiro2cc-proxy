@@ -687,6 +687,22 @@ func TestParallelAcceptsPrefixedNames(t *testing.T) {
 	}
 }
 
+// Models copy agy's toolSummary into a batch's calls; the client never
+// declared it.
+func TestParallelDropsToolSummary(t *testing.T) {
+	known := func(name string) bool { return name == "read" }
+	calls, err := parseParallel(json.RawMessage(`{"calls":[{"name":"read","arguments":{"path":"a.go","toolSummary":"Read a.go","n":12345678901234567890}},{"name":"read","arguments":{"path":"b.go"}}]}`), known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(calls[0].Arguments); got != `{"n":12345678901234567890,"path":"a.go"}` {
+		t.Errorf("first arguments = %s", got)
+	}
+	if got := string(calls[1].Arguments); got != `{"path":"b.go"}` {
+		t.Errorf("second arguments = %s, want them untouched", got)
+	}
+}
+
 func TestToolResultCarriesLaterSystemMessage(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()
@@ -1140,6 +1156,56 @@ func TestRewindToEndOfToolTurn(t *testing.T) {
 		t.Fatalf("regenerated = %+v", r)
 	}
 	h.assertRewound(h.requests("session/prompt")[0].Params.SessionID, 4)
+}
+
+// A client resends its tool results while the first attempt still runs.
+// The cancelled attempt's results stay in the session, so the retry must
+// not send them again on top: it rewinds to the last finished turn.
+func TestRetriedToolResultsRewindPastCancelledInput(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	req := func(messages []conv.Message) conv.Request {
+		return conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: []conv.ToolSpec{readTool}}
+	}
+	messages := []conv.Message{user("one")}
+	first := h.complete(ctx, "alice", req(messages))
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user(`@tool read {}`))
+	parked := h.complete(ctx, "alice", req(messages))
+	if first.err != nil || parked.err != nil || len(parked.calls) != 1 {
+		t.Fatalf("setup: %+v, %+v", first, parked)
+	}
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: parked.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: parked.calls[0].ID, Text: "@hang"},
+	)
+
+	cancelled := make(chan result)
+	go func() { cancelled <- h.complete(ctx, "alice", req(messages)) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for !h.turnIs(TurnRunning) {
+		if time.Now().After(deadline) {
+			t.Fatal("tool results never continued the turn")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	retry := h.complete(ctx, "alice", req(messages))
+	if r := <-cancelled; r.err == nil {
+		t.Fatalf("first attempt = %+v, want cancelled", r)
+	}
+	if retry.err != nil {
+		t.Fatalf("retry = %+v", retry)
+	}
+	h.assertRewound(h.requests("session/prompt")[0].Params.SessionID, 2)
+	records := h.records.all(t, 4)
+	if last := records[len(records)-1]; last.Mode != ModeRewind {
+		t.Fatalf("retry mode = %q, want %q", last.Mode, ModeRewind)
+	}
+}
+
+// turnIs reports whether the only session's turn is in state.
+func (h *harness) turnIs(state TurnState) bool {
+	sessions := h.gw.Sessions()
+	return len(sessions) == 1 && sessions[0].Turn != nil && sessions[0].Turn.State == state
 }
 
 func TestRecordsDescribeRequests(t *testing.T) {

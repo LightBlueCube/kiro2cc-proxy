@@ -4,9 +4,11 @@
 // The live input of each prompt (text after the last </history>, or the
 // whole last text block) may hold one directive line:
 //
-//	@tool NAME JSON      call the client tool NAME, reply "tool said: <result>"
+//	@tool NAME JSON      call the client tool NAME, reply "tool said: <result>";
+//	                     a result "@hang" makes it produce nothing until cancelled
 //	@parallel A B ...    call tools A, B, ... through the parallel tool
 //	@hang                produce nothing until cancelled
+//	@think-hang          a thought, then nothing until cancelled
 //	@steps               reply "steps: N", N the steps before this prompt
 //
 // Anything else gets a thought and "reply to: <input>".
@@ -569,6 +571,10 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 			return "", err
 		}
 		f.addSteps(sessionID, s, stepGeneric)
+		if result == "@hang" {
+			<-ctx.Done()
+			return "", nil
+		}
 		return "tool said: " + result, nil
 	case "@parallel":
 		var calls []map[string]any

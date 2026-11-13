@@ -216,7 +216,8 @@ type parallelCall struct {
 }
 
 // parseParallel validates a parallel tool call's arguments. Names may carry
-// the prefix the model calls tools by; the result holds the client's names.
+// the prefix the model calls tools by; the result holds the client's names
+// and arguments without agy's toolSummary.
 func parseParallel(args json.RawMessage, known func(string) bool) ([]parallelCall, error) {
 	var input struct {
 		Calls []parallelCall `json:"calls"`
@@ -245,9 +246,13 @@ func parseParallel(args json.RawMessage, known func(string) bool) ([]parallelCal
 			input.Calls[i].Arguments = json.RawMessage("{}")
 			continue
 		}
-		var object map[string]any
+		var object map[string]json.RawMessage
 		if json.Unmarshal(call.Arguments, &object) != nil {
 			return nil, fmt.Errorf("parallel.calls[%d].arguments must be an object", i)
+		}
+		if _, ok := object[toolSummaryParam]; ok {
+			delete(object, toolSummaryParam)
+			input.Calls[i].Arguments, _ = json.Marshal(object) // decoded JSON always re-encodes
 		}
 	}
 	return input.Calls, nil
