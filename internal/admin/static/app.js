@@ -783,26 +783,60 @@ views.accounts = container => {
     return h("span", { title: hover }, ready[0].name, ready.length > 1 ? ` (+${ready.length - 1})` : "");
   }
 
-  // modelGroups gathers the models accounts reported (available) and those
-  // their upstream catalogs list as disabled while no account has them
-  // (unavailable), each grouped by the set of accounts. A model is
-  // {id, name, efforts, upstream, accounts, disabledOn}.
+  const modelQuotaGroup = id => id.startsWith("claude-") || id.startsWith("gpt-oss-") ? "claude-gpt"
+    : id.startsWith("gemini-4-argon") ? "argon" : "gemini";
+  const bucketQuotaGroup = id => id.startsWith("3p-") ? "claude-gpt"
+    : id.startsWith("gemini-argon-") ? "argon"
+    : id.startsWith("gemini-") ? "gemini" : "";
+
+  function quotaExhausted(a, m) {
+    const group = modelQuotaGroup(m.id);
+    if (a.cooldowns && a.cooldowns[group]) return true;
+    const buckets = (a.quota || []).flatMap(g => g.buckets).filter(b => bucketQuotaGroup(b.id) === group);
+    if (buckets.length) return buckets.some(b => b.remaining <= 0);
+    const qi = m.upstream && m.upstream.quotaInfo;
+    return Boolean(qi && !(qi.remainingFraction > 0));
+  }
+
+  // modelGroups gathers the models accounts reported into available,
+  // quota-exhausted, manually disabled (excluded by allowed_models), and
+  // upstream-unavailable sets, each grouped by the set of accounts.
   function modelGroups(accounts) {
     const available = new Map();
+    const exhausted = new Map();
+    const manuallyDisabled = new Map();
     const disabled = new Map();
     const add = (byId, m, a) => {
-      if (!byId.has(m.id)) byId.set(m.id, { ...m, accounts: [], disabledOn: [] });
+      if (!byId.has(m.id)) {
+        byId.set(m.id, { ...m, accounts: [], exhaustedOn: [], manuallyDisabledOn: [], disabledOn: [] });
+      }
       const entry = byId.get(m.id);
       entry.accounts.push(a);
       entry.upstream ||= m.upstream;
     };
+    const allowsModel = (a, id) => !a.allowed_models.length || a.allowed_models.includes(id);
     for (const a of accounts) {
-      for (const m of a.models || []) add(available, m, a);
+      for (const m of a.models || []) {
+        if (!allowsModel(a, m.id)) add(manuallyDisabled, m, a);
+        else if (quotaExhausted(a, m)) add(exhausted, m, a);
+        else add(available, m, a);
+      }
       for (const m of a.unavailable) add(disabled, m, a);
     }
-    for (const [id, m] of disabled) {
+    for (const [id, m] of exhausted) {
       if (!available.has(id)) continue;
-      available.get(id).disabledOn = m.accounts;
+      available.get(id).exhaustedOn = m.accounts;
+      exhausted.delete(id);
+    }
+    for (const [id, m] of manuallyDisabled) {
+      if (!available.has(id)) continue;
+      available.get(id).manuallyDisabledOn = m.accounts;
+      manuallyDisabled.delete(id);
+    }
+    for (const [id, m] of disabled) {
+      const target = available.get(id) || exhausted.get(id) || manuallyDisabled.get(id);
+      if (!target) continue;
+      target.disabledOn = m.accounts;
       disabled.delete(id);
     }
     const group = byId => {
@@ -814,7 +848,14 @@ views.accounts = container => {
       }
       return [...groups.values()];
     };
-    return { available: group(available), unavailable: group(disabled), counts: [available.size, disabled.size] };
+    const unavailableCount = new Set([...exhausted.keys(), ...manuallyDisabled.keys(), ...disabled.keys()]).size;
+    return {
+      available: group(available),
+      exhausted: group(exhausted),
+      manuallyDisabled: group(manuallyDisabled),
+      unavailable: group(disabled),
+      counts: [available.size, unavailableCount],
+    };
   }
 
   // upstreamText lists a model's upstream record, one field per line.
@@ -825,8 +866,10 @@ views.accounts = container => {
     const up = (m, key) => m.upstream && m.upstream[key];
     const notice = m => {
       const tag = up(m, "tagDescription") || "";
+      const exhausted = m.exhaustedOn.length ? t("accounts.models.exhausted_elsewhere", { accounts: m.exhaustedOn.map(a => a.name).join(", ") }) : "";
+      const manual = m.manuallyDisabledOn.length ? t("accounts.models.manually_disabled_elsewhere", { accounts: m.manuallyDisabledOn.map(a => a.name).join(", ") }) : "";
       const elsewhere = m.disabledOn.length ? t("accounts.models.disabled_on", { accounts: m.disabledOn.map(a => a.name).join(", ") }) : "";
-      return h("span", { class: unavailable ? "warn" : "muted" }, joined(tag, elsewhere));
+      return h("span", { class: unavailable ? "warn" : "muted" }, joined(tag, exhausted, manual, elsewhere));
     };
     return h("div", { class: "compact" }, table([
       { title: t("common.model"), cell: m => h("span", { title: upstreamText(m.upstream) || null },
@@ -844,12 +887,16 @@ views.accounts = container => {
   const modelsFold = h("details", { class: "card fold models" }, modelsSummary, modelsBody);
 
   function renderModels(accounts) {
-    const { available, unavailable, counts } = modelGroups(accounts);
+    const { available, exhausted, manuallyDisabled, unavailable, counts } = modelGroups(accounts);
     const unreported = accounts.filter(a => !a.models).length;
     modelsSummary.textContent = joined(t("accounts.models.title"), t("accounts.models.available", { count: counts[0] }),
       counts[1] ? t("accounts.models.unavailable", { count: counts[1] }) : "");
     modelsBody.replaceChildren(
       ...available.map(g => h("div", { class: "model-group" }, h("h3", {}, accountSet(g.accounts)), modelTable(g.models, false))),
+      ...exhausted.map(g => h("div", { class: "model-group" },
+        h("h3", { class: "warn" }, t("accounts.models.exhausted_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
+      ...manuallyDisabled.map(g => h("div", { class: "model-group" },
+        h("h3", { class: "warn" }, t("accounts.models.manually_disabled_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
       ...unavailable.map(g => h("div", { class: "model-group" },
         h("h3", { class: "warn" }, t("accounts.models.unavailable_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
       ...(unreported ? [h("p", { class: "muted" }, t("accounts.models.unreported", { count: unreported }))] : []),
