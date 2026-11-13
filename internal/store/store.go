@@ -102,7 +102,8 @@ var migrations = []string{
 		reasoning     INTEGER NOT NULL,
 		cost_usd      REAL,
 		quota_group   TEXT NOT NULL,
-		quota_used    REAL
+		quota_used    REAL,
+		quota_skip    TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX requests_at ON requests (at);
 	CREATE INDEX requests_key_at ON requests (key_hash, at);

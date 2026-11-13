@@ -70,7 +70,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recorder := usage.NewRecorder(st, settings.Prices, log)
+	recorder := usage.NewRecorder(st, settings.Prices, nil, log)
 	budget := usage.NewBudget(st, recorder)
 	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Log: log})
 	if err != nil {

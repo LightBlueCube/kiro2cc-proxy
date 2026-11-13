@@ -41,6 +41,8 @@ type requestView struct {
 	CostUSD      *float64 `json:"cost_usd"`
 	QuotaGroup   string   `json:"quota_group"`
 	QuotaUsed    *float64 `json:"quota_used"`
+	// QuotaSkip is why quota_used stays null for good; "" while pending.
+	QuotaSkip string `json:"quota_skip"`
 }
 
 // queryFilter reads key (a key hash), model, account, and since/until
@@ -96,7 +98,7 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 			ID: row.ID, At: row.At, Key: row.KeyName, KeyHash: row.KeyHash, Account: row.Account, Model: row.Model, Slug: row.Slug, Effort: row.Effort, API: row.API,
 			Stream: row.Stream, Mode: row.Mode, ReplayReason: row.ReplayReason, Status: row.Status, Error: row.Error, Finish: row.Finish,
 			DurationMS: row.Duration.Milliseconds(), Input: row.Input, Cached: row.Cached, Output: row.Output,
-			Reasoning: row.Reasoning, CostUSD: row.CostUSD, QuotaGroup: row.QuotaGroup, QuotaUsed: row.QuotaUsed,
+			Reasoning: row.Reasoning, CostUSD: row.CostUSD, QuotaGroup: row.QuotaGroup, QuotaUsed: row.QuotaUsed, QuotaSkip: string(row.QuotaSkip),
 		}
 		if row.TTFT != nil {
 			ms := row.TTFT.Milliseconds()

@@ -768,6 +768,7 @@ views.accounts = container => {
         t("accounts.turns", { count: a.turns }),
         t("accounts.procs", { count: a.procs }),
         a.sampled_at ? t("accounts.sampled", { time: fmt.time(a.sampled_at) }) : t("accounts.not_sampled"),
+        a.procs ? "" : t("accounts.sampled_when_running"),
         a.proxy ? t("accounts.traffic", { route }) : t("accounts.traffic.no_own_proxy", { route }),
         a.env_names.length ? t("accounts.env_names", { names: a.env_names.join(", ") }) : "")),
       h("p", {}, a.models ? t("accounts.models", { models: a.models.map(m => m.id).join(", ") || "—" }) : h("span", { class: "muted" }, t("accounts.models.unknown"))),
@@ -1255,6 +1256,13 @@ views.calls = container => {
     return term(t("calls.quota_average", { quota: quotaText(average, 2) }), [t("calls.quota_average.hint"), ...byAccount].join("\n"));
   }
 
+  // quotaCell is a request's attributed quota share, or why it has none.
+  function quotaCell(r) {
+    if (r.quota_used !== null) return t("calls.quota_share", { pct: fmt.pct(r.quota_used, 3) });
+    if (r.quota_skip) return term(t("calls.quota_skipped"), lookup("quota_skip", r.quota_skip) || r.quota_skip);
+    return term(t("calls.quota_pending"), t("calls.quota_pending.hint"));
+  }
+
   function renderTotals(sums) {
     const sum = sums.reduce((a, s) => {
       for (const k of ["requests", "errors", "input", "cached", "output", "reasoning", "cost_usd", "unpriced"]) a[k] = (a[k] || 0) + s[k];
@@ -1327,7 +1335,7 @@ views.calls = container => {
           : h("span", { class: "bad", title: joined(lookup("status", r.status), r.error) }, r.status) },
       { title: t("calls.tokens"), num: true, cell: r => tokensCell(r) },
       { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: r => !r.input && !r.output ? h("span", { class: "muted" }, "—") : stack(fmt.usd(r.cost_usd),
-          r.quota_used === null ? term(t("calls.quota_pending"), t("calls.quota_pending.hint")) : t("calls.quota_share", { pct: fmt.pct(r.quota_used, 3) })) },
+          quotaCell(r)) },
     ], rows),
     page.length === 100 ? h("button", { style: "margin-top:8px", onclick: e => guarded(() => loadRows(true), e.target) }, t("calls.load_more")) : null,
     h("p", { class: "muted" }, t("calls.requests.note"))));

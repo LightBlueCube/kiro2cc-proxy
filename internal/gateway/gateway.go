@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,11 @@ type Config struct {
 	// Refresh, when set, samples an account's quota, starting agy, which
 	// reports the account's model catalog (see refreshUnreported).
 	Refresh func(ctx context.Context, account *pool.Account) error
+	// KeepForQuota, when set, is asked before an account's last open
+	// session closes, idle since lastUsed: true keeps it open, and agy
+	// running, until the quota shows the account's use. Asked again on
+	// every janitor pass.
+	KeepForQuota func(ctx context.Context, account *pool.Account, lastUsed time.Time) bool
 	// ContextCheck turns on the check of prompts against ContextWindows.
 	ContextCheck   bool
 	ContextWindows []ContextWindow
@@ -66,13 +72,14 @@ type Budget interface {
 }
 
 type Gateway struct {
-	log      *slog.Logger
-	pool     *pool.Pool
-	bridge   *bridge.Server
-	snaps    *snapshotStore
-	recorder Recorder
-	budget   Budget
-	refresh  func(ctx context.Context, account *pool.Account) error
+	log          *slog.Logger
+	pool         *pool.Pool
+	bridge       *bridge.Server
+	snaps        *snapshotStore
+	recorder     Recorder
+	budget       Budget
+	refresh      func(ctx context.Context, account *pool.Account) error
+	keepForQuota func(ctx context.Context, account *pool.Account, lastUsed time.Time) bool
 	// refreshes holds, by account name, a running refresh or the last one
 	// that left the account without a catalog.
 	refreshMu sync.Mutex
@@ -154,16 +161,17 @@ func New(cfg Config) (*Gateway, error) {
 		return nil, err
 	}
 	g := &Gateway{
-		log:       cfg.Log,
-		pool:      cfg.Pool,
-		bridge:    cfg.Bridge,
-		snaps:     snaps,
-		recorder:  cfg.Recorder,
-		budget:    cfg.Budget,
-		refresh:   cfg.Refresh,
-		refreshes: map[string]*refreshCall{},
-		stop:      make(chan struct{}),
-		sessions:  map[string]*session{},
+		log:          cfg.Log,
+		pool:         cfg.Pool,
+		bridge:       cfg.Bridge,
+		snaps:        snaps,
+		recorder:     cfg.Recorder,
+		budget:       cfg.Budget,
+		refresh:      cfg.Refresh,
+		keepForQuota: cfg.KeepForQuota,
+		refreshes:    map[string]*refreshCall{},
+		stop:         make(chan struct{}),
+		sessions:     map[string]*session{},
 	}
 	g.idleClose.Store(int64(cfg.IdleClose))
 	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
@@ -784,20 +792,41 @@ func (g *Gateway) janitor() {
 func (g *Gateway) sweep() {
 	limit := min(time.Duration(g.idleClose.Load()), g.snaps.ttl())
 	var idle []*activeTurn
+	var lasts []*session
+	var lastUses []time.Time // lasts' lastUsed
 	g.mu.Lock()
+	byAccount := map[*pool.Account][]*session{}
 	for _, sess := range g.sessions {
-		if sess.turn != nil {
-			continue
-		}
-		if !sess.proc.Alive() || !sess.proc.HasSession(sess.id) {
+		if sess.turn == nil && (!sess.proc.Alive() || !sess.proc.HasSession(sess.id)) {
 			g.dropSessionLocked(sess)
 			continue
 		}
-		if time.Since(sess.lastUsed) > limit {
+		byAccount[sess.account] = append(byAccount[sess.account], sess)
+	}
+	for _, sessions := range byAccount {
+		closing, last := g.idleSessionsLocked(sessions, limit)
+		if last != nil {
+			lasts, lastUses = append(lasts, last), append(lastUses, last.lastUsed)
+		}
+		for _, sess := range closing {
 			idle = append(idle, g.claimClosingLocked(sess))
 		}
 	}
 	g.mu.Unlock()
+
+	// Asked without g.mu: keepForQuota samples the account.
+	for i, sess := range lasts {
+		lastUsed := lastUses[i]
+		if g.keepForQuota(context.Background(), sess.account, lastUsed) {
+			continue
+		}
+		g.mu.Lock()
+		unchanged := g.sessions[sess.ref] == sess && sess.turn == nil && sess.lastUsed.Equal(lastUsed)
+		if unchanged {
+			idle = append(idle, g.claimClosingLocked(sess))
+		}
+		g.mu.Unlock()
+	}
 	for _, claim := range idle {
 		if err := g.closeClaimed(context.Background(), claim); err != nil {
 			g.log.Warn("closing an idle session failed", "session", claim.sess.id, "err", err)
@@ -805,6 +834,29 @@ func (g *Gateway) sweep() {
 		}
 		g.log.Debug("idle session closed", "account", claim.sess.account.Name(), "session", claim.sess.id)
 	}
+}
+
+// idleSessionsLocked picks the account's sessions idle past limit to
+// close. With KeepForQuota set and all of them idle, the newest is left
+// out as last, for the caller to ask about. It needs g.mu.
+func (g *Gateway) idleSessionsLocked(sessions []*session, limit time.Duration) (closing []*session, last *session) {
+	for _, sess := range sessions {
+		if sess.turn == nil && time.Since(sess.lastUsed) > limit {
+			closing = append(closing, sess)
+		}
+	}
+	allClose := len(closing) > 0 && len(closing) == len(sessions)
+	if g.keepForQuota == nil || !allClose {
+		return closing, nil
+	}
+	newest := 0
+	for i, sess := range closing {
+		if sess.lastUsed.After(closing[newest].lastUsed) {
+			newest = i
+		}
+	}
+	last = closing[newest]
+	return slices.Delete(closing, newest, newest+1), last
 }
 
 // claimClosingLocked reserves an idle session for closing; requests for
