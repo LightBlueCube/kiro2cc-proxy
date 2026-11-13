@@ -75,6 +75,10 @@ type Account struct {
 	paused   bool
 	disabled error
 	blocked  error
+	// verify is set while Google wants the account's owner to verify the
+	// account; verifyURL is Google's page for that ("" when it named none).
+	verify    bool
+	verifyURL string
 	// removed accounts start no processes.
 	removed  bool
 	cooldown map[string]time.Time
@@ -90,6 +94,10 @@ type Status struct {
 	Paused   bool
 	Disabled string
 	Blocked  string
+	// Verify is set while Google wants the account verified; VerifyURL is
+	// its page for that, "" when it named none.
+	Verify    bool
+	VerifyURL string
 	// Cooldowns maps quota groups to the end of their cooldown.
 	Cooldowns map[string]time.Time
 	Turns     int
@@ -300,6 +308,9 @@ func (a *Account) unavailableLocked(group string) error {
 	if a.blocked != nil {
 		return a.blocked
 	}
+	if a.verify {
+		return ErrVerificationRequired
+	}
 	if until, ok := a.cooldown[group]; ok {
 		if time.Now().Before(until) {
 			return fmt.Errorf("%s quota cooling down until %s", group, until.Format(time.RFC3339))
@@ -362,6 +373,25 @@ func (a *Account) SetBlocked(reason error) {
 	a.mu.Unlock()
 }
 
+// ErrVerificationRequired keeps an account out of rotation while Google
+// wants its owner to verify it.
+var ErrVerificationRequired = errors.New("Google asks for the account to be verified by its owner")
+
+// SetVerification records whether Google wants the account's owner to
+// verify the account before it serves; url is Google's page for that.
+func (a *Account) SetVerification(required bool, url string) {
+	a.mu.Lock()
+	changed := a.verify != required
+	a.verify, a.verifyURL = required, url
+	a.mu.Unlock()
+	switch {
+	case changed && required:
+		a.pool.log.Warn("account needs verifying by its owner; out of rotation", "account", a.name)
+	case changed:
+		a.pool.log.Info("Google no longer asks for the account to be verified", "account", a.name)
+	}
+}
+
 // Blocked is the reason set by SetBlocked, or nil.
 func (a *Account) Blocked() error {
 	a.mu.Lock()
@@ -379,6 +409,7 @@ func (a *Account) Status() Status {
 	if a.blocked != nil {
 		st.Blocked = a.blocked.Error()
 	}
+	st.Verify, st.VerifyURL = a.verify, a.verifyURL
 	now := time.Now()
 	for group, until := range a.cooldown {
 		if now.Before(until) {

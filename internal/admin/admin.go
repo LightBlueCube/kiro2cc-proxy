@@ -98,6 +98,8 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/workers/{account}/sessions/{id}/cancel", h.authed(h.cancelTurn))
 	h.mux.HandleFunc("POST /admin/api/workers/{account}/sessions/{id}/close", h.authed(h.closeSession))
 	h.mux.HandleFunc("POST /admin/api/workers/{account}/restart", h.authed(h.restartAccount))
+	h.mux.HandleFunc("GET /admin/api/workers/{account}/logs", h.authed(h.listAgyLogs))
+	h.mux.HandleFunc("GET /admin/api/workers/{account}/logs/entries", h.authed(h.agyLogEntries))
 
 	h.mux.HandleFunc("GET /admin/api/logs", h.authed(h.listLogs))
 	h.mux.HandleFunc("GET /admin/api/logs/stream", h.authed(h.streamLogs))

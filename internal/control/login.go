@@ -63,6 +63,8 @@ func (c *Control) SubmitLogin(ctx context.Context, name, code string) (string, e
 	if err != nil {
 		return "", &InputError{fmt.Sprintf("sign-in failed: %v", err)}
 	}
+	// What Google said about the old sign-in no longer holds.
+	c.cfg.CloudCode.ClearVerification(name)
 	account.SignedIn()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

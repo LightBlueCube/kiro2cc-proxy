@@ -560,6 +560,7 @@ function accountBadge(a, ready) {
   if (a.paused) return h("span", { class: "badge warn" }, t("account.paused"));
   if (a.disabled) return h("span", { class: "badge bad", title: a.disabled }, t("account.needs_signin"));
   if (a.blocked) return h("span", { class: "badge bad", title: a.blocked }, t("account.no_proxy"));
+  if (a.verify) return h("span", { class: "badge bad" }, t("account.needs_verification"));
   return ready;
 }
 
@@ -644,7 +645,7 @@ views.accounts = container => {
     await guarded(async () => {
       const data = await api("POST", `accounts/${encodeURIComponent(account)}/signin/import`, { token: state.token });
       imports.delete(account);
-      toast(t("accounts.imported", { email: data.email }));
+      toast(data.verify ? t("accounts.imported_verify") : t("accounts.imported", { email: data.email }), data.verify);
       await load();
     }, button);
   }
@@ -661,6 +662,15 @@ views.accounts = container => {
       h("div", { class: "row" }, token,
         h("button", { class: "primary", onclick: e => submitImport(a.name, e.target) }, t("accounts.import.submit")),
         h("button", { onclick: () => { imports.delete(a.name); guarded(load); } }, t("common.cancel"))));
+  }
+
+  // verifyNotice tells what to do about Google's verification request.
+  function verifyNotice(a) {
+    if (!a.verify) return null;
+    const link = a.verify_url
+      ? h("a", { href: a.verify_url, target: "_blank", rel: "noopener noreferrer" }, t("accounts.verify.link"))
+      : h("span", {}, t("accounts.verify.no_link"), " ", h("a", { href: "#workers" }, t("nav.workers")));
+    return h("div", { class: "card" }, h("p", { class: "bad" }, t("accounts.verify")), h("p", {}, link));
   }
 
   function status(a) {
@@ -691,6 +701,7 @@ views.accounts = container => {
       a.user ? h("p", {}, `${a.user.email} · ${a.user.tier || a.user.plan}`) : null,
       a.disabled ? h("p", { class: "bad" }, a.disabled) : null,
       a.blocked ? h("p", { class: "bad" }, a.blocked) : null,
+      verifyNotice(a),
       Object.entries(a.cooldowns).map(([group, until]) => h("p", { class: "warn" }, t("accounts.cooldown", { group, time: fmt.until(until) }))),
       a.sample_error ? h("p", { class: "bad mono" }, t("accounts.sample_error", { error: a.sample_error })) : null,
       h("p", { class: "muted" }, joined(
@@ -716,7 +727,8 @@ views.accounts = container => {
         } }, t("common.remove"))));
   }
 
-  const outOfRotation = a => a.paused ? t("account.paused") : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy") : "";
+  const outOfRotation = a => a.paused ? t("account.paused") : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy")
+    : a.verify ? t("account.needs_verification") : "";
 
   // accountSet shows the first account in rotation and how many more
   // there are, "main (+2)"; all of them, with why one is out of rotation,
@@ -830,9 +842,90 @@ views.accounts = container => {
 
 // ---- workers ---------------------------------------------------------
 
+// agyLogViewer reads an account's agy logs: its own card, which the
+// Workers page keeps across its refreshes.
+function agyLogViewer() {
+  const state = { account: "", file: "", level: "", q: "" };
+  const box = h("div", { class: "logs" });
+  const info = h("p", { class: "muted" });
+  const accountSelect = h("select", { onchange: e => { state.account = e.target.value; state.file = ""; guarded(reload); } });
+  const fileSelect = h("select", { onchange: e => { state.file = e.target.value; guarded(loadEntries); } });
+  const level = h("select", { onchange: e => { state.level = e.target.value; guarded(loadEntries); } },
+    ["", "W", "E"].map(l => h("option", { value: l }, lookup("agy_log_level", l || "all"))));
+  const search = h("input", { placeholder: t("workers.logs.search.placeholder"),
+    onchange: e => { state.q = e.target.value.trim(); guarded(loadEntries); } });
+  const card = h("div", { class: "card" },
+    h("h2", {}, t("workers.logs.title")),
+    h("div", { class: "row" },
+      h("label", {}, t("common.account"), accountSelect),
+      h("label", {}, t("workers.logs.file"), fileSelect),
+      h("label", {}, t("logs.level"), level),
+      h("label", { class: "grow" }, t("logs.search"), search),
+      h("button", { onclick: e => guarded(reload, e.target) }, t("workers.logs.reload"))),
+    info, box);
+  const enc = () => encodeURIComponent(state.account);
+
+  async function loadFiles() {
+    const data = await api("GET", `workers/${enc()}/logs`);
+    if (!data.files.some(f => f.name === state.file)) state.file = "";
+    fileSelect.replaceChildren(h("option", { value: "" }, t("workers.logs.all_files")),
+      ...data.files.map(f => h("option", { value: f.name, selected: f.name === state.file, title: f.name },
+        joined(lookup("agy_log_kind", f.kind) || f.kind || f.name, f.pid ? `pid ${f.pid}` : "", fmt.bytes(f.size), fmt.time(f.modified),
+          f.running ? t("workers.logs.running") : ""))));
+  }
+
+  async function loadEntries() {
+    const q = new URLSearchParams({ limit: "1000" });
+    for (const f of ["file", "level", "q"]) if (state[f]) q.set(f, state[f]);
+    const data = await api("GET", `workers/${enc()}/logs/entries?${q}`);
+    const rows = [];
+    let file = "";
+    for (const e of data.entries) {
+      if (e.file !== file) rows.push(h("div", { class: "muted" }, `— ${e.file}`));
+      file = e.file;
+      rows.push(h("div", { class: e.level === "W" ? "WARN" : e.level === "E" || e.level === "F" ? "ERROR" : "" }, e.text));
+    }
+    box.replaceChildren(...rows);
+    box.scrollTop = box.scrollHeight;
+    info.textContent = joined(t("workers.logs.matched", { count: data.matched, shown: data.entries.length }),
+      data.partial.length ? t("workers.logs.partial", { files: data.partial.join(", ") }) : "");
+  }
+
+  async function reload() {
+    if (!state.account) return;
+    await loadFiles();
+    await loadEntries();
+  }
+
+  return {
+    card,
+    // setAccounts keeps the account list current; the first account is
+    // shown until another is picked.
+    setAccounts(names) {
+      if (accountSelect.options.length !== names.length || names.some((n, i) => accountSelect.options[i].value !== n)) {
+        accountSelect.replaceChildren(...names.map(n => h("option", { value: n }, n)));
+      }
+      if (!names.includes(state.account)) {
+        state.account = names[0] || "";
+        state.file = "";
+        guarded(reload);
+      }
+      accountSelect.value = state.account;
+    },
+    show(name) {
+      state.account = name;
+      state.file = "";
+      accountSelect.value = name;
+      card.scrollIntoView({ behavior: "smooth" });
+      guarded(reload);
+    },
+  };
+}
+
 views.workers = container => {
   const cards = h("div");
-  container.append(h("h1", {}, t("workers.title")), cards);
+  const logs = agyLogViewer();
+  container.append(h("h1", {}, t("workers.title")), cards, logs.card);
 
   const action = (label, cls, confirmText, run) => h("button", { class: cls, onclick: e => {
     if (confirmText && !confirm(confirmText)) return;
@@ -907,6 +1000,7 @@ views.workers = container => {
     const badge = accountBadge(a, h("span", { class: "badge ok" }, t("workers.turns", { count: a.turns })));
     return h("div", { class: "card" },
       h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), badge,
+        h("button", { onclick: () => logs.show(a.name) }, t("workers.logs.open")),
         action(t("workers.restart"), "danger", t("workers.restart.confirm", { name: a.name }),
           () => api("POST", `workers/${encodeURIComponent(a.name)}/restart`))),
       h("h3", {}, t("workers.processes")), processes(a, now),
@@ -916,6 +1010,7 @@ views.workers = container => {
 
   async function load() {
     const data = await api("GET", "workers");
+    logs.setAccounts(data.accounts.map(a => a.name));
     cards.replaceChildren(...(data.accounts.length ? data.accounts.map(a => card(a, data.now)) : [h("p", { class: "muted" }, t("workers.empty"))]));
   }
   return polling(container, 3000, load);

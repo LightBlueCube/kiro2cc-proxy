@@ -647,6 +647,58 @@ func TestImportSignIn(t *testing.T) {
 	}
 }
 
+func TestAgyLogs(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main"}, nil); r.status != http.StatusOK {
+		t.Fatalf("add = %d %s", r.status, r.raw)
+	}
+	logDir := filepath.Join(e.accounts, "main", ".gemini", "antigravity-cli", "log")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const name = "acp-worker-20261113_085132-999999999.log"
+	text := "I1113 08:51:32.100000      46 server.go:313] started\n" +
+		`I1113 08:51:32.578620     103 http_helpers.go:820] Failed to make code assist backend request: {"validation_url": "https://accounts.google.com/x"}` + "\n" +
+		"E1113 08:51:33.000000     103 errorreport.go:273] PERMISSION_DENIED (code 403): Verify your account to continue.\n"
+	if err := os.WriteFile(filepath.Join(logDir, name), []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var listed struct {
+		Files []agyLogFileView `json:"files"`
+	}
+	r := c.do("GET", "/admin/api/workers/main/logs", nil, nil)
+	if json.Unmarshal([]byte(r.raw), &listed) != nil || len(listed.Files) != 1 || listed.Files[0].Kind != "worker" {
+		t.Fatalf("list = %d %s", r.status, r.raw)
+	}
+	var found struct {
+		Entries []agyLogEntryView `json:"entries"`
+		Matched int               `json:"matched"`
+	}
+	r = c.do("GET", "/admin/api/workers/main/logs/entries?q=validation_url", nil, nil)
+	if json.Unmarshal([]byte(r.raw), &found) != nil || found.Matched != 1 ||
+		!strings.Contains(found.Entries[0].Text, "https://accounts.google.com/x") || found.Entries[0].File != name {
+		t.Fatalf("search = %d %s", r.status, r.raw)
+	}
+	r = c.do("GET", "/admin/api/workers/main/logs/entries?level=E&file="+name, nil, nil)
+	if json.Unmarshal([]byte(r.raw), &found) != nil || found.Matched != 1 || found.Entries[0].Level != "E" {
+		t.Fatalf("errors only = %d %s", r.status, r.raw)
+	}
+	for _, query := range []string{"level=X", "limit=0", "file=../agyrelay.db"} {
+		if r := c.do("GET", "/admin/api/workers/main/logs/entries?"+query, nil, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("%s = %d %s", query, r.status, r.raw)
+		}
+	}
+	if r := c.do("GET", "/admin/api/workers/nobody/logs", nil, nil); r.status != http.StatusNotFound {
+		t.Fatalf("unknown account = %d %s", r.status, r.raw)
+	}
+}
+
 func TestAccountSignIn(t *testing.T) {
 	e := newEnv(t)
 	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {

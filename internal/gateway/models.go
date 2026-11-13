@@ -98,7 +98,7 @@ func (g *Gateway) refreshUnreported(ctx context.Context) {
 	var waits []chan struct{}
 	for _, account := range g.pool.Accounts() {
 		st := account.Status()
-		outOfRotation := st.Paused || st.Disabled != "" || st.Blocked != ""
+		outOfRotation := st.Paused || st.Disabled != "" || st.Blocked != "" || st.Verify
 		if outOfRotation || account.Models() != nil {
 			continue
 		}

@@ -1,9 +1,13 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
+
+	"agyrelay/internal/agy"
 )
 
 type workersView struct {
@@ -17,6 +21,7 @@ type accountWorkersView struct {
 	Paused   bool          `json:"paused"`
 	Disabled string        `json:"disabled"`
 	Blocked  string        `json:"blocked"`
+	Verify   bool          `json:"verify"`
 	Turns    int           `json:"turns"`
 	Procs    []procView    `json:"procs"`
 	Sessions []sessionView `json:"sessions"`
@@ -109,7 +114,7 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 	out := workersView{Accounts: []accountWorkersView{}, Now: time.Now()}
 	for _, account := range h.pool.Accounts() {
 		st := account.Status()
-		v := accountWorkersView{Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Turns: st.Turns,
+		v := accountWorkersView{Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, Turns: st.Turns,
 			Procs: []procView{}, Sessions: sessionsByAccount[st.Name]}
 		workerOf := map[string]int{}
 		for _, proc := range account.LiveProcs() {
@@ -167,6 +172,64 @@ func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
 	}
 	h.audit(r, "session_closed", account+"/"+id)
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+type agyLogFileView struct {
+	Name     string    `json:"name"`
+	Kind     string    `json:"kind"`
+	PID      int       `json:"pid"`
+	Running  bool      `json:"running"`
+	Size     int64     `json:"size"`
+	Modified time.Time `json:"modified"`
+}
+
+func (h *Handler) listAgyLogs(w http.ResponseWriter, r *http.Request) {
+	files, err := h.control.AgyLogFiles(r.PathValue("account"))
+	if err != nil {
+		h.fail(w, "list agy logs", err)
+		return
+	}
+	out := []agyLogFileView{}
+	for _, f := range files {
+		out = append(out, agyLogFileView{Name: f.Name, Kind: f.Kind, PID: f.PID, Running: f.Running, Size: f.Size, Modified: f.Modified})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": out})
+}
+
+const (
+	defaultAgyLogEntries = 500
+	maxAgyLogEntries     = 5000
+)
+
+type agyLogEntryView struct {
+	File  string `json:"file"`
+	Level string `json:"level"`
+	Text  string `json:"text"`
+}
+
+// agyLogEntries answers ?file=&level=&q=&limit=: level is the lowest
+// glog severity (I, W, E, F), empty for every line.
+func (h *Handler) agyLogEntries(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	q := agy.LogQuery{File: query.Get("file"), MinLevel: query.Get("level"), Contains: query.Get("q"), Limit: defaultAgyLogEntries}
+	if raw := query.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > maxAgyLogEntries {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("limit must be 1 to %d", maxAgyLogEntries))
+			return
+		}
+		q.Limit = n
+	}
+	result, err := h.control.AgyLogs(r.PathValue("account"), q)
+	if err != nil {
+		h.fail(w, "read agy logs", err)
+		return
+	}
+	entries := make([]agyLogEntryView, len(result.Entries))
+	for i, e := range result.Entries {
+		entries[i] = agyLogEntryView{File: e.File, Level: e.Level, Text: e.Text}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "matched": result.Matched, "partial": result.Partial})
 }
 
 func (h *Handler) restartAccount(w http.ResponseWriter, r *http.Request) {
