@@ -30,17 +30,17 @@ type accountView struct {
 	Priority      int                  `json:"priority"`
 	AllowedModels []string             `json:"allowed_models"`
 	Disabled      string               `json:"disabled"`
-	Blocked   string               `json:"blocked"`
-	Verify    bool                 `json:"verify"`
-	VerifyURL string               `json:"verify_url"`
-	Cooldowns map[string]time.Time `json:"cooldowns"`
-	Turns     int                  `json:"turns"`
-	Procs     int                  `json:"procs"`
-	Login     bool                 `json:"login_pending"`
-	User      *agy.UserStatus      `json:"user"`
-	Groups    []agy.QuotaGroup     `json:"quota"`
-	SampledAt *time.Time           `json:"sampled_at"`
-	SampleErr string               `json:"sample_error"`
+	Blocked       string               `json:"blocked"`
+	Verify        bool                 `json:"verify"`
+	VerifyURL     string               `json:"verify_url"`
+	Cooldowns     map[string]time.Time `json:"cooldowns"`
+	Turns         int                  `json:"turns"`
+	Procs         int                  `json:"procs"`
+	Login         bool                 `json:"login_pending"`
+	User          *agy.UserStatus      `json:"user"`
+	Groups        []agy.QuotaGroup     `json:"quota"`
+	SampledAt     *time.Time           `json:"sampled_at"`
+	SampleErr     string               `json:"sample_error"`
 	// Models is nil until agy opens a session for the account.
 	Models []modelView `json:"models"`
 	// Unavailable is the agent models the account's upstream catalog lists
