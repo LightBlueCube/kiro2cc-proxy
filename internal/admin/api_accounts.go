@@ -244,6 +244,28 @@ func (h *Handler) submitLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"email": email})
 }
 
+// importSignIn signs the account in with a pasted refresh token. The token
+// is never logged or audited.
+func (h *Handler) importSignIn(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req struct {
+		Token string `json:"token"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), refreshTimeout)
+	defer cancel()
+	email, err := h.control.ImportSignIn(ctx, name, req.Token)
+	if err != nil {
+		h.audit(r, "signin_import_failed", name)
+		h.fail(w, "import sign-in", err)
+		return
+	}
+	h.audit(r, "signin_imported", name+" as "+email)
+	writeJSON(w, http.StatusOK, map[string]string{"email": email})
+}
+
 func (h *Handler) cancelLogin(w http.ResponseWriter, r *http.Request) {
 	h.control.CancelLogin(r.PathValue("name"))
 	writeJSON(w, http.StatusOK, map[string]any{})

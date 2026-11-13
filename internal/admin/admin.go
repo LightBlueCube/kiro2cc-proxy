@@ -92,6 +92,7 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/accounts/{name}/signin", h.authed(h.startLogin))
 	h.mux.HandleFunc("POST /admin/api/accounts/{name}/signin/code", h.authed(h.submitLogin))
 	h.mux.HandleFunc("DELETE /admin/api/accounts/{name}/signin", h.authed(h.cancelLogin))
+	h.mux.HandleFunc("POST /admin/api/accounts/{name}/signin/import", h.authed(h.importSignIn))
 
 	h.mux.HandleFunc("GET /admin/api/workers", h.authed(h.listWorkers))
 	h.mux.HandleFunc("POST /admin/api/workers/{account}/sessions/{id}/cancel", h.authed(h.cancelTurn))

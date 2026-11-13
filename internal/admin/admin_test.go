@@ -45,6 +45,8 @@ type env struct {
 	url string
 	st  *store.Store
 	ctl *control.Control
+	// accounts holds the account HOME directories.
+	accounts string
 }
 
 func newEnv(t *testing.T) *env {
@@ -103,7 +105,7 @@ func newEnv(t *testing.T) *env {
 		b.Close()
 		st.Close()
 	})
-	return &env{t: t, url: srv.URL, st: st, ctl: ctl}
+	return &env{t: t, url: srv.URL, st: st, ctl: ctl, accounts: filepath.Join(dir, "accounts")}
 }
 
 type client struct {
@@ -573,6 +575,67 @@ func TestSettingsValidation(t *testing.T) {
 	}
 	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.TurnsPerAccount != 3 {
 		t.Fatalf("applied = %+v", got)
+	}
+}
+
+func TestImportSignIn(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	add := map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}
+	if r := c.do("POST", "/admin/api/accounts", add, nil); r.status != http.StatusOK {
+		t.Fatalf("add = %d %s", r.status, r.raw)
+	}
+	tokenFile := filepath.Join(e.accounts, "main", ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	importToken := func(token string) reply {
+		return c.do("POST", "/admin/api/accounts/main/signin/import", map[string]string{"token": token}, nil)
+	}
+
+	if r := importToken("ya29.access"); r.status != http.StatusBadRequest || !strings.Contains(r.raw, "access token") {
+		t.Fatalf("access token = %d %s", r.status, r.raw)
+	}
+	if r := importToken("1//rejected"); r.status != http.StatusBadRequest || !strings.Contains(r.raw, "did not sign in") {
+		t.Fatalf("rejected token = %d %s", r.status, r.raw)
+	}
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Fatalf("a rejected import left a sign-in behind: %v", err)
+	}
+
+	exported := `{"email":"x@example.com","token":{"access_token":"ya29.x","refresh_token":"` + agytest.RefreshToken + `"}}`
+	r := importToken(exported)
+	if r.status != http.StatusOK || r.body["email"] != agytest.LoginEmail {
+		t.Fatalf("import = %d %s", r.status, r.raw)
+	}
+	info, err := os.Stat(tokenFile)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file = %v, %v", info, err)
+	}
+	installed, _ := os.ReadFile(tokenFile)
+
+	// A rejected token puts the working sign-in back.
+	if r := importToken("1//rejected"); r.status != http.StatusBadRequest {
+		t.Fatalf("second rejected token = %d %s", r.status, r.raw)
+	}
+	if restored, _ := os.ReadFile(tokenFile); string(restored) != string(installed) {
+		t.Fatalf("sign-in after a rejected import = %s, want %s", restored, installed)
+	}
+
+	entries, err := e.st.AuditLog(context.Background(), 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	for _, entry := range entries {
+		actions = append(actions, entry.Action+" "+entry.Detail)
+		if strings.Contains(entry.Detail, "1//") {
+			t.Fatalf("audit entry holds a token: %+v", entry)
+		}
+	}
+	if !slices.Contains(actions, "signin_imported main as "+agytest.LoginEmail) {
+		t.Fatalf("audit = %v", actions)
 	}
 }
 
