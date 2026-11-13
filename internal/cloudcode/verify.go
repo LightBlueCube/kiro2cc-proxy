@@ -89,25 +89,8 @@ func (s *Server) reportLocked(account string, v *Verification) {
 // verificationLink reads a VALIDATION_REQUIRED refusal from resp, leaving
 // its body for agy as it was. The link is kept only when it is https.
 func verificationLink(resp *http.Response) (string, bool) {
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes+1))
-	resp.Body = struct {
-		io.Reader
-		io.Closer
-	}{io.MultiReader(bytes.NewReader(raw), resp.Body), resp.Body}
-	if err != nil || len(raw) > maxErrorBytes {
-		return "", false
-	}
-
-	var body io.Reader = bytes.NewReader(raw)
-	switch resp.Header.Get("Content-Encoding") {
-	case "", "identity":
-	case "gzip":
-		unzipped, err := gzip.NewReader(body)
-		if err != nil {
-			return "", false
-		}
-		body = io.LimitReader(unzipped, maxErrorBytes)
-	default:
+	raw, ok := readErrorBody(resp)
+	if !ok {
 		return "", false
 	}
 
@@ -121,7 +104,7 @@ func verificationLink(resp *http.Response) (string, bool) {
 			} `json:"details"`
 		} `json:"error"`
 	}
-	if json.NewDecoder(body).Decode(&refusal) != nil {
+	if json.Unmarshal(raw, &refusal) != nil {
 		return "", false
 	}
 	for _, d := range refusal.Error.Details {
@@ -135,4 +118,31 @@ func verificationLink(resp *http.Response) (string, bool) {
 		return link, true
 	}
 	return "", false
+}
+
+// readErrorBody reads an error response's body, decoded, and puts it back
+// for agy as it came. Bodies over maxErrorBytes or in other encodings than
+// gzip are not read.
+func readErrorBody(resp *http.Response) ([]byte, bool) {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes+1))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(raw), resp.Body), resp.Body}
+	if err != nil || len(raw) > maxErrorBytes {
+		return nil, false
+	}
+
+	switch resp.Header.Get("Content-Encoding") {
+	case "", "identity":
+		return raw, true
+	case "gzip":
+		unzipped, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return nil, false
+		}
+		body, err := io.ReadAll(io.LimitReader(unzipped, maxErrorBytes))
+		return body, err == nil
+	}
+	return nil, false
 }

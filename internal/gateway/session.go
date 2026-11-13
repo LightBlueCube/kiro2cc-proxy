@@ -208,10 +208,7 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 		}
 		if err := g.reopen(ctx, sess, r); err != nil {
 			g.mu.Lock()
-			if sess.binding != nil {
-				sess.binding.Close()
-			}
-			delete(g.sessions, ref)
+			g.dropSessionLocked(sess)
 			g.mu.Unlock()
 			return nil, err
 		}
@@ -340,6 +337,8 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 // held until the turn settles.
 func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, slug, tier string, prompt []agy.ContentBlock, baseSteps int) {
 	g.movedPast(account.Name(), at.sess.id)
+	// A failure left by an earlier turn of the session is not this turn's.
+	account.ForgetModelFailure(at.sess.id)
 	g.mu.Lock()
 	at.account, at.choice, at.slug, at.tier, at.consuming, at.baseSteps, at.started = account, r.choice(), slug, tier, true, baseSteps, time.Now()
 	at.usageSteps = baseSteps

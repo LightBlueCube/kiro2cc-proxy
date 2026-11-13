@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -53,16 +55,20 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 	if testing.Verbose() {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
+	var p *pool.Pool
+	cloudCode := httptest.NewServer(modelCallRecorder(t, func() *pool.Pool { return p }))
+	t.Cleanup(cloudCode.Close)
 	var configs []pool.AccountConfig
 	for i := range accounts {
+		name := fmt.Sprintf("acct%d", i)
 		env := append([]string{agytest.EnvRun + "=1", "FAKE_AGY_LOG=" + logPath}, extraEnv[i]...)
-		configs = append(configs, pool.AccountConfig{Name: fmt.Sprintf("acct%d", i), Home: filepath.Join(dir, fmt.Sprintf("home%d", i)), Env: env})
+		configs = append(configs, pool.AccountConfig{Name: name, Home: filepath.Join(dir, fmt.Sprintf("home%d", i)), Env: env, CloudCodeEndpoint: cloudCode.URL + "/" + name})
 	}
 	b, err := bridge.Start(logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := pool.New(pool.Config{Bin: os.Args[0], Accounts: configs, TurnsPerAccount: 4, Log: logger})
+	p, err = pool.New(pool.Config{Bin: os.Args[0], Accounts: configs, TurnsPerAccount: 4, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +84,30 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 		b.Close()
 	})
 	return &harness{t: t, gw: gw, p: p, log: logPath, records: records, budget: budget}
+}
+
+// modelCallRecorder stands in for the Cloud Code proxy: it records the
+// model calls the fake agy of account <name> posts to /<name>.
+func modelCallRecorder(t *testing.T, current func() *pool.Pool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name, path, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		var call agytest.ModelCall
+		account := current().Account(name)
+		if "/"+path != agytest.ModelCallPath || account == nil || json.NewDecoder(r.Body).Decode(&call) != nil {
+			t.Errorf("unexpected Cloud Code request %s", r.URL.Path)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if call.Code == http.StatusOK {
+			account.RecordModelCall(call.Session, nil)
+			return
+		}
+		failure := &pool.ModelFailure{Code: call.Code, Message: call.Message}
+		if call.RetryAfter > 0 {
+			failure.Reset = time.Now().Add(call.RetryAfter)
+		}
+		account.RecordModelCall(call.Session, failure)
+	})
 }
 
 // fakeBudget reports set spend by key and group, prices every model but
@@ -803,7 +833,7 @@ func TestEditedToolResultsWarmDelta(t *testing.T) {
 	}
 }
 
-func TestQuotaNoticeRetriesOnAnotherAccount(t *testing.T) {
+func TestQuotaFailureRetriesOnAnotherAccount(t *testing.T) {
 	h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}})
 	name := userPreferring(t, h.p, "acct0")
 	r := h.complete(context.Background(), name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
@@ -966,11 +996,12 @@ func TestFallbackModelMissingFromCatalogIsUnknown(t *testing.T) {
 	}
 }
 
-func TestQuotaNoticeWithoutFallbackIs429(t *testing.T) {
+func TestQuotaFailureWithoutFallbackIs429(t *testing.T) {
 	h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}})
 	r := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
-	if r.err == nil || r.err.Kind != conv.ErrQuota || r.err.RetryAfterSeconds <= 0 || r.text != "" {
-		t.Fatalf("result = %+v", r)
+	wantWait := int(agytest.QuotaRetryAfter.Seconds())
+	if r.err == nil || r.err.Kind != conv.ErrQuota || r.err.Message != agytest.QuotaError || r.err.RetryAfterSeconds != wantWait || r.text != "" {
+		t.Fatalf("result = %+v, want quota error retrying after %d s", r, wantWait)
 	}
 }
 
@@ -979,6 +1010,59 @@ func TestModelOverflowIsContextLengthError(t *testing.T) {
 	r := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@overflow")}})
 	if r.err == nil || r.err.Kind != conv.ErrContextLength || r.err.Message != agytest.OverflowError || r.text != "" {
 		t.Fatalf("result = %+v", r)
+	}
+}
+
+// Once agy recovers from a failed model call, what it said about the
+// failure stays in the reply as it was.
+func TestRecoveredModelCallIsReply(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	r := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@retry429")}})
+	if want := "\n" + agytest.RetryNotice + "\nretried"; r.err != nil || r.text != want {
+		t.Fatalf("result = %+v, want text %q", r, want)
+	}
+}
+
+// A failure left by an abandoned turn does not fail the next turn.
+func TestEarlierTurnFailureIsForgotten(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("a")}})
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	session := h.requests("session/prompt")[0].Params.SessionID
+	h.p.Account("acct0").RecordModelCall(session, &pool.ModelFailure{Code: http.StatusInternalServerError, Message: "stale"})
+	messages := []conv.Message{user("a"), {Role: conv.RoleAssistant, Text: first.text}, user("b")}
+	r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if r.err != nil || r.text != "reply to: b" {
+		t.Fatalf("result = %+v", r)
+	}
+	if prompts := h.requests("session/prompt"); len(prompts) != 2 || prompts[1].Params.SessionID != session {
+		t.Fatal("second turn did not continue the session")
+	}
+}
+
+// A failure no turn read, as of a call cancelled when the client left,
+// goes with its session.
+func TestClosedSessionForgetsItsFailure(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	if r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("a")}}); r.err != nil {
+		t.Fatal(r.err)
+	}
+	account := h.p.Account("acct0")
+	session := h.requests("session/prompt")[0].Params.SessionID
+	account.RecordModelCall(session, &pool.ModelFailure{Code: http.StatusBadGateway, Message: "Cloud Code request failed: context canceled"})
+
+	h.gw.SetIdleClose(time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	h.gw.sweep()
+	if len(h.requests("session/close")) != 1 {
+		t.Fatal("idle session not closed")
+	}
+	if failure := account.ModelFailure(session); failure != nil {
+		t.Fatalf("closed session keeps %+v", failure)
 	}
 }
 

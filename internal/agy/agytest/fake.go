@@ -9,12 +9,19 @@
 //	@parallel A B ...    call tools A, B, ... through the parallel tool
 //	@hang                produce nothing until cancelled
 //	@think-hang          a thought, then nothing until cancelled
+//	@overflow            fail the model call: input over the window
+//	@retry429            fail the model call (capacity), stream RetryNotice,
+//	                     then reply "retried" from a call that succeeds
 //	@steps               reply "steps: N", N the steps before this prompt
 //
 // Anything else gets a thought and "reply to: <input>".
 //
 // With --login the fake signs in like `agy acp --login`: it prints a
 // Google link and accepts LoginCode.
+//
+// A failed model call is reported, before agy's line about it, as a
+// ModelCall posted to the --cloud_code_endpoint path plus ModelCallPath;
+// so is a later call that succeeds. Calls that just succeed are not.
 //
 // Its language server also answers GetUserStatus and
 // RetrieveUserQuotaSummary; the gemini-weekly bucket loses
@@ -28,15 +35,17 @@
 //
 //	FAKE_AGY_LOG    append every request as a JSON line; language server
 //	                calls have the method "ls/<Name>"
-//	FAKE_AGY_QUOTA  answer every prompt with agy's quota notice
+//	FAKE_AGY_QUOTA  fail every prompt's model call: weekly quota (QuotaError)
 //	FAKE_AGY_MODELS report these comma-separated model ids instead of
 //	                Models
 package agytest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -75,14 +84,39 @@ var stepModelUsage = map[string]string{
 }
 
 // OverflowError is the model error of the "@overflow" prompt, as agy
-// records it for Gemini.
+// words it for Gemini.
 const OverflowError = "INVALID_ARGUMENT (code 400): The input token count exceeds the maximum number of tokens allowed 1048576."
 
 // EnvRun makes a test binary act as the fake agent (see Main).
 const EnvRun = "FAKE_AGY"
 
-// QuotaNotice is agy's exhausted-quota reply.
-const QuotaNotice = "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours."
+// The weekly quota error of FAKE_AGY_QUOTA (Claude's, agy 1.5.3) and the
+// wait Google names; agy replies "⚠ " + QuotaUserError.
+const (
+	QuotaUserError  = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h0m0s."
+	QuotaError      = "RESOURCE_EXHAUSTED (code 429): " + QuotaUserError
+	QuotaRetryAfter = 2 * time.Hour
+)
+
+// CapacityError is the model error of "@retry429"; RetryNotice is the
+// line agy streams before it retries.
+const (
+	CapacityError = "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 0s."
+	RetryNotice   = "⚠ API error (attempt 1): " + CapacityError
+)
+
+// ModelCallPath is where the fake posts a ModelCall, under its
+// --cloud_code_endpoint.
+const ModelCallPath = "/fake/model-call"
+
+// ModelCall is the outcome of one of the fake's model calls: Code 200 for
+// one that succeeded.
+type ModelCall struct {
+	Session    string        `json:"session"`
+	Code       int           `json:"code"`
+	Message    string        `json:"message,omitempty"`
+	RetryAfter time.Duration `json:"retryAfter,omitempty"`
+}
 
 // LoginCode is the authorization code the fake login accepts; it signs in
 // LoginEmail.
@@ -149,10 +183,11 @@ func catalog() []map[string]string {
 }
 
 type fake struct {
-	geminiDir string
-	started   string // log file timestamp
-	log       *os.File
-	lsOnce    sync.Once
+	geminiDir         string
+	cloudCodeEndpoint string
+	started           string // log file timestamp
+	log               *os.File
+	lsOnce            sync.Once
 
 	outMu sync.Mutex
 	out   *bufio.Writer
@@ -180,8 +215,14 @@ type rpcMessage struct {
 func Main() {
 	f := &fake{out: bufio.NewWriter(os.Stdout), sessions: map[string]*fakeSession{}, started: time.Now().Format("20060102_150405")}
 	for i, arg := range os.Args {
-		if arg == "--gemini-dir" && i+1 < len(os.Args) {
+		if i+1 == len(os.Args) {
+			break
+		}
+		switch arg {
+		case "--gemini-dir":
 			f.geminiDir = os.Args[i+1]
+		case "--cloud_code_endpoint":
+			f.cloudCodeEndpoint = os.Args[i+1]
 		}
 	}
 	if slices.Contains(os.Args, "--login") {
@@ -444,8 +485,6 @@ func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
 			switch step {
 			case stepPlanner:
 				metadata["modelUsage"] = stepModelUsage
-			case stepErrorMessage:
-				entry["errorMessage"] = map[string]any{"error": map[string]any{"modelErrorMessage": OverflowError, "errorCode": 400}}
 			}
 			steps = append(steps, entry)
 		}
@@ -507,10 +546,15 @@ func (f *fake) prompt(msg rpcMessage) {
 	f.prompts++
 	f.mu.Unlock()
 	f.addSteps(p.SessionID, s, stepUserInput)
-	if input == "@overflow" {
-		// agy's reply when the model call fails; the cause is in the step.
+	if failure, line := scriptedFailure(input); failure != nil {
+		// agy ends the turn with a line about the error as the reply.
+		failure.Session = p.SessionID
+		if err := f.modelCall(*failure); err != nil {
+			f.fail(msg.ID, -32603, err.Error())
+			return
+		}
 		f.addSteps(p.SessionID, s, stepErrorMessage)
-		f.chunk(p.SessionID, "agent_message_chunk", "\n⚠ Agent execution terminated due to error.\n")
+		f.chunk(p.SessionID, "agent_message_chunk", "\n"+line+"\n")
 		f.reply(msg.ID, map[string]any{"stopReason": "end_turn"})
 		return
 	}
@@ -546,10 +590,37 @@ func (f *fake) prompt(msg rpcMessage) {
 		"thoughtTokens": calls * StepThought, "totalTokens": calls * (StepInput + StepCached + StepOutput)}})
 }
 
-func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input string) (string, error) {
+// scriptedFailure is the failed model call that ends a prompt with this
+// input, and the line agy replies with; nil when the call succeeds.
+func scriptedFailure(input string) (*ModelCall, string) {
 	if os.Getenv("FAKE_AGY_QUOTA") != "" {
-		return QuotaNotice, nil
+		// An error with a user message: agy shows that message.
+		return &ModelCall{Code: http.StatusTooManyRequests, Message: QuotaError, RetryAfter: QuotaRetryAfter}, "⚠ " + QuotaUserError
 	}
+	if input == "@overflow" {
+		return &ModelCall{Code: http.StatusBadRequest, Message: OverflowError}, "⚠ Agent execution terminated due to error."
+	}
+	return nil, ""
+}
+
+// modelCall posts the outcome of a model call to the Cloud Code endpoint.
+func (f *fake) modelCall(call ModelCall) error {
+	if f.cloudCodeEndpoint == "" {
+		return errors.New("fake agy: no --cloud_code_endpoint to report model calls to")
+	}
+	body, _ := json.Marshal(call)
+	resp, err := http.Post(f.cloudCodeEndpoint+ModelCallPath, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fake agy: model call report: %s", resp.Status)
+	}
+	return nil
+}
+
+func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input string) (string, error) {
 	fields := strings.Fields(input)
 	directive := ""
 	if len(fields) > 0 {
@@ -563,6 +634,16 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		f.chunk(sessionID, "agent_thought_chunk", "thinking")
 		<-ctx.Done()
 		return "", nil
+	case "@retry429":
+		if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusTooManyRequests, Message: CapacityError}); err != nil {
+			return "", err
+		}
+		f.addSteps(sessionID, s, stepErrorMessage)
+		f.chunk(sessionID, "agent_message_chunk", "\n"+RetryNotice+"\n")
+		if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusOK}); err != nil {
+			return "", err
+		}
+		return "retried", nil
 	case "@tool":
 		name, args, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(input, "@tool")), " ")
 		f.addSteps(sessionID, s, stepPlanner)

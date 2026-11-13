@@ -103,44 +103,6 @@ func (p *Proc) TurnUsage(ctx context.Context, sessionID string, from int) (Usage
 	return sum, from + len(steps), nil
 }
 
-// StepError is the model API failure an ERROR_MESSAGE step records.
-type StepError struct {
-	// Code is the HTTP status of the model API, e.g. 400.
-	Code int
-	// Message is agy's text for the model, e.g. "INVALID_ARGUMENT (code
-	// 400): The input token count exceeds the maximum number of tokens
-	// allowed 1048576."
-	Message string
-}
-
-// LastError returns the newest ERROR_MESSAGE step after the first from
-// steps. agy ends a turn whose model call failed with one, and replies
-// only "⚠ Agent execution terminated due to error." over ACP.
-func (p *Proc) LastError(ctx context.Context, sessionID string, from int) (StepError, error) {
-	var result struct {
-		Steps []struct {
-			Type         string `json:"type"`
-			ErrorMessage struct {
-				Error struct {
-					ModelErrorMessage string `json:"modelErrorMessage"`
-					ErrorCode         int    `json:"errorCode"`
-				} `json:"error"`
-			} `json:"errorMessage"`
-		} `json:"steps"`
-	}
-	err := p.lsCall(ctx, sessionID, "GetCascadeTrajectorySteps", map[string]any{"cascadeId": sessionID, "stepOffset": from}, &result)
-	if err != nil {
-		return StepError{}, err
-	}
-	for i := len(result.Steps) - 1; i >= 0; i-- {
-		step := result.Steps[i]
-		if step.Type == "CORTEX_STEP_TYPE_ERROR_MESSAGE" {
-			return StepError{Code: step.ErrorMessage.Error.ErrorCode, Message: step.ErrorMessage.Error.ModelErrorMessage}, nil
-		}
-	}
-	return StepError{}, errors.New("the turn recorded no error step")
-}
-
 // Rewind keeps the session's first keep steps (keep ≥ 1) and resumes it, so
 // the next prompt streams correctly. The session must be live in p.
 func (p *Proc) Rewind(ctx context.Context, sessionID string, keep int, spec SessionSpec) error {

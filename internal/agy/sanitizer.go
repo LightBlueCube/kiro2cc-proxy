@@ -111,11 +111,3 @@ func overlapSuffix(text, marker string) int {
 	}
 	return 0
 }
-
-// agy emits this line as its own message chunk when the model produced a
-// malformed tool call, then retries. It is status, not reply text.
-const retryNotice = "⚠ Model produced invalid output."
-
-func isRetryNotice(delta string) bool {
-	return strings.TrimSpace(delta) == retryNotice
-}
