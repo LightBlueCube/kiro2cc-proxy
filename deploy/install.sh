@@ -12,6 +12,7 @@
 # is installed or the build cannot run it, and --agy is not given, the
 # script asks before downloading the pinned release from GitHub
 # (deploy/fetch-agy.sh). Behind a proxy: sudo https_proxy=URL deploy/install.sh
+# (the build and the download both use it).
 #
 # The build runs as the user who called sudo and needs Go (the version in
 # go.mod, or a Go that downloads it).
@@ -90,8 +91,15 @@ build() {
 		return
 	fi
 	# A login shell, so the user's PATH (where Go is) and Go caches apply.
+	# It starts from a clean environment: pass on the caller's proxy.
+	local proxy_env=() name
+	for name in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+		if [[ -n ${!name-} ]]; then
+			proxy_env+=("$name=${!name}")
+		fi
+	done
 	chown "$SUDO_USER" "$work"
-	runuser -l "$SUDO_USER" -c "$(printf '%q ' "${cmd[@]}")"
+	runuser -l "$SUDO_USER" -c "$(printf '%q ' env "${proxy_env[@]}" "${cmd[@]}")"
 }
 
 echo "Building agyrelay"
