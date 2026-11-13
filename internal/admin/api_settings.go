@@ -60,8 +60,39 @@ type keyView struct {
 	LimitTotal *float64           `json:"limit_total"`
 	Limits     map[string]float64 `json:"limits"`
 	Spent      map[string]float64 `json:"spent"`
+	Totals     keyTotalsView      `json:"totals"`
 	CreatedAt  time.Time          `json:"created_at"`
 	RevokedAt  *time.Time         `json:"revoked_at"`
+}
+
+// keyTotalsView counts a key's successful requests and their tokens since
+// the key was created, in all and by model.
+type keyTotalsView struct {
+	Requests int64            `json:"requests"`
+	Input    int64            `json:"input"`
+	Output   int64            `json:"output"`
+	Models   []modelTotalView `json:"models"`
+}
+
+type modelTotalView struct {
+	Model    string `json:"model"`
+	Requests int64  `json:"requests"`
+	Input    int64  `json:"input"`
+	Output   int64  `json:"output"`
+}
+
+// keyTotalsByHash groups the totals by key hash, keeping their order.
+func keyTotalsByHash(totals []store.KeyTotal) map[string]keyTotalsView {
+	out := map[string]keyTotalsView{}
+	for _, m := range totals {
+		v := out[m.KeyHash]
+		v.Requests += m.Requests
+		v.Input += m.Input
+		v.Output += m.Output
+		v.Models = append(v.Models, modelTotalView{Model: m.Model, Requests: m.Requests, Input: m.Input, Output: m.Output})
+		out[m.KeyHash] = v
+	}
+	return out
 }
 
 type keysView struct {
@@ -81,9 +112,16 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "key spend", err)
 		return
 	}
+	totals, err := h.control.KeyTotals(r.Context())
+	if err != nil {
+		h.internalError(w, "key totals", err)
+		return
+	}
+	byHash := keyTotalsByHash(totals)
 	out := keysView{Keys: []keyView{}, Groups: usage.Groups}
 	for _, k := range keys {
-		v := keyView{Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spends[k.Hash], CreatedAt: k.CreatedAt}
+		v := keyView{Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spends[k.Hash],
+			Totals: byHash[k.Hash], CreatedAt: k.CreatedAt}
 		if v.Models == nil {
 			v.Models = []string{}
 		}
@@ -92,6 +130,9 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		if v.Spent == nil {
 			v.Spent = map[string]float64{}
+		}
+		if v.Totals.Models == nil {
+			v.Totals.Models = []modelTotalView{}
 		}
 		if !k.RevokedAt.IsZero() {
 			revoked := k.RevokedAt

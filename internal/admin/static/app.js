@@ -240,6 +240,16 @@ function spendCell(k, groups) {
     : spendBar(groupName(g), spent(g), k.limits[g]));
 }
 
+// totalsCell shows a key's successful calls and tokens; hovering lists
+// them by model.
+function totalsCell(totals) {
+  if (!totals.requests) return h("span", { class: "muted" }, t("keys.totals.none"));
+  const byModel = totals.models
+    .map(m => t("keys.totals.model", { model: m.model, count: m.requests, input: fmt.int(m.input), output: fmt.int(m.output) }))
+    .join("\n");
+  return term(t("keys.totals", { count: totals.requests, input: fmt.compact(totals.input), output: fmt.compact(totals.output) }), byModel);
+}
+
 // modelPicker lists model ids as checkboxes; none checked allows every
 // model. Other ids can be typed in; selected ids not on offer stay listed,
 // so saving does not drop them.
@@ -326,6 +336,7 @@ views.keys = container => {
       { title: t("common.note"), cell: k => k.note || h("span", { class: "muted" }, "—") },
       { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
       { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
+      { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
       { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
       { title: "", cell: k => k.revoked_at
           ? h("span", { class: "row" }, t("keys.revoked", { time: fmt.time(k.revoked_at) }),

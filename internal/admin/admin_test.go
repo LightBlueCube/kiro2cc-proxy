@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -281,6 +282,29 @@ func TestChangesNeedCSRFAndSameOrigin(t *testing.T) {
 		t.Fatalf("keys = %s, want the hash %x", r.raw, sum)
 	}
 	hash := list.Keys[0].Hash
+	if totals := list.Keys[0].Totals; totals.Requests != 0 || totals.Models == nil {
+		t.Fatalf("totals of a new key = %+v", totals)
+	}
+
+	for _, req := range []store.Request{
+		{KeyHash: hash, Model: "small", Status: store.StatusOK, Input: 10, Output: 1},
+		{KeyHash: hash, Model: "big", Status: store.StatusOK, Input: 100, Output: 20},
+		{KeyHash: hash, Model: "small", Status: store.StatusOK, Input: 5, Output: 2},
+	} {
+		req.At = time.Now()
+		if err := e.st.AddRequest(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r = c.do("GET", "/admin/api/keys", nil, nil)
+	json.Unmarshal([]byte(r.raw), &list)
+	wantTotals := keyTotalsView{Requests: 3, Input: 115, Output: 23, Models: []modelTotalView{
+		{Model: "big", Requests: 1, Input: 100, Output: 20},
+		{Model: "small", Requests: 2, Input: 15, Output: 3},
+	}}
+	if !reflect.DeepEqual(list.Keys[0].Totals, wantTotals) {
+		t.Fatalf("totals = %+v, want %+v", list.Keys[0].Totals, wantTotals)
+	}
 
 	if r := c.do("DELETE", "/admin/api/keys/"+hash, nil, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("delete an active key = %d %s", r.status, r.raw)
