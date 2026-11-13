@@ -718,8 +718,27 @@ views.accounts = container => {
     return accountBadge(a, h("span", { class: "badge ok" }, t("account.ready")));
   }
 
+  function poolUsageLine(u) {
+    if (!u) return null;
+    const since = t("accounts.quota.used_since", { time: fmt.time(u.since) });
+    if (!u.requests) return h("div", { class: "sub", style: "margin-top:2px", title: since }, t("accounts.quota.used_none"));
+    const cached = u.input > 0 ? t("calls.tokens.cached", { pct: fmt.pct(cachePct(u.input, u.cached)) }) : "";
+    const cost = fmt.usd(u.cost_usd) + (u.unpriced ? " " + t("calls.total.unpriced", { count: u.unpriced }) : "");
+    const summary = joined(t("accounts.quota.used", { cost, input: fmt.compact(u.input), output: fmt.compact(u.output) }), cached);
+    const models = u.models.map(m => {
+      const mCached = m.input > 0 ? t("calls.tokens.cached", { pct: fmt.pct(cachePct(m.input, m.cached)) }) : "";
+      const mCost = fmt.usd(m.cost_usd) + (m.unpriced ? " " + t("calls.total.unpriced", { count: m.unpriced }) : "");
+      return joined(t("accounts.quota.used_model", { model: m.model, cost: mCost, count: m.requests, input: fmt.int(m.input), output: fmt.int(m.output) }), mCached);
+    });
+    return h("div", { class: "sub", style: "margin-top:2px", title: [since, ...models].join("\n") }, summary);
+  }
+
   function quota(a) {
     if (!a.quota || !a.quota.length) return h("p", { class: "muted" }, a.sample_error ? "" : t("accounts.quota.none"));
+    const poolUsage = g => {
+      const group = g.buckets.map(b => bucketQuotaGroup(b.id)).find(Boolean);
+      return group && a.pool_usage && a.pool_usage[group];
+    };
     return a.quota.map(g => h("div", {},
       h("h3", { title: g.description || "" }, g.name),
       g.buckets.map(b => {
@@ -728,7 +747,8 @@ views.accounts = container => {
           h("span", { class: "muted", style: "width:52px" }, b.window),
           h("div", { class: "bar grow " + level }, h("span", { style: `width:${Math.max(0, Math.min(100, b.remaining * 100))}%` })),
           h("span", { class: "mono", style: "width:150px;text-align:right" }, t("accounts.quota.left", { left: fmt.pct(b.remaining, 1), reset: fmt.until(b.reset_at) })));
-      })));
+      }),
+      poolUsageLine(poolUsage(g))));
   }
 
   function card(a) {

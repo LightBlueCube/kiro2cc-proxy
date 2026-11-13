@@ -14,9 +14,13 @@ import (
 	"agyrelay/internal/agy"
 	"agyrelay/internal/control"
 	"agyrelay/internal/store"
+	"agyrelay/internal/usage"
 )
 
-const refreshTimeout = time.Minute
+const (
+	refreshTimeout = time.Minute
+	weeklyWindow   = 7 * 24 * time.Hour
+)
 
 type accountView struct {
 	Name      string    `json:"name"`
@@ -24,28 +28,90 @@ type accountView struct {
 	EnvNames  []string  `json:"env_names"`
 	// Proxy is the account's own proxy; Route is where its traffic goes
 	// now ("proxy http://…", "direct", "refused").
-	Proxy         string               `json:"proxy"`
-	Route         string               `json:"route"`
-	Paused        bool                 `json:"paused"`
-	Priority      int                  `json:"priority"`
-	AllowedModels []string             `json:"allowed_models"`
-	Disabled      string               `json:"disabled"`
-	Blocked       string               `json:"blocked"`
-	Verify        bool                 `json:"verify"`
-	VerifyURL     string               `json:"verify_url"`
-	Cooldowns     map[string]time.Time `json:"cooldowns"`
-	Turns         int                  `json:"turns"`
-	Procs         int                  `json:"procs"`
-	Login         bool                 `json:"login_pending"`
-	User          *agy.UserStatus      `json:"user"`
-	Groups        []agy.QuotaGroup     `json:"quota"`
-	SampledAt     *time.Time           `json:"sampled_at"`
-	SampleErr     string               `json:"sample_error"`
+	Proxy         string                   `json:"proxy"`
+	Route         string                   `json:"route"`
+	Paused        bool                     `json:"paused"`
+	Priority      int                      `json:"priority"`
+	AllowedModels []string                 `json:"allowed_models"`
+	Disabled      string                   `json:"disabled"`
+	Blocked       string                   `json:"blocked"`
+	Verify        bool                     `json:"verify"`
+	VerifyURL     string                   `json:"verify_url"`
+	Cooldowns     map[string]time.Time     `json:"cooldowns"`
+	Turns         int                      `json:"turns"`
+	Procs         int                      `json:"procs"`
+	Login         bool                     `json:"login_pending"`
+	User          *agy.UserStatus          `json:"user"`
+	Groups        []agy.QuotaGroup         `json:"quota"`
+	PoolUsage     map[string]poolUsageView `json:"pool_usage"`
+	SampledAt     *time.Time               `json:"sampled_at"`
+	SampleErr     string                   `json:"sample_error"`
 	// Models is nil until agy opens a session for the account.
 	Models []modelView `json:"models"`
 	// Unavailable is the agent models the account's upstream catalog lists
 	// as disabled.
 	Unavailable []modelView `json:"unavailable"`
+}
+
+// poolUsageView totals an account's tokens and list-price spend in one
+// quota group over its current weekly cycle, in all and by model.
+type poolUsageView struct {
+	Since     time.Time          `json:"since"`
+	Requests  int64              `json:"requests"`
+	Input     int64              `json:"input"`
+	Cached    int64              `json:"cached"`
+	Output    int64              `json:"output"`
+	Reasoning int64              `json:"reasoning"`
+	CostUSD   float64            `json:"cost_usd"`
+	Unpriced  int64              `json:"unpriced"`
+	Models    []store.ModelUsage `json:"models"`
+}
+
+func poolWindowStart(g agy.QuotaGroup, now time.Time) (group string, since time.Time) {
+	weekAgo := now.Add(-weeklyWindow)
+	since = weekAgo
+	for _, b := range g.Buckets {
+		if group == "" {
+			group = usage.BucketGroup(b.ID)
+		}
+		if b.Window == "weekly" && !b.ResetAt.IsZero() {
+			if b.ResetAt.After(now) {
+				since = b.ResetAt.Add(-weeklyWindow)
+			} else if b.ResetAt.After(weekAgo) {
+				since = b.ResetAt
+			}
+		}
+	}
+	return group, since
+}
+
+func (h *Handler) accountPoolUsage(ctx context.Context, account string, groups []agy.QuotaGroup, now time.Time) (map[string]poolUsageView, error) {
+	out := map[string]poolUsageView{}
+	for _, g := range groups {
+		group, since := poolWindowStart(g, now)
+		if group == "" {
+			continue
+		}
+		models, err := h.store.AccountGroupUsage(ctx, account, group, since)
+		if err != nil {
+			return nil, err
+		}
+		if models == nil {
+			models = []store.ModelUsage{}
+		}
+		view := poolUsageView{Since: since, Models: models}
+		for _, m := range models {
+			view.Requests += m.Requests
+			view.Input += m.Input
+			view.Cached += m.Cached
+			view.Output += m.Output
+			view.Reasoning += m.Reasoning
+			view.CostUSD += m.CostUSD
+			view.Unpriced += m.Unpriced
+		}
+		out[group] = view
+	}
+	return out, nil
 }
 
 // accountModels returns the account's models, each with its upstream
@@ -85,6 +151,7 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "list accounts", err)
 		return
 	}
+	now := time.Now()
 	out := []accountView{}
 	for _, account := range h.pool.Accounts() {
 		st := account.Status()
@@ -115,6 +182,11 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 				v.User, v.Groups, v.SampledAt = &user, q.Groups, &at
 			}
 			v.SampleErr = q.Err
+		}
+		v.PoolUsage, err = h.accountPoolUsage(r.Context(), st.Name, v.Groups, now)
+		if err != nil {
+			h.internalError(w, "account pool usage", err)
+			return
 		}
 		v.Models, v.Unavailable = h.accountModels(st.Name)
 		out = append(out, v)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"agyrelay/internal/store"
@@ -20,6 +21,23 @@ var weeklyBuckets = map[string]string{
 
 // Groups lists the quota groups with a weekly bucket.
 var Groups = []string{"gemini", "claude-gpt", "argon"}
+
+// BucketGroup maps a quota bucket id to its pool quota group.
+func BucketGroup(bucketID string) string {
+	if g, ok := weeklyBuckets[bucketID]; ok {
+		return g
+	}
+	switch {
+	case strings.HasPrefix(bucketID, "3p-"):
+		return "claude-gpt"
+	case strings.HasPrefix(bucketID, "gemini-argon-"):
+		return "argon"
+	case strings.HasPrefix(bucketID, "gemini-"):
+		return "gemini"
+	default:
+		return ""
+	}
+}
 
 // QuotaReport is the weekly-quota use attributed to matching requests.
 // Shares of different accounts' buckets do not add up to one number: plans

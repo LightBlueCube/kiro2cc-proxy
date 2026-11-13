@@ -120,3 +120,46 @@ func TestAccountRouting(t *testing.T) {
 		t.Fatalf("unknown account = %v", err)
 	}
 }
+
+func TestAccountGroupUsage(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	since := time.Now().Truncate(time.Second)
+	p1, p2 := 1.5, 0.25
+	rows := []Request{
+		// Before the window: excluded.
+		{At: since.Add(-time.Minute), Duration: time.Second, Account: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: StatusOK, Input: 1000, Output: 100, CostUSD: &p1},
+		// Started just before since, finished after since: included.
+		{At: since.Add(-500 * time.Millisecond), Duration: time.Second, Account: "main", QuotaGroup: "claude-gpt", Model: "gpt-oss-120b", Status: StatusOK, Input: 200, Cached: 50, Output: 20, CostUSD: &p2},
+		// Higher cost model + an unpriced call.
+		{At: since.Add(time.Minute), Duration: time.Second, Account: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: StatusOK, Input: 500, Cached: 100, Output: 50, Reasoning: 10, CostUSD: &p1},
+		{At: since.Add(2 * time.Minute), Duration: time.Second, Account: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: StatusOK, Input: 300, Output: 30},
+		// Zero-token failure: excluded.
+		{At: since.Add(3 * time.Minute), Account: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: "quota"},
+		// Other group and other account: excluded.
+		{At: since.Add(time.Minute), Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: StatusOK, Input: 999, Output: 99, CostUSD: &p1},
+		{At: since.Add(time.Minute), Account: "other", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: StatusOK, Input: 999, Output: 99, CostUSD: &p1},
+	}
+	for _, r := range rows {
+		if err := st.AddRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.AccountGroupUsage(ctx, "main", "claude-gpt", since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ModelUsage{
+		{Model: "claude-sonnet-4-6", Requests: 2, Input: 800, Cached: 100, Output: 80, Reasoning: 10, CostUSD: 1.5, Unpriced: 1},
+		{Model: "gpt-oss-120b", Requests: 1, Input: 200, Cached: 50, Output: 20, CostUSD: 0.25},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("usage = %+v, want %+v", got, want)
+	}
+}

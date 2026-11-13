@@ -535,6 +535,29 @@ func TestWorkers(t *testing.T) {
 	if len(m) != 2 || m[0].ID != "gemini-3.8-flash" || !slices.Equal(m[0].Efforts, []string{"low", "high"}) || m[1].ID != "claude-opus-5-5" {
 		t.Fatalf("models after refresh = %+v", m)
 	}
+	// Fake agy sets weekly reset_at to now + 72h, so the current week started 4d ago.
+	ctx := context.Background()
+	oldCost, curCost := 9.0, 1.25
+	for _, req := range []store.Request{
+		{At: time.Now().Add(-5 * 24 * time.Hour), Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 5000, Output: 500, CostUSD: &oldCost},
+		{At: time.Now().Add(-2 * time.Hour), Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 1000, Cached: 400, Output: 100, CostUSD: &curCost},
+		{At: time.Now().Add(-time.Hour), Account: "main", QuotaGroup: "gemini", Model: "gemini-3.1-pro", Status: store.StatusOK, Input: 200, Output: 20},
+	} {
+		if err := e.st.AddRequest(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var refreshed []accountView
+	if err := json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	gemPool := refreshed[0].PoolUsage["gemini"]
+	if gemPool.Requests != 2 || gemPool.Input != 1200 || gemPool.Cached != 400 || gemPool.Output != 120 || gemPool.CostUSD != 1.25 || gemPool.Unpriced != 1 || len(gemPool.Models) != 2 {
+		t.Fatalf("gemini pool_usage = %+v", gemPool)
+	}
+	if claudePool, ok := refreshed[0].PoolUsage["claude-gpt"]; !ok || claudePool.Requests != 0 || len(claudePool.Models) != 0 {
+		t.Fatalf("claude-gpt pool_usage = %+v, ok=%v", claudePool, ok)
+	}
 	if a := workers(); len(a.Procs) != 1 || a.Procs[0].PID == 0 || a.Procs[0].RSSBytes == 0 {
 		t.Fatalf("after refresh = %+v", a)
 	}
