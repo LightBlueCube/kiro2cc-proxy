@@ -472,6 +472,25 @@ func TestAccountProxy(t *testing.T) {
 	if r := c.do("PUT", "/admin/api/accounts/nobody/proxy", map[string]string{"proxy": ""}, nil); r.status != http.StatusNotFound {
 		t.Fatalf("unknown account = %d", r.status)
 	}
+
+	// Routing priority and allowed models persist and apply to the pool.
+	if r := c.do("PUT", "/admin/api/accounts/main/routing", map[string]any{
+		"priority":       7,
+		"allowed_models": []string{" gemini-3.8-flash ", "gemini-3.8-flash", ""},
+	}, nil); r.status != http.StatusOK {
+		t.Fatalf("set routing = %d %s", r.status, r.raw)
+	}
+	var accounts []accountView
+	json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &accounts)
+	if accounts[0].Priority != 7 || !slices.Equal(accounts[0].AllowedModels, []string{"gemini-3.8-flash"}) {
+		t.Fatalf("account routing = %+v", accounts[0])
+	}
+	if records, _ := e.ctl.AccountRecords(context.Background()); records["main"].Priority != 7 || !slices.Equal(records["main"].Models, []string{"gemini-3.8-flash"}) {
+		t.Fatalf("stored routing = %+v", records["main"])
+	}
+	if r := c.do("PUT", "/admin/api/accounts/nobody/routing", map[string]any{"priority": 1}, nil); r.status != http.StatusNotFound {
+		t.Fatalf("unknown account routing = %d", r.status)
+	}
 }
 
 func TestWorkers(t *testing.T) {

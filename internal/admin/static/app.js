@@ -580,6 +580,7 @@ views.accounts = container => {
   const modelsCard = h("div", { class: "card" });
   const signins = new Map(); // account name → {url, code}
   const imports = new Map(); // account name → {token}
+  const routings = new Set(); // account names being edited
 
   const name = h("input", { required: true, maxlength: 64, placeholder: t("accounts.name.placeholder"), pattern: "[A-Za-z0-9][A-Za-z0-9_.\\-]*" });
   const proxy = h("input", { placeholder: "http://127.0.0.1:7890" });
@@ -675,6 +676,33 @@ views.accounts = container => {
         h("button", { onclick: () => { imports.delete(a.name); guarded(load); } }, t("common.cancel"))));
   }
 
+  function routingPanel(a) {
+    if (!routings.has(a.name)) return null;
+    const priority = h("input", { type: "number", step: 1, value: String(a.priority), style: "width:90px" });
+    const choices = [...new Set([...(a.models || []).map(m => m.id), ...catalog])];
+    const models = modelPicker(choices, a.allowed_models);
+    const save = event => {
+      event.preventDefault();
+      guarded(async () => {
+        await api("PUT", `accounts/${encodeURIComponent(a.name)}/routing`, {
+          priority: Math.trunc(Number(priority.value) || 0),
+          allowed_models: models.read(),
+        });
+        routings.delete(a.name);
+        toast(t("common.saved"));
+        await load();
+      }, event.submitter);
+    };
+    return h("form", { class: "card", onsubmit: save },
+      h("h3", {}, t("accounts.routing.title")),
+      h("div", { class: "row" },
+        h("label", { title: t("accounts.routing.priority.hint") }, t("accounts.routing.priority"), priority)),
+      h("div", { class: "field" }, t("accounts.routing.models"), models.node),
+      h("div", { class: "row", style: "margin-top:8px" },
+        h("button", { type: "submit", class: "primary" }, t("common.save")),
+        h("button", { type: "button", onclick: () => { routings.delete(a.name); guarded(load); } }, t("common.cancel"))));
+  }
+
   // verifyNotice tells what to do about Google's verification request.
   function verifyNotice(a) {
     if (!a.verify) return null;
@@ -716,19 +744,23 @@ views.accounts = container => {
       Object.entries(a.cooldowns).map(([group, until]) => h("p", { class: "warn" }, t("accounts.cooldown", { group, time: fmt.until(until) }))),
       a.sample_error ? h("p", { class: "bad mono" }, t("accounts.sample_error", { error: a.sample_error })) : null,
       h("p", { class: "muted" }, joined(
+        t("accounts.priority", { priority: a.priority }),
         t("accounts.turns", { count: a.turns }),
         t("accounts.procs", { count: a.procs }),
         a.sampled_at ? t("accounts.sampled", { time: fmt.time(a.sampled_at) }) : t("accounts.not_sampled"),
         a.proxy ? t("accounts.traffic", { route }) : t("accounts.traffic.no_own_proxy", { route }),
         a.env_names.length ? t("accounts.env_names", { names: a.env_names.join(", ") }) : "")),
       h("p", {}, a.models ? t("accounts.models", { models: a.models.map(m => m.id).join(", ") || "—" }) : h("span", { class: "muted" }, t("accounts.models.unknown"))),
+      a.allowed_models.length ? h("p", {}, t("accounts.allowed_models", { models: a.allowed_models.join(", ") })) : null,
       quota(a),
       signinPanel(a),
       importPanel(a),
+      routingPanel(a),
       h("div", { class: "row", style: "margin-top:12px" },
         signins.has(a.name) ? null : h("button", { onclick: e => startSignin(a.name, e.target) }, a.user || a.disabled ? t("accounts.signin_again") : t("accounts.signin")),
         imports.has(a.name) ? null : h("button", { onclick: () => { imports.set(a.name, { token: "" }); guarded(load); } }, t("accounts.import")),
         act(t("accounts.refresh"), () => api("POST", `accounts/${enc}/refresh`)),
+        routings.has(a.name) ? null : h("button", { onclick: () => { routings.add(a.name); guarded(load); } }, t("accounts.routing.edit")),
         h("button", { onclick: e => editProxy(a, e.target) }, t("accounts.proxy.edit")),
         a.paused ? act(t("accounts.resume"), () => api("POST", `accounts/${enc}/resume`)) : act(t("accounts.pause"), () => api("POST", `accounts/${enc}/pause`)),
         h("span", { class: "grow" }),
@@ -825,8 +857,11 @@ views.accounts = container => {
   }
 
   let accounts = [];
+  let catalog = [];
   async function load() {
-    accounts = await api("GET", "accounts");
+    const [list, offered] = await Promise.all([api("GET", "accounts"), api("GET", "models")]);
+    accounts = list;
+    catalog = offered.map(m => m.id);
     for (const a of accounts) if (a.login_pending === false) signins.delete(a.name);
     renderModels(accounts);
     cards.replaceChildren(...(accounts.length ? accounts.map(card) : [h("p", { class: "muted" }, t("accounts.empty"))]));
@@ -847,8 +882,8 @@ views.accounts = container => {
     h("div", { class: "row" }, h("h1", { class: "grow" }, t("accounts.title")),
       h("button", { onclick: e => refreshAll(e.target) }, t("accounts.refresh_all"))),
     h("div", { class: "card" }, form), modelsFold, cards);
-  // Re-render on a timer unless a sign-in or an import is being typed.
-  return polling(container, 10000, async () => { if (signins.size === 0 && imports.size === 0) await load(); });
+  // Re-render on a timer unless a sign-in, import, or routing edit is open.
+  return polling(container, 10000, async () => { if (signins.size === 0 && imports.size === 0 && routings.size === 0) await load(); });
 };
 
 // ---- workers ---------------------------------------------------------

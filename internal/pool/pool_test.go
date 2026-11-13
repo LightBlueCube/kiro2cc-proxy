@@ -43,4 +43,51 @@ func TestProxyEnvAndBlocking(t *testing.T) {
 	if got, err := p.Pick("u", "gemini", nil); err != nil || got != a {
 		t.Fatalf("verified pick = %v, %v", got, err)
 	}
+	a.Release()
+}
+
+func TestPriorityAndAllowedModels(t *testing.T) {
+	p, err := New(Config{TurnsPerAccount: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	low, err := p.Add(AccountConfig{Name: "low", Home: filepath.Join(dir, "low")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := p.Add(AccountConfig{Name: "high", Home: filepath.Join(dir, "high")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	high.SetRouting(10, []string{"gemini-3.8-flash"})
+	low.SetRouting(-1, nil)
+
+	if !high.AllowsModel("gemini-3.8-flash") || high.AllowsModel("claude-opus-5-5") {
+		t.Fatalf("high allowed = %v", high.AllowedModels())
+	}
+	if !low.AllowsModel("claude-opus-5-5") {
+		t.Fatalf("low allowed = %v", low.AllowedModels())
+	}
+
+	// Higher priority wins for every user while a turn slot is free.
+	for _, user := range []string{"u1", "u2", "u3", "u4"} {
+		got, err := p.Pick(user, "gemini", nil)
+		if err != nil || got != high {
+			t.Fatalf("pick(%s) = %v, %v; want high", user, got, err)
+		}
+		got.Release()
+	}
+
+	// With high's slot full, Pick moves to low.
+	first, err := p.Pick("u1", "gemini", nil)
+	if err != nil || first != high {
+		t.Fatalf("first pick = %v, %v", first, err)
+	}
+	second, err := p.Pick("u1", "gemini", nil)
+	if err != nil || second != low {
+		t.Fatalf("second pick with high busy = %v, %v; want low", second, err)
+	}
+	second.Release()
+	first.Release()
 }

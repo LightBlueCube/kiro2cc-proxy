@@ -86,6 +86,12 @@ type Account struct {
 	// models is the ACP model catalog agy last reported for the account,
 	// nil until it opens a session.
 	models []agy.ModelInfo
+	// priority orders accounts in rotation; higher values take requests
+	// first.
+	priority int
+	// allowedModels limits the account to these public model ids; empty
+	// allows all models the account offers.
+	allowedModels []string
 }
 
 // Status is a point-in-time view of an account.
@@ -218,13 +224,20 @@ func (p *Pool) accountLocked(name string) *Account {
 }
 
 // Pick reserves a turn slot on the best account for user and the model's
-// quota group, skipping excluded accounts. Accounts are ranked by
-// rendezvous hash of (user, account), so a user stays on one account while
-// it is healthy and moves to the same fallback when it is not. The caller
-// must Release the slot.
+// quota group, skipping excluded accounts. Accounts are ranked by priority
+// (higher first) and then by rendezvous hash of (user, account), so a user
+// stays on one account among equals while it is healthy and moves to the
+// same fallback when it is not. The caller must Release the slot.
 func (p *Pool) Pick(user, group string, exclude map[string]bool) (*Account, error) {
 	ranked := p.Accounts()
 	slices.SortFunc(ranked, func(a, b *Account) int {
+		pa, pb := a.Priority(), b.Priority()
+		switch {
+		case pa > pb:
+			return -1
+		case pa < pb:
+			return 1
+		}
 		ra, rb := rendezvous(user, a.name), rendezvous(user, b.name)
 		switch {
 		case ra > rb:
@@ -437,6 +450,36 @@ func (a *Account) Models() []agy.ModelInfo {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return slices.Clone(a.models)
+}
+
+// SetRouting sets the account's routing priority and the public model ids
+// it may serve (empty allows all models it offers).
+func (a *Account) SetRouting(priority int, models []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.priority = priority
+	a.allowedModels = slices.Clone(models)
+}
+
+func (a *Account) Priority() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.priority
+}
+
+// AllowedModels returns the public model ids the account is limited to;
+// empty allows all models it offers.
+func (a *Account) AllowedModels() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.allowedModels)
+}
+
+// AllowsModel reports whether the account may serve the public model id.
+func (a *Account) AllowsModel(modelID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.allowedModels) == 0 || slices.Contains(a.allowedModels, modelID)
 }
 
 // Restart kills the account's agy processes; turns running there fail

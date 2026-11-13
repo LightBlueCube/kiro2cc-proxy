@@ -20,12 +20,18 @@ type Account struct {
 	// Proxy is the HTTP proxy URL agy's traffic goes through ("" = none).
 	Proxy string
 	// Paused takes the account out of rotation.
-	Paused    bool
+	Paused bool
+	// Priority orders accounts in rotation; higher values take requests
+	// first.
+	Priority int
+	// Models limits the account to these client model names; empty allows
+	// all models the account offers.
+	Models    []string
 	CreatedAt time.Time
 }
 
 func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, env, proxy, paused, created_at FROM accounts ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT name, env, proxy, paused, priority, models, created_at FROM accounts ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -33,12 +39,15 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 	var out []Account
 	for rows.Next() {
 		var a Account
-		var env string
+		var env, models string
 		var created int64
-		if err := rows.Scan(&a.Name, &env, &a.Proxy, &a.Paused, &created); err != nil {
+		if err := rows.Scan(&a.Name, &env, &a.Proxy, &a.Paused, &a.Priority, &models, &created); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(env), &a.Env); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(models), &a.Models); err != nil {
 			return nil, err
 		}
 		a.CreatedAt = time.Unix(created, 0)
@@ -52,13 +61,25 @@ func (s *Store) AddAccount(ctx context.Context, a Account) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts (name, env, proxy, paused, created_at) VALUES (?, ?, ?, ?, ?)`,
-		a.Name, string(env), a.Proxy, a.Paused, a.CreatedAt.Unix())
+	models, err := json.Marshal(nonNil(a.Models))
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts (name, env, proxy, paused, priority, models, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, string(env), a.Proxy, a.Paused, a.Priority, string(models), a.CreatedAt.Unix())
 	return uniqueErr(err)
 }
 
 func (s *Store) SetAccountProxy(ctx context.Context, name, proxy string) error {
 	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET proxy = ? WHERE name = ?`, proxy, name))
+}
+
+func (s *Store) SetAccountRouting(ctx context.Context, name string, priority int, models []string) error {
+	encoded, err := json.Marshal(nonNil(models))
+	if err != nil {
+		return err
+	}
+	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET priority = ?, models = ? WHERE name = ?`, priority, string(encoded), name))
 }
 
 func (s *Store) SetAccountPaused(ctx context.Context, name string, paused bool) error {

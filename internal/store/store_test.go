@@ -93,3 +93,30 @@ func TestDeleteKey(t *testing.T) {
 		t.Fatalf("reuse the name: %v", err)
 	}
 }
+
+func TestAccountRouting(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	if err := st.AddAccount(ctx, Account{Name: "main", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := st.Accounts(ctx)
+	if err != nil || len(accounts) != 1 || accounts[0].Priority != 0 || len(accounts[0].Models) != 0 {
+		t.Fatalf("initial account = %+v, %v", accounts, err)
+	}
+	if err := st.SetAccountRouting(ctx, "main", 3, []string{"gemini-3.8-flash"}); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err = st.Accounts(ctx)
+	if err != nil || accounts[0].Priority != 3 || !reflect.DeepEqual(accounts[0].Models, []string{"gemini-3.8-flash"}) {
+		t.Fatalf("updated account = %+v, %v", accounts, err)
+	}
+	if err := st.SetAccountRouting(ctx, "nobody", 1, nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown account = %v", err)
+	}
+}

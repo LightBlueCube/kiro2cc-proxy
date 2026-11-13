@@ -30,6 +30,8 @@ var migrations = []string{
 		env        TEXT NOT NULL,
 		proxy      TEXT NOT NULL,
 		paused     INTEGER NOT NULL,
+		priority   INTEGER NOT NULL DEFAULT 0,
+		models     TEXT NOT NULL DEFAULT '[]',
 		created_at INTEGER NOT NULL
 	);
 	CREATE TABLE api_keys (

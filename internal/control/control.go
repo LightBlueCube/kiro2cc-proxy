@@ -214,6 +214,7 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 			return nil, err
 		}
 		account.SetPaused(a.Paused)
+		account.SetRouting(a.Priority, a.Models)
 	}
 	if err := c.reloadKeys(ctx); err != nil {
 		return nil, err
@@ -405,6 +406,21 @@ func (c *Control) SetAccountPaused(ctx context.Context, name string, paused bool
 		return err
 	}
 	account.SetPaused(paused)
+	return nil
+}
+
+// SetAccountRouting changes the account's routing priority and the
+// models it may serve (empty allows all models it offers).
+func (c *Control) SetAccountRouting(ctx context.Context, name string, priority int, models []string) error {
+	account := c.cfg.Pool.Account(name)
+	if account == nil {
+		return store.ErrNotFound
+	}
+	models = cleanModels(models)
+	if err := c.cfg.Store.SetAccountRouting(ctx, name, priority, models); err != nil {
+		return err
+	}
+	account.SetRouting(priority, models)
 	return nil
 }
 

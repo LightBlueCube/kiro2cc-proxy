@@ -1246,3 +1246,80 @@ func TestPositionsKeepOnlyRewindableHistory(t *testing.T) {
 		t.Fatalf("reloaded = %+v", reloaded.bySession)
 	}
 }
+
+func TestAccountPriorityAndAllowedModels(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	h.p.SetTurnsPerAccount(1)
+	ctx := context.Background()
+	acct0, acct1 := h.p.Account("acct0"), h.p.Account("acct1")
+
+	// alice prefers acct0 by hash, but acct1 has higher priority.
+	alice := userPreferring(t, h.p, "acct0")
+	acct1.SetRouting(5, nil)
+	first := h.complete(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello")}})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first.err)
+	}
+	if got := h.records.all(t, 1)[0]; got.Account != "acct1" {
+		t.Fatalf("first account = %s, want acct1 (higher priority)", got.Account)
+	}
+
+	// Park a tool call on acct1 so its 1 turn slot is full; the next
+	// new conversation goes to acct0.
+	tools := []conv.ToolSpec{readTool}
+	parked := h.complete(ctx, "bob", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(`@tool read {}`)}, Tools: tools})
+	if parked.err != nil || parked.finish != conv.FinishToolCalls {
+		t.Fatalf("parked = %+v", parked)
+	}
+	overflow := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("while busy")}})
+	if overflow.err != nil {
+		t.Fatalf("overflow = %+v", overflow.err)
+	}
+	// Finish bob's parked turn to free acct1's slot.
+	unparked := h.complete(ctx, "bob", conv.Request{
+		Model: "gemini-3.8-flash", Tools: tools,
+		Messages: []conv.Message{user(`@tool read {}`), {Role: conv.RoleAssistant, ToolCalls: parked.calls}, {Role: conv.RoleTool, ToolCallID: parked.calls[0].ID, Text: "ok"}},
+	})
+	if unparked.err != nil {
+		t.Fatalf("unparked = %+v", unparked.err)
+	}
+	recs := h.records.all(t, 4)
+	if recs[1].Account != "acct1" || recs[2].Account != "acct0" || recs[3].Account != "acct1" {
+		t.Fatalf("accounts = %s, %s, %s; want acct1, acct0, acct1", recs[1].Account, recs[2].Account, recs[3].Account)
+	}
+
+	// Limit acct1 to gemini-3.8-flash: claude skips acct1 and runs on acct0.
+	acct1.SetRouting(5, []string{"gemini-3.8-flash"})
+	if r := h.complete(ctx, alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("claude")}}); r.err != nil {
+		t.Fatalf("claude = %+v", r.err)
+	}
+	if got := h.records.all(t, 5)[4]; got.Account != "acct0" {
+		t.Fatalf("claude account = %s, want acct0", got.Account)
+	}
+
+	// Disallow gemini-3.8-flash on acct1: alice's warm session on acct1
+	// replays on acct0 instead.
+	acct1.SetRouting(5, []string{"claude-opus-5-5"})
+	cont := h.complete(ctx, alice, conv.Request{
+		Model:    "gemini-3.8-flash",
+		Messages: []conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: first.text}, user("again")},
+	})
+	if cont.err != nil {
+		t.Fatalf("continue = %+v", cont.err)
+	}
+	if got := h.records.all(t, 6)[5]; got.Account != "acct0" || got.Mode != ModeReplay {
+		t.Fatalf("disallowed warm = %s %s, want acct0 replay", got.Account, got.Mode)
+	}
+
+	// A model disallowed on every account is not offered.
+	acct0.SetRouting(0, []string{"gemini-3.8-flash"})
+	acct1.SetRouting(5, []string{"gemini-3.8-flash"})
+	for _, m := range h.gw.Models() {
+		if m.ID == "claude-opus-5-5" {
+			t.Fatalf("disallowed model still in Models(): %+v", h.gw.Models())
+		}
+	}
+	if r := h.complete(ctx, alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("no")}}); r.err == nil || r.err.Kind != conv.ErrUnknownModel {
+		t.Fatalf("disallowed on all accounts = %+v, want ErrUnknownModel", r)
+	}
+}

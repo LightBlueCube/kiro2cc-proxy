@@ -46,30 +46,53 @@ var fallbackModels = []modelEntry{
 func (g *Gateway) Models() []conv.ModelInfo { return modelInfos(g.offered()) }
 
 // offered merges the catalogs agy reported for the accounts, a model's
-// tiers being those of any account; before any report it is the fallback
-// list.
+// tiers being those of any account that allows the model; before any
+// report it is the fallback list filtered by what the accounts allow.
 func (g *Gateway) offered() []modelEntry {
-	var merged []modelEntry
+	accounts := g.pool.Accounts()
+	var catalog, allowed []modelEntry
 	reported := false
-	for _, account := range g.pool.Accounts() {
+	unreported := false
+	for _, account := range accounts {
 		models := account.Models()
 		if models == nil {
+			unreported = true
 			continue
 		}
 		reported = true
 		for _, e := range entriesFromACP(models) {
-			i := slices.IndexFunc(merged, func(m modelEntry) bool { return m.id == e.id })
-			if i < 0 {
-				merged = append(merged, e)
-				continue
+			mergeEntry(&catalog, e)
+			if account.AllowsModel(e.id) {
+				mergeEntry(&allowed, e)
 			}
-			merged[i].efforts = mergeEfforts(merged[i].efforts, e.efforts)
 		}
 	}
 	if !reported {
-		return fallbackModels
+		catalog = fallbackModels
+		if len(accounts) == 0 {
+			return catalog
+		}
 	}
-	return merged
+	if unreported {
+		for _, e := range catalog {
+			for _, account := range accounts {
+				if account.Models() == nil && account.AllowsModel(e.id) {
+					mergeEntry(&allowed, e)
+					break
+				}
+			}
+		}
+	}
+	return allowed
+}
+
+func mergeEntry(list *[]modelEntry, e modelEntry) {
+	i := slices.IndexFunc(*list, func(m modelEntry) bool { return m.id == e.id })
+	if i < 0 {
+		*list = append(*list, e)
+		return
+	}
+	(*list)[i].efforts = mergeEfforts((*list)[i].efforts, e.efforts)
 }
 
 const (
@@ -241,6 +264,9 @@ func (c modelChoice) slugIn(entries []modelEntry) (slug, tier string, ok bool) {
 // accounts offer, and agy refuses a slug it lacks before any model call
 // (verified on 1.5.3). ok is false when the account does not offer it.
 func slugOn(account *pool.Account, r *run) (slug, tier string, ok bool) {
+	if !account.AllowsModel(r.model.id) {
+		return "", "", false
+	}
 	models := account.Models()
 	if models == nil {
 		return r.model.slugIn(r.offered)

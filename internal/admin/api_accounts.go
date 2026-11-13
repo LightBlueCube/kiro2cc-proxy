@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
@@ -23,10 +24,12 @@ type accountView struct {
 	EnvNames  []string  `json:"env_names"`
 	// Proxy is the account's own proxy; Route is where its traffic goes
 	// now ("proxy http://…", "direct", "refused").
-	Proxy     string               `json:"proxy"`
-	Route     string               `json:"route"`
-	Paused    bool                 `json:"paused"`
-	Disabled  string               `json:"disabled"`
+	Proxy         string               `json:"proxy"`
+	Route         string               `json:"route"`
+	Paused        bool                 `json:"paused"`
+	Priority      int                  `json:"priority"`
+	AllowedModels []string             `json:"allowed_models"`
+	Disabled      string               `json:"disabled"`
 	Blocked   string               `json:"blocked"`
 	Verify    bool                 `json:"verify"`
 	VerifyURL string               `json:"verify_url"`
@@ -85,8 +88,13 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	out := []accountView{}
 	for _, account := range h.pool.Accounts() {
 		st := account.Status()
+		allowed := account.AllowedModels()
+		if allowed == nil {
+			allowed = []string{}
+		}
 		v := accountView{
-			Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, VerifyURL: st.VerifyURL, Cooldowns: st.Cooldowns,
+			Name: st.Name, Paused: st.Paused, Priority: account.Priority(), AllowedModels: allowed,
+			Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, VerifyURL: st.VerifyURL, Cooldowns: st.Cooldowns,
 			Turns: st.Turns, Procs: st.Procs, Login: h.control.LoginPending(st.Name), EnvNames: []string{},
 		}
 		if rec, ok := records[st.Name]; ok {
@@ -168,6 +176,27 @@ func (h *Handler) setAccountProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "account_proxy_set", name+" → "+cmp.Or(redactProxy(strings.TrimSpace(req.Proxy)), "none (fallback route)"))
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) setAccountRouting(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req struct {
+		Priority      int      `json:"priority"`
+		AllowedModels []string `json:"allowed_models"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := h.control.SetAccountRouting(r.Context(), name, req.Priority, req.AllowedModels); err != nil {
+		h.fail(w, "set account routing", err)
+		return
+	}
+	models := "all"
+	if account := h.pool.Account(name); account != nil && len(account.AllowedModels()) > 0 {
+		models = strings.Join(account.AllowedModels(), ", ")
+	}
+	h.audit(r, "account_routing_set", fmt.Sprintf("%s → priority %d, models %s", name, req.Priority, models))
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
