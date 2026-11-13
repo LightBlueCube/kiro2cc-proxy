@@ -321,6 +321,7 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, slug, tier string, prompt []agy.ContentBlock, baseSteps int) {
 	g.mu.Lock()
 	at.account, at.choice, at.slug, at.tier, at.consuming, at.baseSteps, at.started = account, r.choice(), slug, tier, true, baseSteps, time.Now()
+	at.usageSteps = baseSteps
 	at.turn = at.sess.proc.RunTurn(agy.TurnSpec{SessionID: at.sess.id, Model: slug, Prompt: prompt})
 	at.sess.lastUsed = time.Now()
 	g.mu.Unlock()

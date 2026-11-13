@@ -129,6 +129,11 @@ type activeTurn struct {
 	finished  bool
 	// baseSteps is a lower bound of the session's native steps at launch.
 	baseSteps int
+	// The turn's earlier responses reported the model calls before step
+	// usageSteps; reported is their sum. Only the consuming response uses
+	// them.
+	usageSteps int
+	reported   conv.Usage
 	// endSteps is the native step count after the turn ended normally, 0
 	// when unknown. It is set before closed is closed.
 	endSteps int
@@ -430,6 +435,11 @@ func (w *response) send(ev conv.Event) bool {
 	return true
 }
 
+// sendUsage sends u unless it is nil.
+func (w *response) sendUsage(u *conv.Usage) bool {
+	return u == nil || w.send(conv.Event{Usage: u})
+}
+
 func (w *response) fail(err *conv.Error) {
 	select {
 	case w.out <- conv.Event{Err: err}:
@@ -502,9 +512,10 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 			}
 			group := ev.Payload.(*callGroup)
 			reply := conv.Message{Role: conv.RoleAssistant, Text: text.String(), ToolCalls: group.toolCalls()}
+			usage := g.partUsage(at)
 			g.park(at, group)
 			mark := g.record(at, r, &reply, 0)
-			if !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.send(conv.Event{Anchor: mark}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
+			if !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.sendUsage(usage) || !w.send(conv.Event{Anchor: mark}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
 				g.log.Info("client left after tool calls; turn stays parked", "session", at.sess.id)
 			}
 			return nil
@@ -565,7 +576,8 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard
 	<-at.closed // endSteps is set
 	mark := g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()}, at.endSteps)
 	if outcome.Usage != nil {
-		if !w.send(conv.Event{Usage: usageFrom(outcome.Usage)}) {
+		rest := minusUsage(usageFrom(outcome.Usage), at.reported)
+		if !w.send(conv.Event{Usage: &rest}) {
 			return nil
 		}
 	}
@@ -609,16 +621,56 @@ func (g *Gateway) park(at *activeTurn, group *callGroup) {
 }
 
 // usageFrom maps agy's usage to OpenAI's, whose prompt tokens include the
-// cached ones. agy's inputTokens excludes cache reads: a repeated 36.6k
-// prompt reported input 28.9k + cachedRead 36.7k. cachedWriteTokens has
-// only been seen as 0, so whether input includes it is unknown.
-func usageFrom(u *agy.Usage) *conv.Usage {
-	return &conv.Usage{
+// cached ones and completion tokens the reasoning ones. agy's inputTokens
+// excludes cache reads: a repeated 36.6k prompt reported input 28.9k +
+// cachedRead 36.7k. cachedWriteTokens has only been seen as 0, so whether
+// input includes it is unknown.
+func usageFrom(u *agy.Usage) conv.Usage {
+	return conv.Usage{
 		PromptTokens:     u.InputTokens + u.CachedReadTokens,
-		CompletionTokens: u.OutputTokens + u.ThoughtTokens,
+		CompletionTokens: u.OutputTokens,
 		ReasoningTokens:  u.ThoughtTokens,
 		CachedTokens:     u.CachedReadTokens,
 	}
+}
+
+func plusUsage(a, b conv.Usage) conv.Usage {
+	return conv.Usage{
+		PromptTokens:     a.PromptTokens + b.PromptTokens,
+		CompletionTokens: a.CompletionTokens + b.CompletionTokens,
+		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
+		CachedTokens:     a.CachedTokens + b.CachedTokens,
+	}
+}
+
+func minusUsage(a, b conv.Usage) conv.Usage {
+	return conv.Usage{
+		PromptTokens:     a.PromptTokens - b.PromptTokens,
+		CompletionTokens: a.CompletionTokens - b.CompletionTokens,
+		ReasoningTokens:  a.ReasoningTokens - b.ReasoningTokens,
+		CachedTokens:     a.CachedTokens - b.CachedTokens,
+	}
+}
+
+// partUsage returns the tokens of the turn's model calls since its last
+// response that reported some, for a response that ends on client tool
+// calls. Each response then counts its own calls, as OpenAI's do, and
+// clients see the context size instead of the whole agent loop's sum. It
+// returns nil when the language server cannot tell; the turn's last
+// response, which reports the turn's total less what was reported, then
+// counts these calls.
+func (g *Gateway) partUsage(at *activeTurn) *conv.Usage {
+	g.mu.Lock()
+	proc := at.sess.proc
+	g.mu.Unlock()
+	sum, steps, err := proc.TurnUsage(context.Background(), at.sess.id, at.usageSteps)
+	if err != nil {
+		g.log.Warn("usage of the turn's model calls unavailable; the turn's last response counts them", "session", at.sess.id, "err", err)
+		return nil
+	}
+	u := usageFrom(&sum)
+	at.usageSteps, at.reported = steps, plusUsage(at.reported, u)
+	return &u
 }
 
 // record stores the session's latest position: the request's transcript

@@ -82,7 +82,8 @@ type ModelInfo struct {
 	Name    string `json:"name,omitempty"`
 }
 
-// Usage is the turn-cumulative PromptResponse.usage.
+// Usage is the turn-cumulative PromptResponse.usage. OutputTokens include
+// ThoughtTokens (see ls.go).
 type Usage struct {
 	InputTokens       int64 `json:"inputTokens"`
 	OutputTokens      int64 `json:"outputTokens"`
