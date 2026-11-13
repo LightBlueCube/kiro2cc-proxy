@@ -425,6 +425,45 @@ func (s *Store) QuotaUses(ctx context.Context, f RequestFilter) ([]QuotaUse, err
 	return out, rows.Err()
 }
 
+// ModelUsage totals requests to one model on an account in one quota group.
+type ModelUsage struct {
+	Model     string  `json:"model"`
+	Requests  int64   `json:"requests"`
+	Input     int64   `json:"input"`
+	Cached    int64   `json:"cached"`
+	Output    int64   `json:"output"`
+	Reasoning int64   `json:"reasoning"`
+	CostUSD   float64 `json:"cost_usd"`
+	Unpriced  int64   `json:"unpriced"`
+}
+
+// AccountGroupUsage totals the account's requests in group whose end
+// time (at + duration_ms) is at or after since, grouped by model and
+// ordered by list-price spend then total tokens descending. Only requests
+// that used tokens count.
+func (s *Store) AccountGroupUsage(ctx context.Context, account, group string, since time.Time) ([]ModelUsage, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT model, COUNT(*), SUM(input), SUM(cached), SUM(output), SUM(reasoning),
+		COALESCE(SUM(cost_usd), 0), SUM(cost_usd IS NULL)
+		FROM requests
+		WHERE account = ? AND quota_group = ? AND at + duration_ms >= ? AND input + output > 0
+		GROUP BY model
+		ORDER BY COALESCE(SUM(cost_usd), 0) DESC, SUM(input + output) DESC, model`,
+		account, group, since.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ModelUsage
+	for rows.Next() {
+		var m ModelUsage
+		if err := rows.Scan(&m.Model, &m.Requests, &m.Input, &m.Cached, &m.Output, &m.Reasoning, &m.CostUSD, &m.Unpriced); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // Prune deletes requests, quota samples, and audit entries older than
 // before.
 func (s *Store) Prune(ctx context.Context, before time.Time) error {
