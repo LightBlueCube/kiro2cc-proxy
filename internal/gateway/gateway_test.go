@@ -966,6 +966,25 @@ func TestModelOverflowIsContextLengthError(t *testing.T) {
 	}
 }
 
+// Thinking can last long before any text; the client sees it as it comes.
+func TestReasoningStreamsBeforeText(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := h.gw.Complete(ctx, testCaller("alice"), conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@think-hang")}})
+	select {
+	case ev := <-events:
+		if ev.Reasoning != "thinking" {
+			t.Fatalf("first event = %+v", ev)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reasoning held back")
+	}
+	cancel()
+	for range events {
+	}
+}
+
 func TestDisconnectCancelsTurn(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx, cancel := context.WithCancel(context.Background())
