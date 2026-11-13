@@ -567,23 +567,28 @@ views.accounts = container => {
   const cards = h("div", { class: "grid" });
   const modelsCard = h("div", { class: "card" });
   const signins = new Map(); // account name → {url, code}
+  const imports = new Map(); // account name → {token}
 
   const name = h("input", { required: true, maxlength: 64, placeholder: t("accounts.name.placeholder"), pattern: "[A-Za-z0-9][A-Za-z0-9_.\\-]*" });
   const proxy = h("input", { placeholder: "http://127.0.0.1:7890" });
   const env = h("textarea", { rows: 1, placeholder: t("accounts.env.placeholder") });
   const form = h("form", { class: "row", onsubmit: event => {
     event.preventDefault();
+    const importing = event.submitter.dataset.then === "import";
     guarded(async () => {
       await api("POST", "accounts", { name: name.value.trim(), proxy: proxy.value, env: env.value.split("\n").map(s => s.trim()).filter(Boolean) });
       const added = name.value.trim();
       name.value = proxy.value = env.value = "";
-      await startSignin(added);
+      if (!importing) return startSignin(added);
+      imports.set(added, { token: "" });
+      await load();
     }, event.submitter);
   } },
     h("label", {}, t("common.name"), name),
     h("label", { title: t("accounts.proxy.hint") }, t("accounts.proxy"), proxy),
     h("label", { class: "grow" }, t("accounts.env"), env),
-    h("button", { type: "submit" }, t("accounts.add")));
+    h("button", { type: "submit" }, t("accounts.add")),
+    h("button", { type: "submit", "data-then": "import" }, t("accounts.add_import")));
 
   function editProxy(a, button) {
     const value = prompt(t("accounts.proxy.prompt", { name: a.name }), a.proxy);
@@ -634,6 +639,30 @@ views.accounts = container => {
         h("button", { onclick: () => cancelSignin(a.name) }, t("common.cancel"))));
   }
 
+  async function submitImport(account, button) {
+    const state = imports.get(account);
+    await guarded(async () => {
+      const data = await api("POST", `accounts/${encodeURIComponent(account)}/signin/import`, { token: state.token });
+      imports.delete(account);
+      toast(t("accounts.imported", { email: data.email }));
+      await load();
+    }, button);
+  }
+
+  function importPanel(a) {
+    const state = imports.get(a.name);
+    if (!state) return null;
+    const token = h("textarea", { class: "grow mono", rows: 3, autocomplete: "off", spellcheck: "false",
+      placeholder: t("accounts.import.placeholder"), oninput: e => { state.token = e.target.value; } });
+    token.value = state.token;
+    return h("div", { class: "card" },
+      h("h3", {}, t("accounts.import.title")),
+      h("p", { class: "muted" }, t("accounts.import.hint")),
+      h("div", { class: "row" }, token,
+        h("button", { class: "primary", onclick: e => submitImport(a.name, e.target) }, t("accounts.import.submit")),
+        h("button", { onclick: () => { imports.delete(a.name); guarded(load); } }, t("common.cancel"))));
+  }
+
   function status(a) {
     if (Object.keys(a.cooldowns).length) return accountBadge(a, h("span", { class: "badge warn" }, t("account.cooling_down")));
     if (!a.user) return accountBadge(a, h("span", { class: "badge muted" }, t("account.not_checked")));
@@ -673,8 +702,10 @@ views.accounts = container => {
       h("p", {}, a.models ? t("accounts.models", { models: a.models.map(m => m.id).join(", ") || "—" }) : h("span", { class: "muted" }, t("accounts.models.unknown"))),
       quota(a),
       signinPanel(a),
+      importPanel(a),
       h("div", { class: "row", style: "margin-top:12px" },
         signins.has(a.name) ? null : h("button", { onclick: e => startSignin(a.name, e.target) }, a.user || a.disabled ? t("accounts.signin_again") : t("accounts.signin")),
+        imports.has(a.name) ? null : h("button", { onclick: () => { imports.set(a.name, { token: "" }); guarded(load); } }, t("accounts.import")),
         act(t("accounts.refresh"), () => api("POST", `accounts/${enc}/refresh`)),
         h("button", { onclick: e => editProxy(a, e.target) }, t("accounts.proxy.edit")),
         a.paused ? act(t("accounts.resume"), () => api("POST", `accounts/${enc}/resume`)) : act(t("accounts.pause"), () => api("POST", `accounts/${enc}/pause`)),
@@ -793,8 +824,8 @@ views.accounts = container => {
     h("div", { class: "row" }, h("h1", { class: "grow" }, t("accounts.title")),
       h("button", { onclick: e => refreshAll(e.target) }, t("accounts.refresh_all"))),
     h("div", { class: "card" }, form), modelsFold, cards);
-  // Re-render on a timer unless a sign-in is being typed.
-  return polling(container, 10000, async () => { if (signins.size === 0) await load(); });
+  // Re-render on a timer unless a sign-in or an import is being typed.
+  return polling(container, 10000, async () => { if (signins.size === 0 && imports.size === 0) await load(); });
 };
 
 // ---- workers ---------------------------------------------------------

@@ -90,6 +90,26 @@ func login() {
 	fmt.Printf("Logged in as %s.\n", LoginEmail)
 }
 
+// RefreshToken is the imported refresh token the fake accepts.
+const RefreshToken = "1//fake-refresh-token"
+
+// signedIn mirrors agy's check of an imported sign-in: with a token file,
+// session/new needs its refresh token and auth_method "consumer". Without
+// one the fake counts as signed in, as before imports existed.
+func (f *fake) signedIn() bool {
+	raw, err := os.ReadFile(filepath.Join(f.geminiDir, "antigravity-cli", "antigravity-oauth-token"))
+	if err != nil {
+		return true
+	}
+	var record struct {
+		Token struct {
+			RefreshToken string `json:"refresh_token"`
+		} `json:"token"`
+		AuthMethod string `json:"auth_method"`
+	}
+	return json.Unmarshal(raw, &record) == nil && record.Token.RefreshToken == RefreshToken && record.AuthMethod == "consumer"
+}
+
 // Models is the catalog the fake reports.
 var Models = []map[string]string{
 	{"modelId": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)"},
@@ -226,6 +246,10 @@ func (f *fake) handle(msg rpcMessage) {
 			"agentCapabilities": map[string]any{"sessionCapabilities": map[string]any{"resume": map[string]any{}}},
 		})
 	case "session/new":
+		if !f.signedIn() {
+			f.fail(msg.ID, -32000, "Authentication required")
+			return
+		}
 		var p sessionParams
 		json.Unmarshal(msg.Params, &p)
 		f.mu.Lock()
