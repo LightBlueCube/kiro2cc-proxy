@@ -72,9 +72,6 @@ func (g *noticeGuard) push(delta string) string {
 	return g.flush()
 }
 
-// holding reports whether output is held back.
-func (g *noticeGuard) holding() bool { return g.state != guardText }
-
 // flush ends holding: whatever was held is ordinary text.
 func (g *noticeGuard) flush() string {
 	g.state = guardText

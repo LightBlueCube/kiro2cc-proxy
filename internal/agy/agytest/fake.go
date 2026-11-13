@@ -557,6 +557,10 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 	case "@hang":
 		<-ctx.Done()
 		return "", nil
+	case "@think-hang":
+		f.chunk(sessionID, "agent_thought_chunk", "thinking")
+		<-ctx.Done()
+		return "", nil
 	case "@tool":
 		name, args, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(input, "@tool")), " ")
 		f.addSteps(sessionID, s, stepPlanner)

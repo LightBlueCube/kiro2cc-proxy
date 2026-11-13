@@ -450,36 +450,15 @@ func (w *response) fail(err *conv.Error) {
 // consume streams the turn into one response until the turn ends or calls
 // client tools.
 func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *response) *attemptFailure {
+	// Only text can be a notice; reasoning streams as it comes.
 	var guard noticeGuard
-	var held []conv.Event // reasoning held while the guard holds text
 	var text strings.Builder
-	releaseHeld := func() bool {
-		for _, h := range held {
-			if !w.send(h) {
-				return false
-			}
-		}
-		held = nil
-		return true
-	}
-	emit := func(ev conv.Event) bool {
-		if guard.holding() {
-			held = append(held, ev)
-			return true
-		}
-		if !releaseHeld() {
-			return false
-		}
-		if ev.Text != "" {
-			text.WriteString(ev.Text)
-		}
-		return w.send(ev)
-	}
 	emitText := func(delta string) bool {
 		if delta == "" {
 			return true
 		}
-		return emit(conv.Event{Text: delta})
+		text.WriteString(delta)
+		return w.send(conv.Event{Text: delta})
 	}
 
 	for {
@@ -493,7 +472,7 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 				return g.abandon(at, r)
 			}
 		case agy.EventThought:
-			if !emit(conv.Event{Reasoning: ev.Text}) {
+			if !w.send(conv.Event{Reasoning: ev.Text}) {
 				return g.abandon(at, r)
 			}
 		case agy.EventNativeTool:
@@ -501,13 +480,13 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 			if ev.Failed {
 				line = fmt.Sprintf("\n[agy tool %s failed]\n", ev.Tool)
 			}
-			if !emit(conv.Event{Reasoning: line}) {
+			if !w.send(conv.Event{Reasoning: line}) {
 				return g.abandon(at, r)
 			}
 		case agy.EventExternal:
 			// A notice never precedes a tool call: held text is a reply.
 			rest := guard.flush()
-			if !releaseHeld() || !emitText(rest) {
+			if !emitText(rest) {
 				return g.abandon(at, r)
 			}
 			group := ev.Payload.(*callGroup)
@@ -525,11 +504,11 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 		return g.abandon(at, r)
 	}
 	<-at.turn.Done()
-	return g.finish(at, r, w, &guard, held, &text)
+	return g.finish(at, r, w, &guard, &text)
 }
 
 // finish handles the settled turn: errors, notices, and the final reply.
-func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard, held []conv.Event, text *strings.Builder) *attemptFailure {
+func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard, text *strings.Builder) *attemptFailure {
 	outcome := at.turn.Outcome()
 	account := at.account.Name()
 	if outcome.Err != nil {
@@ -562,11 +541,6 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, guard *noticeGuard
 		return &attemptFailure{err: g.agentError(at), account: account}
 	}
 
-	for _, ev := range held {
-		if !w.send(ev) {
-			return nil
-		}
-	}
 	if reply != "" {
 		text.WriteString(reply)
 		if !w.send(conv.Event{Text: reply}) {
