@@ -369,7 +369,19 @@ func (c *Control) AddAccount(ctx context.Context, name string, env []string, pro
 // accountProxy.
 func (c *Control) addToPool(name string, env []string, accountProxy string) (*pool.Account, error) {
 	egressURL := c.cfg.Egress.Register(name)
-	endpoint, err := c.cfg.CloudCode.Register(name, egressURL)
+	// A report after the account left the pool (a call in flight while it
+	// was removed) has no account to go to.
+	endpoint, err := c.cfg.CloudCode.Register(name, egressURL, func(v *cloudcode.Verification) {
+		account := c.cfg.Pool.Account(name)
+		if account == nil {
+			return
+		}
+		if v == nil {
+			account.SetVerification(false, "")
+			return
+		}
+		account.SetVerification(true, v.URL)
+	})
 	if err != nil {
 		c.cfg.Egress.Forget(name)
 		return nil, err
@@ -496,6 +508,46 @@ func (c *Control) AccountModels(account string) []conv.ModelInfo {
 // last sent its agy; nil before agy fetched one.
 func (c *Control) UpstreamModels(account string) []cloudcode.AgentModel {
 	return c.cfg.CloudCode.AgentModels(account)
+}
+
+// RefreshAccount samples the account's quota, starting its agy when none
+// runs. Google's earlier refusals for a missing verification are
+// forgotten first, so the refresh checks again whether it still wants
+// one.
+func (c *Control) RefreshAccount(ctx context.Context, name string) error {
+	account := c.cfg.Pool.Account(name)
+	if account == nil {
+		return store.ErrNotFound
+	}
+	c.cfg.CloudCode.ClearVerification(name)
+	_, err := c.cfg.Monitor.Refresh(ctx, account)
+	return err
+}
+
+// AgyLogFiles lists the account's agy logs and crash reports, newest
+// first.
+func (c *Control) AgyLogFiles(name string) ([]agy.LogFile, error) {
+	account := c.cfg.Pool.Account(name)
+	if account == nil {
+		return nil, store.ErrNotFound
+	}
+	return agy.LogFiles(account.GeminiDir())
+}
+
+// AgyLogs returns the entries of the account's agy logs that q selects.
+func (c *Control) AgyLogs(name string, q agy.LogQuery) (agy.LogResult, error) {
+	account := c.cfg.Pool.Account(name)
+	if account == nil {
+		return agy.LogResult{}, store.ErrNotFound
+	}
+	result, err := agy.ReadLogs(account.GeminiDir(), q)
+	switch {
+	case errors.Is(err, agy.ErrNoLogFile):
+		return agy.LogResult{}, &InputError{"no such log file: " + q.File}
+	case errors.Is(err, agy.ErrLogLevel):
+		return agy.LogResult{}, &InputError{err.Error()}
+	}
+	return result, err
 }
 
 const keyPrefix = "sk-agyrelay-"

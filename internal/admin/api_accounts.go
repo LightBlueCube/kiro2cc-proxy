@@ -28,6 +28,8 @@ type accountView struct {
 	Paused    bool                 `json:"paused"`
 	Disabled  string               `json:"disabled"`
 	Blocked   string               `json:"blocked"`
+	Verify    bool                 `json:"verify"`
+	VerifyURL string               `json:"verify_url"`
 	Cooldowns map[string]time.Time `json:"cooldowns"`
 	Turns     int                  `json:"turns"`
 	Procs     int                  `json:"procs"`
@@ -84,7 +86,7 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	for _, account := range h.pool.Accounts() {
 		st := account.Status()
 		v := accountView{
-			Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Cooldowns: st.Cooldowns,
+			Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, VerifyURL: st.VerifyURL, Cooldowns: st.Cooldowns,
 			Turns: st.Turns, Procs: st.Procs, Login: h.control.LoginPending(st.Name), EnvNames: []string{},
 		}
 		if rec, ok := records[st.Name]; ok {
@@ -196,18 +198,26 @@ func (h *Handler) pauseAccount(paused bool) http.HandlerFunc {
 }
 
 func (h *Handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
-	account := h.pool.Account(r.PathValue("name"))
-	if account == nil {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
+	name := r.PathValue("name")
 	ctx, cancel := context.WithTimeout(r.Context(), refreshTimeout)
 	defer cancel()
-	if _, err := h.monitor.Refresh(ctx, account); err != nil {
+	err := h.control.RefreshAccount(ctx, name)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+	case err != nil && h.awaitsVerification(name):
+		writeError(w, http.StatusBadGateway, "Google asks for the account to be verified first: open the link on its card, "+
+			"finish the check, then refresh. Quota refresh failed: "+err.Error())
+	case err != nil:
 		writeError(w, http.StatusBadGateway, "quota refresh failed: "+err.Error())
-		return
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) awaitsVerification(name string) bool {
+	account := h.pool.Account(name)
+	return account != nil && account.Status().Verify
 }
 
 func (h *Handler) startLogin(w http.ResponseWriter, r *http.Request) {
@@ -256,14 +266,18 @@ func (h *Handler) importSignIn(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), refreshTimeout)
 	defer cancel()
-	email, err := h.control.ImportSignIn(ctx, name, req.Token)
+	imported, err := h.control.ImportSignIn(ctx, name, req.Token)
 	if err != nil {
 		h.audit(r, "signin_import_failed", name)
 		h.fail(w, "import sign-in", err)
 		return
 	}
-	h.audit(r, "signin_imported", name+" as "+email)
-	writeJSON(w, http.StatusOK, map[string]string{"email": email})
+	if imported.Verify {
+		h.audit(r, "signin_imported", name+", awaiting verification")
+	} else {
+		h.audit(r, "signin_imported", name+" as "+imported.Email)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"email": imported.Email, "verify": imported.Verify})
 }
 
 func (h *Handler) cancelLogin(w http.ResponseWriter, r *http.Request) {

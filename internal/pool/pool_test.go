@@ -29,7 +29,18 @@ func TestProxyEnvAndBlocking(t *testing.T) {
 		t.Fatalf("blocked account picked: %v", err)
 	}
 	a.SetBlocked(nil)
-	if got, err := p.Pick("u", "gemini", nil); err != nil || got != a {
+	got, err := p.Pick("u", "gemini", nil)
+	if err != nil || got != a {
 		t.Fatalf("unblocked pick = %v, %v", got, err)
+	}
+	a.Release()
+
+	a.SetVerification(true, "https://accounts.google.com/x")
+	if _, err := p.Pick("u", "gemini", nil); !errors.Is(err, ErrNoAccount) || !a.Status().Verify || a.Status().VerifyURL != "https://accounts.google.com/x" {
+		t.Fatalf("account awaiting verification picked: %v, %+v", err, a.Status())
+	}
+	a.SetVerification(false, "")
+	if got, err := p.Pick("u", "gemini", nil); err != nil || got != a {
+		t.Fatalf("verified pick = %v, %v", got, err)
 	}
 }

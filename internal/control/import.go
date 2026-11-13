@@ -18,40 +18,55 @@ const (
 	accessTokenPrefix   = "ya29."
 )
 
+// Imported is the outcome of a token import.
+type Imported struct {
+	// Email is the signed-in account's, "" while Verify is set.
+	Email string
+	// Verify reports that the token signs in but Google wants the
+	// account's owner to verify the account first; the sign-in stays.
+	Verify bool
+}
+
 // ImportSignIn signs the account in with a pasted refresh token, or a
-// token JSON holding one, instead of the Google sign-in, and returns the
-// signed-in email. A quota refresh checks the token; when it fails, the
-// previous sign-in is put back.
-func (c *Control) ImportSignIn(ctx context.Context, name, pasted string) (string, error) {
+// token JSON holding one, instead of the Google sign-in. A quota refresh
+// checks the token; when it fails for another reason than a missing
+// verification, the previous sign-in is put back.
+func (c *Control) ImportSignIn(ctx context.Context, name, pasted string) (Imported, error) {
 	account := c.cfg.Pool.Account(name)
 	if account == nil {
-		return "", store.ErrNotFound
+		return Imported{}, store.ErrNotFound
 	}
 	if err := account.Blocked(); err != nil {
-		return "", &InputError{"cannot import: " + err.Error()}
+		return Imported{}, &InputError{"cannot import: " + err.Error()}
 	}
 	refreshToken, err := refreshTokenFrom(pasted)
 	if err != nil {
-		return "", &InputError{err.Error()}
+		return Imported{}, &InputError{err.Error()}
 	}
 
 	c.CancelLogin(name)
 	undo, err := agy.ImportSignIn(account.GeminiDir(), refreshToken)
 	if err != nil {
-		return "", err
+		return Imported{}, err
 	}
-	// agy reads the sign-in when it starts.
+	// agy reads the sign-in when it starts; what Google said about the
+	// old one no longer holds.
 	account.Restart()
+	c.cfg.CloudCode.ClearVerification(name)
 	q, err := c.cfg.Monitor.Refresh(ctx, account)
-	if err != nil {
+	switch {
+	case err != nil && account.Status().Verify:
+		account.SignedIn()
+		return Imported{Verify: true}, nil
+	case err != nil:
 		account.Restart() // its agy holds the rejected token
 		if undoErr := undo(); undoErr != nil {
-			return "", fmt.Errorf("the token did not sign in (%v), and restoring the previous sign-in failed: %w", err, undoErr)
+			return Imported{}, fmt.Errorf("the token did not sign in (%v), and restoring the previous sign-in failed: %w", err, undoErr)
 		}
-		return "", &InputError{"the token did not sign in: " + err.Error()}
+		return Imported{}, &InputError{"the token did not sign in: " + err.Error()}
 	}
 	account.SignedIn()
-	return q.User.Email, nil
+	return Imported{Email: q.User.Email}, nil
 }
 
 // refreshTokenFrom finds the refresh token in what the admin pasted: the

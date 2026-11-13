@@ -9,7 +9,8 @@
 // checkpointer experiments are disabled and the window of models that have
 // them raised, so agy neither summarizes ("auto-compacts") a long
 // conversation nor drops its oldest history. Everything else, generation
-// streams included, passes through unchanged.
+// streams included, passes through unchanged; refusals of accounts that
+// need verifying are read on the way for Google's link (verify.go).
 package cloudcode
 
 import (
@@ -60,6 +61,9 @@ type Server struct {
 	accounts map[string]*accountProxy
 	// agentModels is each account's last upstream catalog, by account.
 	agentModels map[string][]AgentModel
+	// refused maps an account's paths Google refused for a missing
+	// verification to the link it gave.
+	refused map[string]map[string]string
 }
 
 // AgentModel is one agent model of an account's upstream catalog, as
@@ -81,8 +85,9 @@ var omittedFields = []string{"modelExperiments", "modelExperimentIds", "supporte
 const disabledSuffix = "-disabled"
 
 type accountProxy struct {
-	proxy     *httputil.ReverseProxy
-	transport *http.Transport
+	proxy          *httputil.ReverseProxy
+	transport      *http.Transport
+	onVerification VerificationFunc
 }
 
 // Start listens on a loopback port and forwards to upstream.
@@ -95,7 +100,8 @@ func Start(upstream string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud code proxy: %w", err)
 	}
-	s := &Server{log: log, upstream: target, listener: listener, accounts: map[string]*accountProxy{}, agentModels: map[string][]AgentModel{}}
+	s := &Server{log: log, upstream: target, listener: listener, accounts: map[string]*accountProxy{}, agentModels: map[string][]AgentModel{},
+		refused: map[string]map[string]string{}}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: readHeaderTimeout}
 	go func() {
 		if err := s.http.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
@@ -110,8 +116,9 @@ func (s *Server) Close() error { return s.http.Close() }
 
 // Register routes the account's Cloud Code traffic through egressURL (its
 // egress proxy URL with credentials) and returns the endpoint its agy
-// must use.
-func (s *Server) Register(name, egressURL string) (string, error) {
+// must use. onVerification learns whether Google wants the account
+// verified.
+func (s *Server) Register(name, egressURL string, onVerification VerificationFunc) (string, error) {
 	egress, err := url.Parse(egressURL)
 	if err != nil {
 		return "", fmt.Errorf("egress URL for %s: %w", name, err)
@@ -123,7 +130,7 @@ func (s *Server) Register(name, egressURL string) (string, error) {
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 	prefix := "/" + name
-	ap := &accountProxy{transport: transport}
+	ap := &accountProxy{transport: transport, onVerification: onVerification}
 	ap.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Path = strings.TrimPrefix(r.In.URL.Path, prefix)
@@ -138,6 +145,7 @@ func (s *Server) Register(name, egressURL string) (string, error) {
 		// Generation responses are server-sent events.
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
+			s.watchVerification(name, resp)
 			if !isCatalog(resp.Request) || resp.StatusCode != http.StatusOK {
 				return nil
 			}
@@ -164,6 +172,7 @@ func (s *Server) Forget(name string) {
 	ap := s.accounts[name]
 	delete(s.accounts, name)
 	delete(s.agentModels, name)
+	delete(s.refused, name)
 	s.mu.Unlock()
 	if ap != nil {
 		ap.transport.CloseIdleConnections()
