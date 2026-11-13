@@ -319,6 +319,47 @@ func TestInspectAndCloseSession(t *testing.T) {
 	}
 }
 
+// The janitor asks KeepForQuota before it closes an account's last open
+// session, and keeps the session while the answer is yes.
+func TestLastSessionWaitsForQuota(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	keep := true
+	type ask struct {
+		closes   int
+		lastUsed time.Time
+	}
+	var asks []ask
+	h.gw.keepForQuota = func(ctx context.Context, account *pool.Account, lastUsed time.Time) bool {
+		h.gw.Sessions() // asked without g.mu: this would deadlock
+		asks = append(asks, ask{len(h.requests("session/close")), lastUsed})
+		return keep
+	}
+	for _, text := range []string{"first", "second"} {
+		if r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(text)}}); r.err != nil {
+			t.Fatal(r.err)
+		}
+	}
+	newest := slices.MaxFunc(h.gw.Sessions(), func(a, b SessionInfo) int { return a.LastUsed.Compare(b.LastUsed) })
+	h.gw.SetIdleClose(time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+
+	h.gw.sweep()
+	h.gw.sweep()
+	sessions := h.gw.Sessions()
+	if n := len(h.requests("session/close")); n != 1 || len(sessions) != 1 || sessions[0].ID != newest.ID || len(asks) != 2 {
+		t.Fatalf("kept: %d closes, sessions %+v, asks %+v", n, sessions, asks)
+	}
+	if asks[0].closes != 0 || !asks[0].lastUsed.Equal(newest.LastUsed) {
+		t.Fatalf("first ask = %+v, want before any close, last used %v", asks[0], newest.LastUsed)
+	}
+	keep = false
+	h.gw.sweep()
+	if n := len(h.requests("session/close")); n != 2 || len(h.gw.Sessions()) != 0 || len(asks) != 3 {
+		t.Fatalf("released: %d closes, %d sessions, %d asks", n, len(h.gw.Sessions()), len(asks))
+	}
+}
+
 func TestKeyLimits(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()

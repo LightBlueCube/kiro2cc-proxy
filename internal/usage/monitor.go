@@ -45,13 +45,18 @@ type Monitor struct {
 	cfg MonitorConfig
 
 	refreshMu sync.Mutex // one Refresh at a time
+	// sampleMu orders samples and their attribution: concurrent ones
+	// would settle the same drop twice.
+	sampleMu sync.Mutex
 
 	mu     sync.Mutex
 	latest map[string]AccountQuota
+	// settles holds by account the timer of SettleSoon.
+	settles map[string]*time.Timer
 }
 
 func NewMonitor(cfg MonitorConfig) *Monitor {
-	return &Monitor{cfg: cfg, latest: map[string]AccountQuota{}}
+	return &Monitor{cfg: cfg, latest: map[string]AccountQuota{}, settles: map[string]*time.Timer{}}
 }
 
 // Run samples every account with a running agy until ctx ends.
@@ -65,17 +70,69 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 		for _, account := range m.cfg.Pool.Accounts() {
-			proc, err := withLanguageServer(account.LiveProcs())
-			if err != nil {
-				m.fail(account.Name(), err)
-				continue
-			}
-			if proc == nil {
-				continue // no agy, or its idle sessions were all closed
-			}
-			m.sample(ctx, account, proc)
+			m.SampleRunning(ctx, account)
 		}
 	}
+}
+
+// SampleRunning samples the account if its agy runs a language server;
+// it never starts agy.
+func (m *Monitor) SampleRunning(ctx context.Context, account *pool.Account) {
+	proc, err := withLanguageServer(account.LiveProcs())
+	if err != nil {
+		m.fail(account.Name(), err)
+		return
+	}
+	if proc == nil {
+		return // no agy, or its idle sessions were all closed
+	}
+	m.sample(ctx, account, proc)
+}
+
+// maxQuotaHold bounds how long KeepForQuota keeps an idle account's agy
+// running: a drop may never show (a bucket at 0, a use too small to move
+// the fraction).
+const maxQuotaHold = 15 * time.Minute
+
+// KeepForQuota reports whether the account's last open session, idle
+// since lastUsed, should stay open so a running agy can sample the quota:
+// until SettleTime passed, and then while the account has unsettled
+// requests, up to maxQuotaHold. Past SettleTime it samples the account.
+func (m *Monitor) KeepForQuota(ctx context.Context, account *pool.Account, lastUsed time.Time) bool {
+	idle := time.Since(lastUsed)
+	if idle < SettleTime {
+		return true
+	}
+	m.SampleRunning(ctx, account)
+	if idle > maxQuotaHold {
+		return false
+	}
+	unsettled, err := m.cfg.Store.HasUnsettledQuota(ctx, account.Name())
+	if err != nil {
+		m.cfg.Log.Error("checking for unsettled quota failed", "account", account.Name(), "err", err)
+		return false
+	}
+	return unsettled
+}
+
+// settleDelay leaves the attributor's SettleTime after a request plus a
+// margin for the record to be stored. A variable for tests.
+var settleDelay = SettleTime + 10*time.Second
+
+// SettleSoon samples the account settleDelay after its latest call, so
+// the quota use of a burst of requests is settled once it shows.
+func (m *Monitor) SettleSoon(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if timer := m.settles[name]; timer != nil {
+		timer.Reset(settleDelay)
+		return
+	}
+	m.settles[name] = time.AfterFunc(settleDelay, func() {
+		if account := m.cfg.Pool.Account(name); account != nil {
+			m.SampleRunning(context.Background(), account)
+		}
+	})
 }
 
 // withLanguageServer is the first process whose language server runs, or
@@ -127,6 +184,8 @@ func (m *Monitor) closeProbe(account string, proc *agy.Proc, sessionID string) {
 }
 
 func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.Proc) (AccountQuota, error) {
+	m.sampleMu.Lock()
+	defer m.sampleMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
 	name := account.Name()
@@ -179,9 +238,13 @@ func (m *Monitor) Latest(name string) (AccountQuota, bool) {
 	return q, ok
 }
 
-// Forget drops a removed account's sample.
+// Forget drops a removed account's sample and pending settle.
 func (m *Monitor) Forget(name string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.latest, name)
-	m.mu.Unlock()
+	if timer := m.settles[name]; timer != nil {
+		timer.Stop()
+		delete(m.settles, name)
+	}
 }

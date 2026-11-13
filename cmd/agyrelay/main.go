@@ -131,7 +131,12 @@ func runServe(args []string) error {
 	defer accountPool.Close()
 
 	usageLog := log.With("component", "usage")
-	recorder := usage.NewRecorder(st, settings.Prices, usageLog)
+	monitor := usage.NewMonitor(usage.MonitorConfig{
+		Store: st, Pool: accountPool, Profile: gateway.IdleProfile(),
+		OnSample: usage.NewAttributor(st, usageLog).Attribute, Log: usageLog,
+	})
+	go monitor.Run(ctx)
+	recorder := usage.NewRecorder(st, settings.Prices, monitor.SettleSoon, usageLog)
 	budget := usage.NewBudget(st, recorder)
 	outbound, err := egress.Start(log.With("component", "egress"))
 	if err != nil {
@@ -143,11 +148,6 @@ func runServe(args []string) error {
 		return err
 	}
 	defer cloudCode.Close()
-	monitor := usage.NewMonitor(usage.MonitorConfig{
-		Store: st, Pool: accountPool, Profile: gateway.IdleProfile(),
-		OnSample: usage.NewAttributor(st, usageLog).Attribute, Log: usageLog,
-	})
-	go monitor.Run(ctx)
 
 	gw, err := gateway.New(gateway.Config{
 		Pool:        accountPool,
@@ -161,6 +161,7 @@ func runServe(args []string) error {
 			_, err := monitor.Refresh(ctx, account)
 			return err
 		},
+		KeepForQuota:   monitor.KeepForQuota,
 		ContextCheck:   settings.ContextCheck,
 		ContextWindows: settings.ContextWindows,
 		Log:            log.With("component", "gateway"),

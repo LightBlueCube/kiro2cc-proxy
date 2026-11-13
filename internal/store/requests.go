@@ -37,13 +37,28 @@ type Request struct {
 	QuotaGroup   string
 	// QuotaUsed is the attributed share of the weekly quota, 0 to 1.
 	QuotaUsed *float64
+	// QuotaSkip, when set, is why the request gets no QuotaUsed.
+	QuotaSkip QuotaSkip
 }
+
+// QuotaSkip is why a request's quota use cannot be attributed.
+type QuotaSkip string
+
+const (
+	// SkipBeforeSampling: the bucket was first sampled after the request.
+	SkipBeforeSampling QuotaSkip = "before_sampling"
+	// SkipReset: the bucket reset before the request's use was settled.
+	SkipReset QuotaSkip = "reset"
+	// SkipNoBucket: the account's plan has no weekly bucket for the
+	// request's quota group.
+	SkipNoBucket QuotaSkip = "no_bucket"
+)
 
 // StatusOK is the Status of a request that succeeded.
 const StatusOK = "ok"
 
 const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
-	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used`
+	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip`
 
 // AddRequest stores the request, adds its cost to the key's spend, and
 // counts it in the key's totals when it succeeded.
@@ -141,7 +156,7 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		var ttft sql.NullInt64
 		var cost, quota sql.NullFloat64
 		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.Model, &r.Slug, &r.Effort, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
-			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota); err != nil {
+			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota, &r.QuotaSkip); err != nil {
 			return nil, err
 		}
 		r.At, r.Duration = time.UnixMilli(at), time.Duration(duration)*time.Millisecond
@@ -283,11 +298,16 @@ type QuotaWeight struct {
 	Tokens  int64
 }
 
-// QuotaWeights lists the account's requests in the quota group with
-// tokens, at in (from, to].
-func (s *Store) QuotaWeights(ctx context.Context, account, group string, from, to time.Time) ([]QuotaWeight, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, at + duration_ms, cost_usd, input + output FROM requests
-		WHERE account = ? AND quota_group = ? AND at > ? AND at <= ? AND input + output > 0`, account, group, from.UnixMilli(), to.UnixMilli())
+// unsettled selects the account's requests in a quota group with tokens
+// that ended by a time and have neither a quota share nor a skip reason.
+// By end time, not start: a request stored after a sample passed its
+// start is still settled by a later one.
+const unsettled = `account = ? AND quota_group = ? AND quota_used IS NULL AND quota_skip = '' AND input + output > 0 AND at + duration_ms <= ?`
+
+// QuotaWeights lists the unsettled requests that ended by through.
+func (s *Store) QuotaWeights(ctx context.Context, account, group string, through time.Time) ([]QuotaWeight, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, at + duration_ms, cost_usd, input + output FROM requests WHERE `+unsettled,
+		account, group, through.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
@@ -327,6 +347,22 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 		return err
 	}
 	return tx.Commit()
+}
+
+// HasUnsettledQuota reports whether the account has requests with tokens
+// that have neither a quota share nor a skip reason.
+func (s *Store) HasUnsettledQuota(ctx context.Context, account string) (bool, error) {
+	var found bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM requests
+		WHERE account = ? AND quota_used IS NULL AND quota_skip = '' AND input + output > 0)`, account).Scan(&found)
+	return found, err
+}
+
+// SkipQuota gives the unsettled requests that ended by through a skip
+// reason instead of a quota share.
+func (s *Store) SkipQuota(ctx context.Context, account, group string, through time.Time, reason QuotaSkip) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE requests SET quota_skip = ? WHERE `+unsettled, reason, account, group, through.UnixMilli())
+	return err
 }
 
 // KeySpend is a key's list-price spend in one quota group since the key

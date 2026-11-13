@@ -45,9 +45,10 @@ func TestRecordAndAttribute(t *testing.T) {
 	defer st.Close()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
-	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Cached: 0, Output: 1}}, log)
+	var settled []string
+	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Cached: 0, Output: 1}}, func(account string) { settled = append(settled, account) }, log)
 
-	t0 := time.Now().Add(-time.Hour)
+	t0 := time.Now().Add(-2 * time.Hour)
 	attributor := NewAttributor(st, log)
 	sample := func(at time.Time, remaining float64, busy bool) {
 		t.Helper()
@@ -67,7 +68,11 @@ func TestRecordAndAttribute(t *testing.T) {
 	}
 	rec.Record(gateway.Record{At: t0.Add(3 * time.Minute), KeyHash: "k", KeyName: "alice", Account: "a", Model: "m", QuotaGroup: "gemini",
 		Err: &conv.Error{Kind: conv.ErrQuota, Message: "limit"}})
-	sample(t0.Add(5*time.Minute), 0.86, false)
+	// Requests that used tokens ask for a settling sample; the failed one does not.
+	if !slices.Equal(settled, []string{"a", "a"}) {
+		t.Fatalf("settle requests = %v", settled)
+	}
+	sample(t0.Add(2*time.Minute+SettleTime), 0.86, false)
 
 	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, 10)
 	if err != nil || len(rows) != 3 {
@@ -90,19 +95,19 @@ func TestRecordAndAttribute(t *testing.T) {
 		rec.Record(gateway.Record{At: t0.Add(at), KeyHash: key, Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
 	}
 	// A sample during a running turn carries its drop to the next idle one.
-	record(6*time.Minute, "k")
-	sample(t0.Add(10*time.Minute), 0.85, true)
-	sample(t0.Add(15*time.Minute), 0.84, false)
-	// A sample right after a request waits for the quota to catch up.
-	record(19*time.Minute, "k")
-	sample(t0.Add(20*time.Minute), 0.84, false)
-	sample(t0.Add(25*time.Minute), 0.83, false)
+	record(10*time.Minute, "k")
+	sample(t0.Add(10*time.Minute+SettleTime), 0.85, true)
+	sample(t0.Add(15*time.Minute+SettleTime), 0.84, false)
+	// A sample before the quota caught up with a request waits.
+	record(30*time.Minute, "k")
+	sample(t0.Add(31*time.Minute), 0.835, false) // part of the use shows
+	sample(t0.Add(30*time.Minute+SettleTime), 0.83, false)
 	// A drop with no request is use outside agyrelay.
-	sample(t0.Add(30*time.Minute), 0.80, false)
-	record(31*time.Minute, "k2")
-	sample(t0.Add(40*time.Minute), 0.79, false)
+	sample(t0.Add(45*time.Minute), 0.80, false)
+	record(46*time.Minute, "k2")
+	sample(t0.Add(46*time.Minute+SettleTime), 0.79, false)
 	// Not sampled yet.
-	record(45*time.Minute, "k")
+	record(60*time.Minute, "k")
 
 	rows, err = st.Requests(ctx, store.RequestFilter{}, 0, 10)
 	if err != nil || len(rows) != 7 {
@@ -160,7 +165,7 @@ func TestStaleQuotaSamples(t *testing.T) {
 	defer st.Close()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
-	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Output: 1}}, log)
+	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Output: 1}}, nil, log)
 	attributor := NewAttributor(st, log)
 
 	t0 := time.Now().Add(-time.Hour)
@@ -179,14 +184,13 @@ func TestStaleQuotaSamples(t *testing.T) {
 
 	sample(0, 0.90, week)
 	record(time.Minute)
-	sample(5*time.Minute, 0.86, week) // 0.04
-	record(6 * time.Minute)
-	sample(10*time.Minute, 0.88, week) // stale: carried
-	sample(15*time.Minute, 0.85, week) // 0.01, not 0.88 - 0.85
-	// A later reset time with more quota left is a refill.
-	sample(20*time.Minute, 1.0, week.Add(7*24*time.Hour))
-	record(21 * time.Minute)
-	sample(25*time.Minute, 0.98, week.Add(7*24*time.Hour)) // 0.02
+	sample(time.Minute+SettleTime, 0.86, week) // 0.04
+	record(10 * time.Minute)
+	sample(10*time.Minute+SettleTime, 0.88, week)         // stale: carried
+	sample(11*time.Minute+SettleTime, 0.85, week)         // 0.01, not 0.88 - 0.85
+	sample(30*time.Minute, 1.0, week.Add(7*24*time.Hour)) // a later reset time with more quota left is a refill
+	record(31 * time.Minute)
+	sample(31*time.Minute+SettleTime, 0.98, week.Add(7*24*time.Hour)) // 0.02
 
 	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, 10)
 	if err != nil || len(rows) != 3 {
@@ -195,6 +199,67 @@ func TestStaleQuotaSamples(t *testing.T) {
 	for i, want := range []float64{0.02, 0.01, 0.04} { // newest first
 		if got := rows[i].QuotaUsed; got == nil || math.Abs(*got-want) > 1e-9 {
 			t.Fatalf("row %d quota = %v, want %v", i, got, want)
+		}
+	}
+}
+
+// A request stored after a sample passed its start is settled by a later
+// sample; requests that cannot be settled get a reason instead.
+func TestLateRecordsAndSkips(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Output: 1}}, nil, log)
+	attributor := NewAttributor(st, log)
+
+	t0 := time.Now().Add(-time.Hour)
+	week := t0.Add(7 * 24 * time.Hour)
+	sample := func(at time.Duration, remaining float64, resetAt time.Time, more ...store.QuotaSample) {
+		t.Helper()
+		samples := []store.QuotaSample{{Account: "a", At: t0.Add(at), Bucket: "gemini-weekly", Group: "Gemini",
+			Window: "weekly", Remaining: remaining, ResetAt: resetAt}}
+		if err := st.AddQuotaSamples(ctx, append(samples, more...)); err != nil {
+			t.Fatal(err)
+		}
+		attributor.Attribute(ctx, "a", t0.Add(at), false)
+	}
+	record := func(at time.Duration, group string) {
+		rec.Record(gateway.Record{At: t0.Add(at), Duration: 30 * time.Second, KeyHash: "k", Account: "a", Model: "m", QuotaGroup: group,
+			Usage: &conv.Usage{PromptTokens: 1000}})
+	}
+
+	record(-10*time.Minute, "gemini") // before the first sample
+	sample(0, 0.90, week, store.QuotaSample{Account: "a", At: t0, Bucket: "3p-weekly", Group: "Claude", Window: "weekly", Remaining: 1, ResetAt: week})
+	// A sample while a request runs, before its record is stored, finds
+	// nothing to settle and moves the cursor past the request's start.
+	sample(time.Minute+5*time.Second, 0.90, week)
+	record(time.Minute, "gemini")
+	sample(90*time.Second+SettleTime, 0.88, week)
+	// The claude-gpt bucket was in the first sample only: the plan has
+	// none now.
+	record(20*time.Minute, "claude-gpt")
+	// A reset before a request's use showed.
+	record(30*time.Minute, "gemini")
+	sample(31*time.Minute, 1.0, week.Add(7*24*time.Hour))
+
+	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, 10)
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	reset, noBucket, late, early := rows[0], rows[1], rows[2], rows[3]
+	if late.QuotaUsed == nil || math.Abs(*late.QuotaUsed-0.02) > 1e-9 || late.QuotaSkip != "" {
+		t.Fatalf("late record = %v %q", late.QuotaUsed, late.QuotaSkip)
+	}
+	for _, c := range []struct {
+		row  store.Request
+		want store.QuotaSkip
+	}{{early, store.SkipBeforeSampling}, {noBucket, store.SkipNoBucket}, {reset, store.SkipReset}} {
+		if c.row.QuotaUsed != nil || c.row.QuotaSkip != c.want {
+			t.Fatalf("request at %s: quota %v, skip %q, want %q", c.row.At.Sub(t0), c.row.QuotaUsed, c.row.QuotaSkip, c.want)
 		}
 	}
 }

@@ -17,14 +17,17 @@ const recordTimeout = 10 * time.Second
 // cost.
 type Recorder struct {
 	store *store.Store
-	log   *slog.Logger
+	// settle, when set, runs with the account of each stored request
+	// that used tokens (Monitor.SettleSoon).
+	settle func(account string)
+	log    *slog.Logger
 
 	mu     sync.Mutex
 	prices []Price
 }
 
-func NewRecorder(st *store.Store, prices []Price, log *slog.Logger) *Recorder {
-	return &Recorder{store: st, log: log, prices: clonePrices(prices)}
+func NewRecorder(st *store.Store, prices []Price, settle func(account string), log *slog.Logger) *Recorder {
+	return &Recorder{store: st, settle: settle, log: log, prices: clonePrices(prices)}
 }
 
 func (r *Recorder) SetPrices(prices []Price) {
@@ -69,6 +72,11 @@ func (r *Recorder) Record(rec gateway.Record) {
 	defer cancel()
 	if err := r.store.AddRequest(ctx, row); err != nil {
 		r.log.Error("request record lost", "key", rec.KeyName, "err", err)
+		return
+	}
+	usedTokens := row.Input+row.Output > 0
+	if r.settle != nil && usedTokens {
+		r.settle(row.Account)
 	}
 }
 
