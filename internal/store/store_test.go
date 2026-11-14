@@ -173,3 +173,58 @@ func TestAccountGroupUsage(t *testing.T) {
 		t.Fatalf("usage = %+v, want %+v", got, want)
 	}
 }
+
+func TestExpirePendingQuota(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Millisecond)
+	cutoff := now.Add(-time.Hour)
+	for _, r := range []Request{
+		// Ended before cutoff, unsettled, has tokens -> should expire.
+		{At: cutoff.Add(-time.Minute), Duration: 10 * time.Second, Account: "a", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 100},
+		// Started before cutoff, ended after cutoff -> stays pending.
+		{At: cutoff.Add(-time.Minute), Duration: 2 * time.Minute, Account: "a", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 100},
+		// Ended before cutoff, zero tokens -> stays empty.
+		{At: cutoff.Add(-2 * time.Minute), Account: "a", QuotaGroup: "gemini", Model: "m", Status: "quota"},
+		// Ended before cutoff, already skipped -> keeps original reason.
+		{At: cutoff.Add(-3 * time.Minute), Account: "b", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 100},
+	} {
+		if err := st.AddRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SkipQuota(ctx, "b", "gemini", now, SkipReset); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := st.ExpirePendingQuota(ctx, cutoff, SkipFailed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expired = %d, want 1", n)
+	}
+	if unsettled, err := st.HasUnsettledQuota(ctx, "a"); err != nil || !unsettled {
+		t.Fatalf("a unsettled = %v, %v (recent pending must remain)", unsettled, err)
+	}
+	if unsettled, err := st.HasUnsettledQuota(ctx, "b"); err != nil || unsettled {
+		t.Fatalf("b unsettled = %v, %v", unsettled, err)
+	}
+
+	rows, err := st.Requests(ctx, RequestFilter{}, 0, 10)
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	// Ordered newest inserted (id DESC) first.
+	wantSkips := []QuotaSkip{SkipReset, "", "", SkipFailed}
+	for i, want := range wantSkips {
+		if rows[i].QuotaSkip != want {
+			t.Fatalf("row %d quota_skip = %q, want %q", i, rows[i].QuotaSkip, want)
+		}
+	}
+}

@@ -60,8 +60,10 @@ func NewMonitor(cfg MonitorConfig) *Monitor {
 	return &Monitor{cfg: cfg, latest: map[string]AccountQuota{}, settles: map[string]*time.Timer{}}
 }
 
-// Run samples every account with a running agy until ctx ends.
+// Run samples every account with a running agy until ctx ends, and
+// retires stale pending requests that never saw a quota drop.
 func (m *Monitor) Run(ctx context.Context) {
+	m.expirePending(ctx)
 	ticker := time.NewTicker(sampleEvery)
 	defer ticker.Stop()
 	for {
@@ -70,6 +72,7 @@ func (m *Monitor) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		m.expirePending(ctx)
 		for _, account := range m.cfg.Pool.Accounts() {
 			m.SampleRunning(ctx, account)
 		}
@@ -94,6 +97,29 @@ func (m *Monitor) SampleRunning(ctx context.Context, account *pool.Account) {
 // running: a drop may never show (a bucket at 0, a use too small to move
 // the fraction).
 const maxQuotaHold = 15 * time.Minute
+
+// pendingMaxAge is how long an unsettled request waits for a quota drop
+// before being marked failed so stale rows do not stay pending forever.
+const pendingMaxAge = time.Hour
+
+func (m *Monitor) expirePending(ctx context.Context) {
+	m.sampleMu.Lock()
+	defer m.sampleMu.Unlock()
+	m.expirePendingLocked(ctx)
+}
+
+func (m *Monitor) expirePendingLocked(ctx context.Context) {
+	n, err := m.cfg.Store.ExpirePendingQuota(ctx, time.Now().Add(-pendingMaxAge), store.SkipFailed)
+	if err != nil {
+		if ctx.Err() == nil {
+			m.cfg.Log.Warn("expiring stale pending quota failed", "err", err)
+		}
+		return
+	}
+	if n > 0 {
+		m.cfg.Log.Info("marked stale pending quota as failed", "count", n)
+	}
+}
 
 // KeepForQuota reports whether the account's last open session, idle
 // since lastUsed, should stay open so a running agy can sample the quota:
@@ -219,6 +245,7 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 		m.cfg.Log.Error("quota samples not stored", "account", name, "err", err)
 		return q, nil
 	}
+	m.expirePendingLocked(ctx)
 	if m.cfg.OnSample != nil {
 		m.cfg.OnSample(ctx, name, q.At, oldestRun)
 	}
