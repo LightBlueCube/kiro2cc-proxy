@@ -329,7 +329,7 @@
   "calls.quota_average": "avg {quota}",
   "calls.quota_average.hint": "Average over the accounts with each group's weekly bucket (an unused account counts as 0). By account:",
   "calls.quota_pending": "quota pending",
-  "calls.quota_pending.hint": "Google's quota shows use about 5 minutes late: attributed once the account has had no request for about 6 minutes",
+  "calls.quota_pending.hint": "Google's quota shows use about 5 minutes late: attributed at the first quota check 6 minutes after the request ends. It waits longer if the use has not shown yet or a turn that started before it is still running",
   "calls.quota_skipped": "quota not counted",
   "calls.quota_failed": "failed to calc",
   "quota_skip.before_sampling": "The account's quota was first checked after this request",
