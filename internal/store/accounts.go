@@ -161,16 +161,6 @@ func (s *Store) Keys(ctx context.Context) ([]Key, error) {
 	return out, rows.Err()
 }
 
-// Key returns the key with the given hash (active or revoked), or ErrNotFound.
-func (s *Store) Key(ctx context.Context, hash string) (Key, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+keyColumns+` FROM api_keys WHERE hash = ?`, hash)
-	k, err := scanKey(row.Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Key{}, ErrNotFound
-	}
-	return k, err
-}
-
 func (s *Store) AddKey(ctx context.Context, k Key) error {
 	models, err := json.Marshal(nonNil(k.Models))
 	if err != nil {

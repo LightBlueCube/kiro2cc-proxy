@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	randv2 "math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -37,6 +38,12 @@ const (
 	// Concurrent password hashes; each takes argon2Memory KiB.
 	maxHashing  = 2
 	hashingWait = 5 * time.Second
+
+	// Concurrent /user/api/ DB queries and key-check jitter.
+	maxUserQueries  = 4
+	userQueryWait   = 2 * time.Second
+	minUserKeyDelay = 100 * time.Millisecond
+	maxUserKeyDelay = 300 * time.Millisecond
 )
 
 // argon2id parameters (RFC 9106 second recommended option, more passes).
@@ -53,8 +60,16 @@ const (
 // guessing a 12-character password hopeless even from many addresses.
 var loginLimits = guard.Config{PerClient: 5, Global: 30, Window: 15 * time.Minute, Lockout: 15 * time.Minute, MaxLockout: 24 * time.Hour}
 
-// Bad API keys on /user/api/: 20 tries per client per 10 minutes, 500 in total.
-var userKeyLimits = guard.Config{PerClient: 20, Global: 500, Window: 10 * time.Minute, Lockout: 10 * time.Minute, MaxLockout: 24 * time.Hour}
+// Bad API keys on /user/api/: no global cap (prevents cross-user DoS);
+// 3 failures per client in 15m triggers a 15s cooldown, then every
+// subsequent error doubles the cooldown up to 24h.
+var userKeyLimits = guard.Config{
+	PerClient:       3,
+	Window:          15 * time.Minute,
+	Lockout:         15 * time.Second,
+	MaxLockout:      24 * time.Hour,
+	LockoutPerError: true,
+}
 
 type passwordRecord struct {
 	Alg       string `json:"alg"`
@@ -303,17 +318,51 @@ func (h *Handler) userAuthed(next http.HandlerFunc) http.HandlerFunc {
 		if !ok {
 			token = r.Header.Get("X-Api-Key")
 		}
-		key, err := h.control.LookupKey(r.Context(), strings.TrimSpace(token))
-		if errors.Is(err, store.ErrNotFound) {
+		key, found := h.control.LookupKey(strings.TrimSpace(token))
+		if !found {
 			h.keyLimiter.Fail(ip)
+		}
+		if !sleepContext(r.Context(), randomDelay(minUserKeyDelay, maxUserKeyDelay)) {
+			return
+		}
+		if !found {
 			writeError(w, http.StatusUnauthorized, "invalid API key")
 			return
 		}
-		if err != nil {
-			h.internalError(w, "read API key", err)
+		wait, cancel := context.WithTimeout(r.Context(), userQueryWait)
+		defer cancel()
+		select {
+		case h.userQueries <- struct{}{}:
+		case <-wait.Done():
+			if r.Context().Err() != nil {
+				return
+			}
+			writeError(w, http.StatusServiceUnavailable, "busy; try again")
 			return
 		}
+		defer func() { <-h.userQueries }()
 		next(w, r.WithContext(context.WithValue(r.Context(), userKeyCtx{}, key)))
+	}
+}
+
+func randomDelay(min, max time.Duration) time.Duration {
+	if max <= min {
+		return min
+	}
+	return min + randv2.N(max-min+1)
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

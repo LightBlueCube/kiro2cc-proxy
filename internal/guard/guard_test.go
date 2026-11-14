@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestClientIP(t *testing.T) {
@@ -77,5 +78,63 @@ func TestViaHTTPS(t *testing.T) {
 		if got := bridge.ViaHTTPS(r); got != c.want {
 			t.Errorf("peer %s proto %q tls %v: ViaHTTPS = %v, want %v", c.peer, c.proto, c.tls, got, c.want)
 		}
+	}
+}
+
+func TestLimiterNoGlobalLimit(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := NewLimiter(Config{PerClient: 3, Global: 0, Window: 10 * time.Minute, Lockout: 10 * time.Second, MaxLockout: time.Hour})
+	l.now = func() time.Time { return now }
+
+	for i := range 50 {
+		addr := netip.AddrFrom4([4]byte{198, 51, 100, byte(i + 1)})
+		for range 3 {
+			l.Fail(addr)
+		}
+	}
+	bystander := netip.MustParseAddr("203.0.113.50")
+	if ok, wait := l.Allow(bystander); !ok || wait != 0 {
+		t.Fatalf("bystander blocked without global limit: ok=%v wait=%v", ok, wait)
+	}
+}
+
+func TestLimiterLockoutPerError(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := NewLimiter(Config{
+		PerClient:       3,
+		Window:          15 * time.Minute,
+		Lockout:         15 * time.Second,
+		MaxLockout:      2 * time.Minute,
+		LockoutPerError: true,
+	})
+	l.now = func() time.Time { return now }
+
+	attacker := netip.MustParseAddr("198.51.100.7")
+	// First 2 failures do not lock out yet.
+	for i := range 2 {
+		l.Fail(attacker)
+		if ok, _ := l.Allow(attacker); !ok {
+			t.Fatalf("locked out too early after failure %d", i+1)
+		}
+	}
+
+	// 3rd failure -> 15s; every subsequent failure doubles up to 2m.
+	wantWaits := []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 2 * time.Minute}
+	for i, want := range wantWaits {
+		l.Fail(attacker)
+		if ok, wait := l.Allow(attacker); ok || wait != want {
+			t.Fatalf("step %d: Allow = (%v, %v), want (false, %v)", i, ok, wait, want)
+		}
+		now = now.Add(want)
+		if ok, wait := l.Allow(attacker); !ok || wait != 0 {
+			t.Fatalf("step %d after %v: Allow = (%v, %v), want (true, 0)", i, want, ok, wait)
+		}
+	}
+
+	// Staying quiet past MaxLockout forgives the client.
+	now = now.Add(2*time.Minute + time.Second)
+	l.Fail(attacker)
+	if ok, _ := l.Allow(attacker); !ok {
+		t.Fatal("forgiven client locked out on 1st new failure")
 	}
 }
