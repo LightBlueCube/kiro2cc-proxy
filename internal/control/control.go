@@ -229,7 +229,8 @@ type Control struct {
 
 	mu       sync.Mutex
 	settings Settings
-	keys     map[string]conv.Caller // by key hash
+	keys     map[string]conv.Caller // active keys, by key hash
+	allKeys  map[string]store.Key   // active + revoked keys, by key hash
 	logins   map[string]*pendingLogin
 }
 
@@ -560,12 +561,15 @@ func keyHash(token string) string {
 func (c *Control) Keys(ctx context.Context) ([]store.Key, error) { return c.cfg.Store.Keys(ctx) }
 
 // LookupKey resolves a plaintext API key (active or revoked) to its stored
-// record, or store.ErrNotFound.
-func (c *Control) LookupKey(ctx context.Context, token string) (store.Key, error) {
+// record in memory.
+func (c *Control) LookupKey(token string) (store.Key, bool) {
 	if token == "" {
-		return store.Key{}, store.ErrNotFound
+		return store.Key{}, false
 	}
-	return c.cfg.Store.Key(ctx, keyHash(token))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k, ok := c.allKeys[keyHash(token)]
+	return k, ok
 }
 
 // Models is the gateway's model catalog.
@@ -698,12 +702,22 @@ func (c *Control) Egress(account string) (egress.Stats, bool) { return c.cfg.Egr
 
 // KeyTotals is every key's successful requests and tokens by model.
 func (c *Control) KeyTotals(ctx context.Context) ([]store.KeyTotal, error) {
-	return c.cfg.Store.KeyTotals(ctx)
+	return c.cfg.Store.KeyTotals(ctx, "")
+}
+
+// KeyTotalsFor is one key's successful requests and tokens by model.
+func (c *Control) KeyTotalsFor(ctx context.Context, keyHash string) ([]store.KeyTotal, error) {
+	return c.cfg.Store.KeyTotals(ctx, keyHash)
 }
 
 // KeySpends is every key's list-price spend in USD by quota group.
 func (c *Control) KeySpends(ctx context.Context) (map[string]map[string]float64, error) {
 	return c.cfg.Budget.Spends(ctx, "")
+}
+
+// KeySpend is one key's list-price spend in USD by quota group.
+func (c *Control) KeySpend(ctx context.Context, keyHash string) (map[string]float64, error) {
+	return c.cfg.Budget.Spent(ctx, keyHash)
 }
 
 // Quota is the weekly-quota use attributed to matching requests.
@@ -757,7 +771,10 @@ func (c *Control) DeleteKey(ctx context.Context, hash string) (string, error) {
 	if errors.Is(err, store.ErrKeyActive) {
 		return "", &InputError{"revoke the key before deleting it"}
 	}
-	return name, err
+	if err != nil {
+		return "", err
+	}
+	return name, c.reloadKeys(ctx)
 }
 
 func (c *Control) reloadKeys(ctx context.Context) error {
@@ -766,13 +783,16 @@ func (c *Control) reloadKeys(ctx context.Context) error {
 		return err
 	}
 	byHash := make(map[string]conv.Caller, len(keys))
+	all := make(map[string]store.Key, len(keys))
 	for _, k := range keys {
+		all[k.Hash] = k
 		if k.RevokedAt.IsZero() {
 			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits}
 		}
 	}
 	c.mu.Lock()
 	c.keys = byHash
+	c.allKeys = all
 	c.mu.Unlock()
 	return nil
 }

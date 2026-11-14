@@ -956,4 +956,57 @@ func TestUserKeyUsageAndMetadata(t *testing.T) {
 	if r := user.do("GET", "/user/api/requests?limit=10", nil, auth); r.status != http.StatusOK || !strings.Contains(r.raw, `"key":"alice"`) {
 		t.Fatalf("revoked key on /user/api/requests = %d %s", r.status, r.raw)
 	}
+
+	// Deleted keys are immediately evicted from the in-memory cache.
+	if r := adminClient.do("DELETE", "/admin/api/keys/"+aliceHash, nil, nil); r.status != http.StatusOK {
+		t.Fatalf("delete = %d %s", r.status, r.raw)
+	}
+	if r := user.do("GET", "/user/api/key", nil, auth); r.status != http.StatusUnauthorized {
+		t.Fatalf("deleted key on /user/api/key = %d %s", r.status, r.raw)
+	}
+}
+
+func TestUserKeyDelayAndLockout(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	adminClient := e.client("203.0.113.1")
+	adminClient.login(testPassword)
+	r := adminClient.do("POST", "/admin/api/keys", map[string]any{"name": "alice"}, nil)
+	aliceToken, _ := r.body["key"].(string)
+
+	attacker := e.client("198.51.100.77")
+	for i := range userKeyLimits.PerClient {
+		start := time.Now()
+		resp := attacker.do("GET", "/user/api/key", nil, map[string]string{"Authorization": "Bearer sk-wrong"})
+		elapsed := time.Since(start)
+		if resp.status != http.StatusUnauthorized {
+			t.Fatalf("attempt %d = %d %s", i, resp.status, resp.raw)
+		}
+		if elapsed < minUserKeyDelay {
+			t.Fatalf("attempt %d elapsed = %v, want >= %v", i, elapsed, minUserKeyDelay)
+		}
+	}
+
+	// Locked-out requests fail immediately with 429 without sleeping.
+	start := time.Now()
+	locked := attacker.do("GET", "/user/api/key", nil, map[string]string{"Authorization": "Bearer " + aliceToken})
+	if locked.status != http.StatusTooManyRequests || locked.header.Get("Retry-After") == "" {
+		t.Fatalf("locked response = %d %s (Retry-After=%q)", locked.status, locked.raw, locked.header.Get("Retry-After"))
+	}
+	if elapsed := time.Since(start); elapsed >= minUserKeyDelay {
+		t.Fatalf("locked response took %v, want immediate 429", elapsed)
+	}
+
+	// Other IPs are unaffected (no global lockout).
+	other := e.client("203.0.113.20")
+	start = time.Now()
+	okResp := other.do("GET", "/user/api/key", nil, map[string]string{"Authorization": "Bearer " + aliceToken})
+	if okResp.status != http.StatusOK {
+		t.Fatalf("other client = %d %s", okResp.status, okResp.raw)
+	}
+	if elapsed := time.Since(start); elapsed < minUserKeyDelay {
+		t.Fatalf("valid key elapsed = %v, want >= %v", elapsed, minUserKeyDelay)
+	}
 }

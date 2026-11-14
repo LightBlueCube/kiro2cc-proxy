@@ -23,6 +23,7 @@ async function api(method, path, body) {
   });
   const data = await resp.json().catch(() => ({}));
   if (resp.status === 401 && path !== "login" && (!isUserPage || signedIn)) {
+    if (isUserPage) userToken = "";
     showLogin();
     throw new APIError(401, data.error || "signed out");
   }
@@ -166,6 +167,7 @@ async function boot() {
   i18n.apply(document);
   if (isUserPage) {
     document.getElementById("login-label").textContent = t("user.key");
+    document.getElementById("login-password").autocomplete = "off";
     document.getElementById("tabs").replaceChildren();
     showLogin();
     return;

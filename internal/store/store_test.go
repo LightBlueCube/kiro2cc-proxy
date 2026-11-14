@@ -34,7 +34,7 @@ func TestKeyTotals(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := st.KeyTotals(ctx)
+	got, err := st.KeyTotals(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +44,13 @@ func TestKeyTotals(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("totals after prune = %+v, want %+v (failures do not count)", got, want)
+	}
+	gotOne, err := st.KeyTotals(ctx, "h1")
+	if err != nil || !reflect.DeepEqual(gotOne, want) {
+		t.Fatalf("KeyTotals(h1) = %+v, %v; want %+v", gotOne, err, want)
+	}
+	if gotOther, err := st.KeyTotals(ctx, "h2"); err != nil || len(gotOther) != 0 {
+		t.Fatalf("KeyTotals(h2) = %+v, %v; want empty", gotOther, err)
 	}
 }
 
@@ -75,7 +82,7 @@ func TestDeleteKey(t *testing.T) {
 	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.5 {
 		t.Fatalf("spend = %+v, %v", spends, err)
 	}
-	if totals, err := st.KeyTotals(ctx); err != nil || len(totals) != 1 {
+	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 1 {
 		t.Fatalf("totals = %+v, %v", totals, err)
 	}
 
@@ -94,7 +101,7 @@ func TestDeleteKey(t *testing.T) {
 	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 0 {
 		t.Fatalf("spend after delete = %+v, %v", spends, err)
 	}
-	if totals, err := st.KeyTotals(ctx); err != nil || len(totals) != 0 {
+	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 0 {
 		t.Fatalf("totals after delete = %+v, %v", totals, err)
 	}
 	if rows, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10); err != nil || len(rows) != 1 {
@@ -311,7 +318,7 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 	if err != nil || len(reqs) != 1 || reqs[0].Effort != "" || reqs[0].QuotaSkip != "" {
 		t.Fatalf("requests after upgrade = %+v, %v", reqs, err)
 	}
-	if totals, err := st.KeyTotals(ctx); err != nil || len(totals) != 0 {
+	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 0 {
 		t.Fatalf("key_totals after upgrade = %+v, %v", totals, err)
 	}
 }

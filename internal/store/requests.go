@@ -428,9 +428,16 @@ type KeyTotal struct {
 	Output   int64
 }
 
-// KeyTotals lists every key's totals by key hash, then by most tokens.
-func (s *Store) KeyTotals(ctx context.Context) ([]KeyTotal, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, model, requests, input, output FROM key_totals ORDER BY key_hash, input + output DESC, model`)
+// KeyTotals lists totals by key hash, then by most tokens; keyHash ""
+// selects every key.
+func (s *Store) KeyTotals(ctx context.Context, keyHash string) ([]KeyTotal, error) {
+	query, args := `SELECT key_hash, model, requests, input, output FROM key_totals`, []any{}
+	if keyHash != "" {
+		query += ` WHERE key_hash = ?`
+		args = append(args, keyHash)
+	}
+	query += ` ORDER BY key_hash, input + output DESC, model`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

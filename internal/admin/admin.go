@@ -52,6 +52,7 @@ type Handler struct {
 	loginLimiter *guard.Limiter
 	keyLimiter   *guard.Limiter
 	hashing      chan struct{}
+	userQueries  chan struct{}
 	mux          *http.ServeMux
 }
 
@@ -67,6 +68,7 @@ func New(cfg Config) *Handler {
 		loginLimiter: guard.NewLimiter(loginLimits),
 		keyLimiter:   guard.NewLimiter(userKeyLimits),
 		hashing:      make(chan struct{}, maxHashing),
+		userQueries:  make(chan struct{}, maxUserQueries),
 		mux:          http.NewServeMux(),
 	}
 	static, err := fs.Sub(staticFiles, "static")

@@ -159,18 +159,18 @@ type userKeyView struct {
 // the admin note.
 func (h *Handler) userKey(w http.ResponseWriter, r *http.Request) {
 	k, _ := currentUserKey(r)
-	spends, err := h.control.KeySpends(r.Context())
+	spent, err := h.control.KeySpend(r.Context(), k.Hash)
 	if err != nil {
 		h.internalError(w, "key spend", err)
 		return
 	}
-	totals, err := h.control.KeyTotals(r.Context())
+	totals, err := h.control.KeyTotalsFor(r.Context(), k.Hash)
 	if err != nil {
 		h.internalError(w, "key totals", err)
 		return
 	}
 	byHash := keyTotalsByHash(totals)
-	v := buildKeyView(k, spends[k.Hash], byHash[k.Hash])
+	v := buildKeyView(k, spent, byHash[k.Hash])
 	v.Note = ""
 	writeJSON(w, http.StatusOK, userKeyView{Key: v, Groups: usage.Groups})
 }
