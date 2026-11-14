@@ -1028,7 +1028,10 @@ views.accounts = container => {
           h("span", { class: "mono" }, m.id), m.name && m.name !== m.id ? h("span", { class: "muted" }, " " + m.name) : "") },
       { title: t("accounts.models.context"), num: true, cell: m => up(m, "maxTokens") ? fmt.compact(Number(up(m, "maxTokens"))) : "—" },
       { title: t("accounts.models.output"), num: true, cell: m => up(m, "maxOutputTokens") ? fmt.compact(Number(up(m, "maxOutputTokens"))) : "—" },
-      { title: t("accounts.models.tiers"), cell: m => m.efforts.join("/") },
+      { title: t("accounts.models.tiers"), cell: m => {
+        const tiers = (m.efforts || []).join("/");
+        return tiers ? h("span", { title: tiers }, tiers) : "";
+      } },
       { title: t("accounts.models.notice"), cell: notice },
     ], models));
   }
