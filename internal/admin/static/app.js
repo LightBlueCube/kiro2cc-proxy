@@ -1263,7 +1263,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
     filters.replaceChildren(
       h("label", {}, t("calls.range"), h("select", { onchange: e => { state.range = e.target.value; reload(); } },
         Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
-      userMode ? null : h("label", {}, t("common.key"), select("key", values.key.map(k => [k.hash, keyText(k.name, k.hash)]), t("calls.all_keys"))),
+      ...(userMode ? [] : [h("label", {}, t("common.key"), select("key", values.key.map(k => [k.hash, keyText(k.name, k.hash)]), t("calls.all_keys")))]),
       h("label", {}, t("common.model"), select("model", plain(values.model), t("calls.all_models"))),
       h("label", {}, t("common.account"), select("account", plain(values.account), t("calls.all_accounts"))),
       h("label", {}, t("calls.chart"), h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
