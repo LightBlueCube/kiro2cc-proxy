@@ -90,6 +90,7 @@ var statusNames = map[conv.ErrorKind]string{
 	conv.ErrKeyLimit:       "key_limit",
 	conv.ErrOverloaded:     "overloaded",
 	conv.ErrUnavailable:    "unavailable",
+	conv.ErrCancelled:      store.StatusCancelled,
 	conv.ErrUpstream:       "upstream_error",
 }
 

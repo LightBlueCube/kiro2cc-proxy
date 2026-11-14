@@ -105,6 +105,7 @@ func (g *Gateway) CancelTurn(account, sessionID string) error {
 		g.mu.Unlock()
 		return fmt.Errorf("%w with a running turn", ErrNoSession)
 	}
+	sess.turn.cancelledByAdmin = true
 	turn := sess.turn.turn
 	g.mu.Unlock()
 	turn.Cancel()

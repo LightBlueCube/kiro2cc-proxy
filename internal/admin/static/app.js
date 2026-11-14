@@ -1387,7 +1387,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
           [h("span", { title: r.slug }, r.model), r.effort ? term(" · " + r.effort, t("calls.effort.hint")) : ""],
           r.mode ? [term(r.mode, lookup("mode", r.mode)), r.replay_reason ? [" · ", term(r.replay_reason, lookup("replay", r.replay_reason))] : ""] : null) },
       { title: t("calls.status"), cell: r => r.status === "ok" ? term(r.finish || "ok", lookup("status", r.finish || "ok"))
-          : h("span", { class: "bad", title: joined(lookup("status", r.status), r.error) }, r.status) },
+          : h("span", { class: r.status === "cancelled" ? "cancelled" : "bad", title: joined(lookup("status", r.status), r.error) }, r.status) },
       { title: t("calls.tokens"), num: true, cell: r => tokensCell(r) },
       { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: r => !r.input && !r.output ? h("span", { class: "muted" }, "—") : stack(fmt.usd(r.cost_usd),
           quotaCell(r)) },

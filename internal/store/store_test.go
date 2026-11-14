@@ -22,6 +22,7 @@ func TestKeyTotals(t *testing.T) {
 		{KeyHash: "h1", Model: "small", Status: StatusOK, Input: 10, Cached: 4, Output: 2},
 		{KeyHash: "h1", Model: "small", Status: StatusOK, Input: 20, Output: 3},
 		{KeyHash: "h1", Model: "big", Status: StatusOK, Input: 100, Output: 50},
+		{KeyHash: "h1", Model: "big", Status: StatusCancelled},
 		{KeyHash: "h1", Model: "big", Status: "quota"},
 		{KeyHash: "h2", Model: "small", Status: "context_length"},
 	} {
@@ -29,6 +30,10 @@ func TestKeyTotals(t *testing.T) {
 		if err := st.AddRequest(ctx, r); err != nil {
 			t.Fatal(err)
 		}
+	}
+	sums, err := st.Summarize(ctx, RequestFilter{KeyHash: "h1"}, ByKey, 0)
+	if err != nil || len(sums) != 1 || sums[0].Requests != 5 || sums[0].Errors != 1 {
+		t.Fatalf("Summarize(h1) = %+v, %v; want 5 requests, 1 error (cancelled excluded)", sums, err)
 	}
 	if err := st.Prune(ctx, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
