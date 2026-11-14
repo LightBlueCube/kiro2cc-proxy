@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"agyrelay/internal/agy"
@@ -276,17 +275,11 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			if _, offered := lookupModel(g.offered(), r.req.Model, r.req.Effort); !offered {
 				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", r.req.Model)}}
 			}
-			message := err.Error()
-			if len(lacking) > 0 {
-				message += fmt.Sprintf("; model %s is not offered by %s", r.req.Model, strings.Join(lacking, ", "))
-			}
-			if lastErr != nil {
-				message += "; last error: " + lastErr.Error()
-			}
+			g.log.Warn("no account available for request", "model", r.req.Model, "err", err, "lacking", lacking, "last_err", lastErr)
 			if lastErr == nil && !g.hasCandidate(r) {
-				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: message}}
+				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}}
 			}
-			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnavailable, Message: message}}
+			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnavailable, Message: "service temporarily unavailable"}}
 		}
 		skip := func() {
 			account.Release()
@@ -407,13 +400,13 @@ func (g *Gateway) tryAcquireBusyLocked(r *run) *conv.Error {
 	if r.maxWorkers != nil && g.busyByKey[r.user] >= *r.maxWorkers {
 		return &conv.Error{
 			Kind:    conv.ErrKeyLimit,
-			Message: fmt.Sprintf("this API key reached its limit of %d concurrent workers", *r.maxWorkers),
+			Message: fmt.Sprintf("this API key reached its limit of %d concurrent requests", *r.maxWorkers),
 		}
 	}
 	if max := int(g.maxWorkers.Load()); max > 0 && g.busyTotal >= max {
 		return &conv.Error{
 			Kind:    conv.ErrUnavailable,
-			Message: fmt.Sprintf("all %d worker slots are busy", max),
+			Message: "service is busy, please try again later",
 		}
 	}
 	g.busyTotal++

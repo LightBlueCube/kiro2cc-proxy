@@ -414,8 +414,8 @@ func TestKeyLimits(t *testing.T) {
 		t.Fatalf("unpriced model outside the limited group: %+v", r.err)
 	}
 	r = h.completeAs(ctx, alice, req)
-	if r.err == nil || r.err.Kind != conv.ErrForbidden || !strings.Contains(r.err.Message, `model "gemini-3.8-flash" has no price`) ||
-		!strings.Contains(r.err.Message, "ask the agyrelay admin to add its price") {
+	if r.err == nil || r.err.Kind != conv.ErrForbidden || !strings.Contains(r.err.Message, `model "gemini-3.8-flash" has no configured price`) ||
+		strings.Contains(r.err.Message, "agyrelay") {
 		t.Fatalf("unpriced model: %+v", r.err)
 	}
 	delete(h.budget.unpriced, "gemini-3.8-flash")
@@ -1047,8 +1047,9 @@ func TestQuotaFailureWithoutFallbackIs429(t *testing.T) {
 	// While every account offering the model is cooling down, later
 	// requests get a non-retryable ErrUnknownModel instead of 503.
 	again := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
-	if again.err == nil || again.err.Kind != conv.ErrUnknownModel || !strings.Contains(again.err.Message, "cooling down") {
-		t.Fatalf("cooling down = %+v, want ErrUnknownModel", again)
+	if again.err == nil || again.err.Kind != conv.ErrUnknownModel ||
+		strings.Contains(again.err.Message, "acct0") || strings.Contains(again.err.Message, "cooling down") {
+		t.Fatalf("cooling down = %+v, want ErrUnknownModel without pool details", again)
 	}
 }
 
@@ -1621,8 +1622,9 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	acct1.SetRouting(5, nil)
 	acct1.Cool("claude-gpt", time.Now().Add(time.Hour))
 	r := h.complete(ctx, alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("no")}})
-	if r.err == nil || r.err.Kind != conv.ErrUnknownModel || !strings.Contains(r.err.Message, "cooling down") || !strings.Contains(r.err.Message, "not offered by acct0") {
-		t.Fatalf("exhausted on only offering account = %+v, want ErrUnknownModel", r)
+	if r.err == nil || r.err.Kind != conv.ErrUnknownModel ||
+		strings.Contains(r.err.Message, "acct0") || strings.Contains(r.err.Message, "acct1") || strings.Contains(r.err.Message, "cooling down") {
+		t.Fatalf("exhausted on only offering account = %+v, want ErrUnknownModel without pool details", r)
 	}
 }
 
@@ -1705,8 +1707,9 @@ func TestWorkerLimitsAndIdleEviction(t *testing.T) {
 	if bobPark.err != nil || bobPark.finish != conv.FinishToolCalls {
 		t.Fatalf("bobPark = %+v", bobPark)
 	}
-	if globalBusy := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}); globalBusy.err == nil || globalBusy.err.Kind != conv.ErrUnavailable || !strings.Contains(globalBusy.err.Message, "all 1 worker slots are busy") {
-		t.Fatalf("global busy = %+v, want ErrUnavailable", globalBusy)
+	if globalBusy := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}); globalBusy.err == nil || globalBusy.err.Kind != conv.ErrUnavailable ||
+		strings.Contains(globalBusy.err.Message, "worker") || strings.Contains(globalBusy.err.Message, "1") {
+		t.Fatalf("global busy = %+v, want ErrUnavailable without worker capacity", globalBusy)
 	}
 	bobDone := h.complete(ctx, "bob", conv.Request{
 		Model: "gemini-3.8-flash", Tools: tools,
@@ -1718,4 +1721,72 @@ func TestWorkerLimitsAndIdleEviction(t *testing.T) {
 	if carol := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}); carol.err != nil || len(h.gw.Sessions()) != 1 {
 		t.Fatalf("carol after bob finished = %+v, sessions=%+v", carol.err, h.gw.Sessions())
 	}
+}
+
+func TestDownstreamErrorsHideInternalInfo(t *testing.T) {
+	forbidden := []string{"acct0", "acct1", "antigravity", "Antigravity", "agy", "agyrelay", "cooling down", "paused", "worker", "verify", "no route"}
+	assertClean := func(t *testing.T, msg string) {
+		t.Helper()
+		for _, term := range forbidden {
+			if strings.Contains(msg, term) {
+				t.Fatalf("downstream error %q leaked internal term %q", msg, term)
+			}
+		}
+	}
+
+	h := newHarness(t, 2, nil)
+	ctx := context.Background()
+
+	// All accounts blocked / paused / needing verification.
+	h.p.Account("acct0").SetPaused(true)
+	h.p.Account("acct1").SetVerification(true, "https://accounts.google.com/v")
+	r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if r.err == nil || r.err.Kind != conv.ErrUnknownModel {
+		t.Fatalf("all unavailable = %+v", r)
+	}
+	assertClean(t, r.err.Message)
+
+	// Account blocked with an internal reason; downstream must not see it.
+	h.p.Account("acct1").SetVerification(false, "")
+	h.p.Account("acct1").SetBlocked(errors.New("no route for acct1"))
+	r = h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if r.err == nil || r.err.Kind != conv.ErrUnknownModel {
+		t.Fatalf("blocked = %+v", r)
+	}
+	assertClean(t, r.err.Message)
+
+	// Context window check error message has no internal software name.
+	h.p.Account("acct0").SetPaused(false)
+	if err := h.gw.SetContextWindows([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 5}}, true); err != nil {
+		t.Fatal(err)
+	}
+	r = h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(strings.Repeat("word ", 50))}})
+	if r.err == nil || r.err.Kind != conv.ErrContextLength {
+		t.Fatalf("context window = %+v", r)
+	}
+	assertClean(t, r.err.Message)
+	if err := h.gw.SetContextWindows(nil, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Process killed mid-turn: outcome.Err does not leak process/stderr details.
+	h.p.Account("acct1").SetBlocked(nil)
+	h.p.Account("acct1").SetPaused(true)
+	done := make(chan result, 1)
+	go func() {
+		done <- h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}})
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(h.requests("session/prompt")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("prompt never sent")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.p.Account("acct0").Restart()
+	r = <-done
+	if r.err == nil || r.err.Kind != conv.ErrUpstream {
+		t.Fatalf("killed mid-turn = %+v", r)
+	}
+	assertClean(t, r.err.Message)
 }

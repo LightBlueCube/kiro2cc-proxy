@@ -53,7 +53,7 @@ type inputPart struct {
 	FileID   string          `json:"file_id"`
 }
 
-var errStateful = errors.New("this relay is stateless: send the full conversation as input items (store: false) instead of previous_response_id or item_reference")
+var errStateful = errors.New("stateless API: send the full conversation as input items (store: false) instead of previous_response_id or item_reference")
 
 func decodeResponsesRequest(req responsesRequest) (conv.Request, error) {
 	if req.Model == "" {
