@@ -1529,3 +1529,97 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 		t.Fatalf("exhausted on only offering account = %+v, want ErrUnknownModel", r)
 	}
 }
+
+func TestWorkerLimitsAndIdleEviction(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	ctx := context.Background()
+
+	two := 2
+	alice := testCaller("alice")
+	alice.MaxWorkers = &two
+
+	c1 := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("c1")}})
+	c2 := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("c2")}})
+	if c1.err != nil || c2.err != nil || len(h.gw.Sessions()) != 2 {
+		t.Fatalf("c1=%+v c2=%+v sessions=%+v", c1.err, c2.err, h.gw.Sessions())
+	}
+
+	// Touch c1 so c2 is the oldest idle worker; opening c3 evicts c2.
+	c1Warm := h.completeAs(ctx, alice, conv.Request{
+		Model:    "gemini-3.8-flash",
+		Messages: []conv.Message{user("c1"), {Role: conv.RoleAssistant, Text: c1.text}, user("c1-2")},
+	})
+	c3 := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("c3")}})
+	if c1Warm.err != nil || c3.err != nil {
+		t.Fatalf("c1Warm=%+v c3=%+v", c1Warm.err, c3.err)
+	}
+	if got := h.gw.Sessions(); len(got) != 2 {
+		t.Fatalf("sessions after c3 = %+v, want 2 (c2 evicted)", got)
+	}
+
+	// c2's snapshot stayed on disk: continuing c2 reopens it (ModeWarm) and
+	// evicts the oldest idle worker (c1).
+	c2Warm := h.completeAs(ctx, alice, conv.Request{
+		Model:    "gemini-3.8-flash",
+		Messages: []conv.Message{user("c2"), {Role: conv.RoleAssistant, Text: c2.text}, user("c2-2")},
+	})
+	if c2Warm.err != nil {
+		t.Fatalf("c2Warm = %+v", c2Warm.err)
+	}
+	if recs := h.records.all(t, 5); recs[4].Mode != ModeWarm {
+		t.Fatalf("reopened c2 mode = %s, want warm", recs[4].Mode)
+	}
+
+	// Lowering alice's cap to 1 trims her second idle worker at once.
+	one := 1
+	alice.MaxWorkers = &one
+	h.gw.TrimKeyIdle(alice.KeyHash, alice.MaxWorkers)
+	if got := h.gw.Sessions(); len(got) != 1 {
+		t.Fatalf("sessions after TrimKeyIdle(1) = %+v, want 1", got)
+	}
+
+	// Park a turn for alice: her 1 worker is now busy, so a second
+	// conversation (fresh or warm) fails with ErrKeyLimit without dropping
+	// the warm snapshot, while continuing the parked turn succeeds.
+	tools := []conv.ToolSpec{readTool}
+	parked := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{user(`@tool read {}`)}})
+	if parked.err != nil || parked.finish != conv.FinishToolCalls {
+		t.Fatalf("parked = %+v", parked)
+	}
+	if blocked := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("other")}}); blocked.err == nil || blocked.err.Kind != conv.ErrKeyLimit {
+		t.Fatalf("key busy fresh = %+v, want ErrKeyLimit", blocked)
+	}
+	if blockedWarm := h.completeAs(ctx, alice, conv.Request{
+		Model:    "gemini-3.8-flash",
+		Messages: []conv.Message{user("c2"), {Role: conv.RoleAssistant, Text: c2.text}, user("c2-2"), {Role: conv.RoleAssistant, Text: c2Warm.text}, user("c2-3")},
+	}); blockedWarm.err == nil || blockedWarm.err.Kind != conv.ErrKeyLimit {
+		t.Fatalf("key busy warm = %+v, want ErrKeyLimit", blockedWarm)
+	}
+	cont := h.completeAs(ctx, alice, conv.Request{
+		Model: "gemini-3.8-flash", Tools: tools,
+		Messages: []conv.Message{user(`@tool read {}`), {Role: conv.RoleAssistant, ToolCalls: parked.calls}, {Role: conv.RoleTool, ToolCallID: parked.calls[0].ID, Text: "ok"}},
+	})
+	if cont.err != nil {
+		t.Fatalf("continue parked = %+v", cont.err)
+	}
+
+	// Global worker limit: 1 worker across all keys.
+	h.gw.SetMaxWorkers(1)
+	bobPark := h.complete(ctx, "bob", conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{user(`@tool read {}`)}})
+	if bobPark.err != nil || bobPark.finish != conv.FinishToolCalls {
+		t.Fatalf("bobPark = %+v", bobPark)
+	}
+	if globalBusy := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}); globalBusy.err == nil || globalBusy.err.Kind != conv.ErrUnavailable || !strings.Contains(globalBusy.err.Message, "all 1 worker slots are busy") {
+		t.Fatalf("global busy = %+v, want ErrUnavailable", globalBusy)
+	}
+	bobDone := h.complete(ctx, "bob", conv.Request{
+		Model: "gemini-3.8-flash", Tools: tools,
+		Messages: []conv.Message{user(`@tool read {}`), {Role: conv.RoleAssistant, ToolCalls: bobPark.calls}, {Role: conv.RoleTool, ToolCallID: bobPark.calls[0].ID, Text: "ok"}},
+	})
+	if bobDone.err != nil {
+		t.Fatalf("bobDone = %+v", bobDone.err)
+	}
+	if carol := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}); carol.err != nil || len(h.gw.Sessions()) != 1 {
+		t.Fatalf("carol after bob finished = %+v, sessions=%+v", carol.err, h.gw.Sessions())
+	}
+}

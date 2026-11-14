@@ -45,6 +45,9 @@ type Config struct {
 	// then it is closed (under --process-per-session its worker exits) and
 	// the next request of the conversation reopens it from disk.
 	IdleClose time.Duration
+	// MaxWorkers caps open session workers across all accounts (0 =
+	// unlimited); excess idle sessions are closed first.
+	MaxWorkers int
 	// Recorder, when set, receives a record of every request.
 	Recorder Recorder
 	// Budget measures key spend; it must be set when keys have limits.
@@ -86,15 +89,18 @@ type Gateway struct {
 	refreshes map[string]*refreshCall
 	stop      chan struct{}
 	// idleClose is a time.Duration.
-	idleClose atomic.Int64
+	idleClose  atomic.Int64
+	maxWorkers atomic.Int64
 	// limits is the context-window check, nil while it is off; limitsMu
 	// serializes its changes.
 	limits   atomic.Pointer[contextLimits]
 	limitsMu sync.Mutex
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
-	mu       sync.Mutex
-	sessions map[string]*session // sessionRef → session
+	mu        sync.Mutex
+	sessions  map[string]*session // sessionRef → session
+	busyTotal int
+	busyByKey map[string]int
 }
 
 // session is an ACP session known to this process.
@@ -172,8 +178,10 @@ func New(cfg Config) (*Gateway, error) {
 		refreshes:    map[string]*refreshCall{},
 		stop:         make(chan struct{}),
 		sessions:     map[string]*session{},
+		busyByKey:    map[string]int{},
 	}
 	g.idleClose.Store(int64(cfg.IdleClose))
+	g.maxWorkers.Store(int64(cfg.MaxWorkers))
 	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
 		return nil, err
 	}
@@ -183,6 +191,28 @@ func New(cfg Config) (*Gateway, error) {
 
 // SetIdleClose changes how long an idle session stays open in agy.
 func (g *Gateway) SetIdleClose(d time.Duration) { g.idleClose.Store(int64(d)) }
+
+// SetMaxWorkers changes the global worker cap (0 = unlimited) and closes
+// idle sessions above the new global or per-account caps.
+func (g *Gateway) SetMaxWorkers(n int) {
+	g.maxWorkers.Store(int64(n))
+	g.mu.Lock()
+	evicted := g.evictIdleLocked("", nil, nil)
+	g.mu.Unlock()
+	g.closeEvicted(evicted)
+}
+
+// TrimKeyIdle closes idle sessions of keyHash above maxWorkers (0 closes all
+// of the key's idle sessions; nil is unlimited).
+func (g *Gateway) TrimKeyIdle(keyHash string, maxWorkers *int) {
+	if maxWorkers == nil {
+		return
+	}
+	g.mu.Lock()
+	evicted := g.evictIdleLocked(keyHash, maxWorkers, nil)
+	g.mu.Unlock()
+	g.closeEvicted(evicted)
+}
 
 // SetContextWindows replaces the context windows and turns their check on
 // or off; models without a window are left to upstream's limit. Turning
@@ -274,7 +304,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		return err
 	}
 
-	r := &run{user: caller.KeyHash, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
+	r := &run{user: caller.KeyHash, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
 	attempts := min(maxAttempts, len(g.pool.Accounts()))
 	for attempt := 1; ; attempt++ {
 		at, failure := g.start(ctx, r)
@@ -386,10 +416,11 @@ func validate(req conv.Request, t *transcript) *conv.Error {
 
 // run is one request's planning state across attempts.
 type run struct {
-	user  string
-	req   conv.Request
-	t     *transcript
-	model modelChoice
+	user       string
+	maxWorkers *int
+	req        conv.Request
+	t          *transcript
+	model      modelChoice
 	// offered is the merged catalog the model was found in.
 	offered []modelEntry
 	group   string
@@ -519,7 +550,7 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 	if ctx.Err() != nil {
 		return g.abandon(at, r)
 	}
-	<-at.turn.Done()
+	<-at.closed
 	return g.finish(at, r, w, release, &text)
 }
 
@@ -552,7 +583,6 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 	if !release() {
 		return nil
 	}
-	<-at.closed // endSteps is set
 	mark := g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()}, at.endSteps)
 	if outcome.Usage != nil {
 		rest := minusUsage(usageFrom(outcome.Usage), at.reported)
@@ -699,6 +729,9 @@ func (g *Gateway) forget(account, sessionID string) {
 func (g *Gateway) watch(at *activeTurn) {
 	<-at.turn.Done()
 	outcome := at.turn.Outcome()
+	if outcome.Err == nil && outcome.StopReason == agy.StopEndTurn && at.account.ModelFailure(at.sess.id) == nil {
+		at.endSteps = g.countSteps(at)
+	}
 	g.mu.Lock()
 	at.finished = true
 	if at.parkTimer != nil {
@@ -712,14 +745,11 @@ func (g *Gateway) watch(at *activeTurn) {
 		at.sess.turn = nil
 	}
 	at.sess.lastUsed = time.Now()
+	g.releaseTurnLocked(at)
 	g.mu.Unlock()
 
-	at.account.Release()
 	if unobserved && outcome.StopReason != agy.StopCancelled {
 		g.forget(at.account.Name(), at.sess.id)
-	}
-	if outcome.Err == nil && outcome.StopReason == agy.StopEndTurn {
-		at.endSteps = g.countSteps(at)
 	}
 	close(at.closed)
 }
@@ -795,6 +825,7 @@ func (g *Gateway) sweep() {
 	var lasts []*session
 	var lastUses []time.Time // lasts' lastUsed
 	g.mu.Lock()
+	idle = append(idle, g.evictIdleLocked("", nil, nil)...)
 	byAccount := map[*pool.Account][]*session{}
 	for _, sess := range g.sessions {
 		if sess.turn == nil && (!sess.proc.Alive() || !sess.proc.HasSession(sess.id)) {

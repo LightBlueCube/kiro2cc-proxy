@@ -39,6 +39,7 @@ var migrations = []string{
 		name        TEXT NOT NULL UNIQUE,
 		note        TEXT NOT NULL,
 		models      TEXT NOT NULL,
+		max_workers INTEGER,
 		limit_total REAL,
 		limits      TEXT NOT NULL,
 		created_at  INTEGER NOT NULL,
