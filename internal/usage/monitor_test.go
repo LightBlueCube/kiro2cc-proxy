@@ -112,6 +112,56 @@ func TestSettleSoon(t *testing.T) {
 	}
 }
 
+// A sample passes on when the account's longest running turn began (zero
+// when none runs), not counting turns that only wait for tool results.
+func TestSampleReportsOldestRun(t *testing.T) {
+	e := newMonitorEnv(t)
+	ctx := context.Background()
+	account := e.p.Account("a")
+	var runs []time.Time
+	monitor := NewMonitor(MonitorConfig{
+		Store: e.st, Pool: e.p, Profile: gateway.IdleProfile(),
+		OnSample: func(_ context.Context, _ string, _ time.Time, since time.Time) { runs = append(runs, since) },
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	sample := func() {
+		t.Helper()
+		if _, err := monitor.Refresh(ctx, account); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	early := time.Now().Add(-10 * time.Minute)
+	late := early.Add(5 * time.Minute)
+	turn, other := new(int), new(int)
+
+	sample() // no turn
+	if err := account.TryAcquire("gemini"); err != nil {
+		t.Fatal(err)
+	}
+	account.BeginRun(turn, early)
+	sample() // running
+	account.EndRun(turn)
+	sample() // parked
+	account.BeginRun(turn, late)
+	account.BeginRun(other, early)
+	sample() // two run: the older counts
+	account.EndRun(other)
+	account.EndRun(turn)
+	account.Release()
+	sample() // ended
+
+	want := []time.Time{{}, early, {}, early, {}}
+	if len(runs) != len(want) {
+		t.Fatalf("runs = %v, want %v", runs, want)
+	}
+	for i := range want {
+		if !runs[i].Equal(want[i]) {
+			t.Fatalf("runs = %v, want %v", runs, want)
+		}
+	}
+}
+
 // KeepForQuota keeps an idle account's last session through SettleTime,
 // then, sampling, while requests wait for their quota, up to maxQuotaHold.
 func TestKeepForQuota(t *testing.T) {

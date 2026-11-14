@@ -60,8 +60,11 @@ type Record struct {
 	Duration time.Duration
 	// TimeToFirstOutput is 0 when nothing was output.
 	TimeToFirstOutput time.Duration
-	// Usage is set on the response that ended the agy turn: it covers the
-	// whole turn, including earlier responses ended by tool calls.
+	// Usage is the model calls the response ended with: those since the
+	// turn's previous response. A response that ends on tool calls reports
+	// its calls when it ends, so a parked turn has none unrecorded. It is
+	// nil when the language server could not tell; the turn's last
+	// response then covers them.
 	Usage  *conv.Usage
 	Finish conv.FinishReason
 	Err    *conv.Error

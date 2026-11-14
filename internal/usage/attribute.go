@@ -95,17 +95,20 @@ const SettleTime = 6 * time.Minute
 // unpriced.
 //
 // Each bucket has a cursor: the sample up to which drops are settled. A
-// sample settles the drop since the cursor over the unsettled requests
-// that ended by the sample, only when no turn is running (a running
-// turn's record, with its tokens, comes when it ends) and the newest of
-// them ended SettleTime before; otherwise the drop grows into the next
-// sample.
+// sample at S shows the use of requests that ended SettleTime before, so
+// it settles the drop since the cursor over the unsettled requests that
+// ended by the cutoff S - SettleTime. Later requests wait for a later
+// sample, and may already show in this drop: it lands on the earlier ones.
+// The drop waits (grows into the next sample) while a turn that began by
+// the cutoff still runs, as its model calls have no record yet, and while
+// it has not shown (drop <= 0).
 //
-//	cursor ──── requests ──── sample (busy: carry) ──── sample (idle: split drop)
+//	cursor ──── requests ──── cutoff ──── requests ──── sample
+//	            └─ share the drop ─┘      └─ wait ─┘
 //
 // Requests are picked by end time, not by the cursor, so one stored after
-// a sample passed its start is settled by a later sample. A drop with no
-// such request is use outside agyrelay and stays unattributed. Requests
+// a sample passed its start is settled by a later sample. A drop while no
+// request waits is use outside agyrelay and stays unattributed. Requests
 // that cannot be settled get a skip reason (store.QuotaSkip).
 type Attributor struct {
 	store *store.Store
@@ -116,17 +119,18 @@ func NewAttributor(st *store.Store, log *slog.Logger) *Attributor {
 	return &Attributor{store: st, log: log}
 }
 
-// Attribute runs after the account was sampled at `at`; busy reports
-// whether a turn was running or parked on the account then.
-func (a *Attributor) Attribute(ctx context.Context, account string, at time.Time, busy bool) {
+// Attribute runs after the account was sampled at `at`; oldestRun is when
+// its longest running turn began, zero when none ran. A parked turn
+// waiting for tool results does not run: its model calls are recorded.
+func (a *Attributor) Attribute(ctx context.Context, account string, at time.Time, oldestRun time.Time) {
 	for bucket, group := range weeklyBuckets {
-		if err := a.attributeBucket(ctx, account, bucket, group, at, busy); err != nil {
+		if err := a.attributeBucket(ctx, account, bucket, group, at, oldestRun); err != nil {
 			a.log.Warn("quota attribution failed", "account", account, "bucket", bucket, "err", err)
 		}
 	}
 }
 
-func (a *Attributor) attributeBucket(ctx context.Context, account, bucket, group string, at time.Time, busy bool) error {
+func (a *Attributor) attributeBucket(ctx context.Context, account, bucket, group string, at time.Time, oldestRun time.Time) error {
 	cur, err := a.store.LastQuotaSample(ctx, account, bucket, at.Add(time.Millisecond))
 	found := err == nil
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -150,7 +154,9 @@ func (a *Attributor) attributeBucket(ctx context.Context, account, bucket, group
 	if !cur.At.Before(from.ResetAt) || refilled {
 		return a.restart(ctx, account, bucket, group, cur.At, store.SkipReset)
 	}
-	if busy {
+	cutoff := cur.At.Add(-SettleTime)
+	turnWithoutRecord := !oldestRun.IsZero() && !oldestRun.After(cutoff)
+	if turnWithoutRecord {
 		return nil
 	}
 
@@ -162,10 +168,11 @@ func (a *Attributor) attributeBucket(ctx context.Context, account, bucket, group
 		return a.store.AttributeQuota(ctx, account, bucket, cur.At, nil)
 	}
 	drop := from.Remaining - cur.Remaining
-	if drop <= 0 || cur.At.Sub(newestEnd(weights)) < SettleTime {
+	settling := endedBy(weights, cutoff)
+	if drop <= 0 || len(settling) == 0 {
 		return nil
 	}
-	return a.store.AttributeQuota(ctx, account, bucket, cur.At, split(drop, weights))
+	return a.store.AttributeQuota(ctx, account, bucket, cur.At, split(drop, settling))
 }
 
 // restart begins the bucket's attribution at the sample at `at`: the
@@ -177,14 +184,15 @@ func (a *Attributor) restart(ctx context.Context, account, bucket, group string,
 	return a.store.AttributeQuota(ctx, account, bucket, at, nil)
 }
 
-func newestEnd(weights []store.QuotaWeight) time.Time {
-	var newest time.Time
+// endedBy returns the weights of requests that ended by cutoff.
+func endedBy(weights []store.QuotaWeight, cutoff time.Time) []store.QuotaWeight {
+	var out []store.QuotaWeight
 	for _, w := range weights {
-		if w.Ended.After(newest) {
-			newest = w.Ended
+		if !w.Ended.After(cutoff) {
+			out = append(out, w)
 		}
 	}
-	return newest
+	return out
 }
 
 // split shares drop by cost, or by tokens when a request has no price.

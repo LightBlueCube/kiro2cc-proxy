@@ -70,6 +70,9 @@ type Account struct {
 
 	mu    sync.Mutex
 	turns int
+	// runs maps the turns that make model calls to when they began; a turn
+	// waiting for tool results is not in it.
+	runs map[any]time.Time
 	// paused is set by the admin; disabled by a failed sign-in; blocked
 	// by the control plane (no route for the account's traffic).
 	paused   bool
@@ -156,6 +159,7 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 		env:               ac.Env,
 		proxy:             ac.Proxy,
 		cloudCodeEndpoint: ac.CloudCodeEndpoint,
+		runs:              map[any]time.Time{},
 		cooldown:          map[string]time.Time{},
 		modelFailures:     map[string]ModelFailure{},
 		procs:             map[string]*procSlot{},
@@ -319,6 +323,35 @@ func (a *Account) Turns() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.turns
+}
+
+// BeginRun records that the turn identified by key began making model
+// calls at since: it started, or resumed after tool results.
+func (a *Account) BeginRun(key any, since time.Time) {
+	a.mu.Lock()
+	a.runs[key] = since
+	a.mu.Unlock()
+}
+
+// EndRun records that the turn identified by key makes no model call: it
+// waits for tool results or ended. It is a no-op for a turn not running.
+func (a *Account) EndRun(key any) {
+	a.mu.Lock()
+	delete(a.runs, key)
+	a.mu.Unlock()
+}
+
+// OldestRun returns when the longest running turn began; ok is false when
+// no turn is making model calls.
+func (a *Account) OldestRun() (since time.Time, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, began := range a.runs {
+		if !ok || began.Before(since) {
+			since, ok = began, true
+		}
+	}
+	return since, ok
 }
 
 // Available reports why the account cannot serve group now (nil = usable).
