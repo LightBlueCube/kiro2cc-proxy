@@ -227,6 +227,12 @@ function polling(container, interval, render) {
 
 const groupName = g => lookup("group", g) || g;
 
+// quotaText lists shares by group: "Gemini 0.05% · Claude + GPT 0.11%".
+const quotaText = (byGroup, digits) => joined(...Object.entries(byGroup)
+  .map(([g, share]) => [groupName(g), share])
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([name, share]) => `${name} ${fmt.pct(share, digits)}`));
+
 
 // limitEditor picks a key's spend limit in list-price USD: none, one
 // total, or one per quota group (a blank group is unlimited).
@@ -279,6 +285,26 @@ function spendCell(k, groups) {
   return shown.map(g => k.limits[g] === undefined
     ? h("div", {}, t("keys.usage.unlimited", { group: groupName(g), spent: fmt.usd(spent(g)) }))
     : spendBar(groupName(g), spent(g), k.limits[g]));
+}
+
+// quotaCell shows a key's attributed weekly-quota share by quota group
+// since creation; hovering lists each account's shares.
+function quotaCell(k, groups) {
+  const quota = k.quota || {};
+  const ordered = [...groups, ...Object.keys(quota).filter(g => !groups.includes(g))];
+  const shown = ordered.filter(g => (quota[g]?.used || 0) > 0);
+  if (!shown.length) return h("span", { class: "muted" }, t("keys.quota.none"));
+  const byAccount = {};
+  for (const g of shown) {
+    for (const a of quota[g].accounts || []) {
+      (byAccount[a.account] ||= {})[g] = a.used;
+    }
+  }
+  const hover = Object.keys(byAccount).sort()
+    .map(a => `${a}: ${quotaText(byAccount[a], 3)}`)
+    .join("\n");
+  return h("div", { title: hover },
+    shown.map(g => h("div", {}, t("keys.quota.group", { group: groupName(g), used: fmt.pct(quota[g].used, 2) }))));
 }
 
 // totalsCell shows a key's successful calls and tokens; hovering lists
@@ -378,6 +404,7 @@ views.keys = container => {
       { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
       { title: t("keys.col.workers"), cell: k => k.max_workers !== null ? k.max_workers : h("span", { class: "muted" }, t("keys.limit.placeholder")) },
       { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
+      { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), cell: k => quotaCell(k, groups) },
       { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
       { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
       { title: "", cell: k => k.revoked_at
@@ -1279,11 +1306,6 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
   // quota is the weekly-quota report: uses by key, account, and group, and
   // by group the accounts with that weekly bucket.
   let quota = { accounts: {}, uses: [] };
-  // quotaText lists shares by group: "Gemini 0.05% · Claude + GPT 0.11%".
-  const quotaText = (byGroup, digits) => joined(...Object.entries(byGroup)
-    .map(([g, share]) => [groupName(g), share])
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([name, share]) => `${name} ${fmt.pct(share, digits)}`));
 
   // accountQuota adds up each account's shares by group; shares of
   // different accounts stay apart, since plans differ in bucket size.
@@ -1428,6 +1450,7 @@ views.user = (container, initialData) => {
       { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
       { title: t("keys.col.workers"), cell: k => k.max_workers !== null ? k.max_workers : h("span", { class: "muted" }, t("keys.limit.placeholder")) },
       { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
+      { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), cell: k => quotaCell(k, groups) },
       { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
       { title: t("keys.col.created"), cell: k => stack(fmt.time(k.created_at),
           k.revoked_at ? h("span", { class: "bad" }, t("keys.revoked", { time: fmt.time(k.revoked_at) })) : null) },

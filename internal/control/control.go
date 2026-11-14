@@ -710,6 +710,18 @@ func (c *Control) KeyTotalsFor(ctx context.Context, keyHash string) ([]store.Key
 	return c.cfg.Store.KeyTotals(ctx, keyHash)
 }
 
+// KeyQuotas is every key's attributed weekly-quota share by account and
+// quota group.
+func (c *Control) KeyQuotas(ctx context.Context) ([]store.KeyQuota, error) {
+	return c.cfg.Store.KeyQuotas(ctx, "")
+}
+
+// KeyQuotaFor is one key's attributed weekly-quota share by account and
+// quota group.
+func (c *Control) KeyQuotaFor(ctx context.Context, keyHash string) ([]store.KeyQuota, error) {
+	return c.cfg.Store.KeyQuotas(ctx, keyHash)
+}
+
 // KeySpends is every key's list-price spend in USD by quota group.
 func (c *Control) KeySpends(ctx context.Context) (map[string]map[string]float64, error) {
 	return c.cfg.Budget.Spends(ctx, "")

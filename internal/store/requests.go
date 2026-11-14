@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -342,8 +343,9 @@ func (s *Store) QuotaWeights(ctx context.Context, account, group string, through
 	return out, rows.Err()
 }
 
-// AttributeQuota stores attributed quota shares by request id and moves
-// the bucket's attribution cursor to the sample at `through`.
+// AttributeQuota stores attributed quota shares by request id, adds them
+// to key_quota, and moves the bucket's attribution cursor to the sample
+// at `through`.
 func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, through time.Time, shares map[int64]float64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -351,8 +353,23 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 	}
 	defer tx.Rollback()
 	for id, share := range shares {
-		if err := affected(tx.ExecContext(ctx, `UPDATE requests SET quota_used = ? WHERE id = ?`, share, id)); err != nil {
+		var keyHash, reqAccount, group string
+		err := tx.QueryRowContext(ctx,
+			`UPDATE requests SET quota_used = ? WHERE id = ? AND quota_used IS NULL RETURNING key_hash, account, quota_group`,
+			share, id,
+		).Scan(&keyHash, &reqAccount, &group)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("request %d: %w", id, ErrNotFound)
+		}
+		if err != nil {
 			return fmt.Errorf("request %d: %w", id, err)
+		}
+		if share > 0 && keyHash != "" && reqAccount != "" && group != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO key_quota (key_hash, account, grp, used) VALUES (?, ?, ?, ?)
+				ON CONFLICT (key_hash, account, grp) DO UPDATE SET used = used + excluded.used`,
+				keyHash, reqAccount, group, share); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO quota_cursors (account, bucket, at) VALUES (?, ?, ?)
@@ -453,6 +470,40 @@ func (s *Store) KeyTotals(ctx context.Context, keyHash string) ([]KeyTotal, erro
 			return nil, err
 		}
 		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// KeyQuota is a key's attributed weekly-quota share on one account in one
+// quota group since the key was created; pruning requests keeps it.
+type KeyQuota struct {
+	KeyHash string
+	Account string
+	Group   string
+	Used    float64
+}
+
+// KeyQuotas lists attributed quota by key hash, then by quota group and
+// largest account share; keyHash "" selects every key.
+func (s *Store) KeyQuotas(ctx context.Context, keyHash string) ([]KeyQuota, error) {
+	query, args := `SELECT key_hash, account, grp, used FROM key_quota`, []any{}
+	if keyHash != "" {
+		query += ` WHERE key_hash = ?`
+		args = append(args, keyHash)
+	}
+	query += ` ORDER BY key_hash, grp, used DESC, account`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KeyQuota
+	for rows.Next() {
+		var q KeyQuota
+		if err := rows.Scan(&q.KeyHash, &q.Account, &q.Group, &q.Used); err != nil {
+			return nil, err
+		}
+		out = append(out, q)
 	}
 	return out, rows.Err()
 }

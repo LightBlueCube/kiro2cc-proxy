@@ -209,8 +209,8 @@ func (s *Store) RestoreKey(ctx context.Context, hash string) error {
 // ErrKeyActive means the key must be revoked first.
 var ErrKeyActive = errors.New("key is not revoked")
 
-// DeleteKey deletes a revoked key, its spend, and its totals, freeing its name, and
-// returns the name. Its requests stay, labeled with the name.
+// DeleteKey deletes a revoked key, its spend, its totals, and its quota use,
+// freeing its name, and returns the name. Its requests stay, labeled with the name.
 func (s *Store) DeleteKey(ctx context.Context, hash string) (name string, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -233,7 +233,7 @@ func (s *Store) DeleteKey(ctx context.Context, hash string) (name string, err er
 	if _, err := tx.ExecContext(ctx, `DELETE FROM api_keys WHERE hash = ?`, hash); err != nil {
 		return "", err
 	}
-	for _, table := range []string{"key_usage", "key_totals"} {
+	for _, table := range []string{"key_usage", "key_totals", "key_quota"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE key_hash = ?`, hash); err != nil {
 			return "", err
 		}

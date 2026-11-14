@@ -59,6 +59,78 @@ func TestKeyTotals(t *testing.T) {
 	}
 }
 
+func TestKeyQuotas(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Millisecond)
+	for _, r := range []Request{
+		{At: now, KeyHash: "h1", Account: "a1", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 10, Output: 2},
+		{At: now, KeyHash: "h1", Account: "a2", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 10, Output: 2},
+		{At: now, KeyHash: "h1", Account: "a2", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 10, Output: 2},
+		{At: now, KeyHash: "h1", Account: "a1", QuotaGroup: "claude-gpt", Model: "m", Status: StatusOK, Input: 10, Output: 2},
+		{At: now, KeyHash: "h2", Account: "a1", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 10, Output: 2},
+	} {
+		if err := st.AddRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.Requests(ctx, RequestFilter{}, 0, 10)
+	if err != nil || len(rows) != 5 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	// Rows are newest first: [h2/a1/gemini, h1/a1/claude-gpt, h1/a2/gemini, h1/a2/gemini, h1/a1/gemini].
+	if err := st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(time.Minute), map[int64]float64{
+		rows[4].ID: 0.10,
+		rows[0].ID: 0.05,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AttributeQuota(ctx, "a2", "gemini-weekly", now.Add(time.Minute), map[int64]float64{
+		rows[3].ID: 0.25,
+		rows[2].ID: 0.00, // zero share must not create a row
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AttributeQuota(ctx, "a1", "3p-weekly", now.Add(time.Minute), map[int64]float64{
+		rows[1].ID: 0.30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Already-attributed request cannot be attributed twice.
+	if err := st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(2*time.Minute), map[int64]float64{
+		rows[4].ID: 0.10,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("duplicate attribution = %v, want ErrNotFound", err)
+	}
+
+	if err := st.Prune(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.KeyQuotas(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []KeyQuota{
+		{KeyHash: "h1", Account: "a1", Group: "claude-gpt", Used: 0.30},
+		{KeyHash: "h1", Account: "a2", Group: "gemini", Used: 0.25},
+		{KeyHash: "h1", Account: "a1", Group: "gemini", Used: 0.10},
+		{KeyHash: "h2", Account: "a1", Group: "gemini", Used: 0.05},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("quotas after prune = %+v, want %+v", got, want)
+	}
+	gotOne, err := st.KeyQuotas(ctx, "h1")
+	if err != nil || !reflect.DeepEqual(gotOne, want[:3]) {
+		t.Fatalf("KeyQuotas(h1) = %+v, %v; want %+v", gotOne, err, want[:3])
+	}
+}
+
 func TestDeleteKey(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "db"))
 	if err != nil {
@@ -81,7 +153,14 @@ func TestDeleteKey(t *testing.T) {
 		t.Fatalf("after clearing max_workers: %+v, %v", keys, err)
 	}
 	cost := 0.5
-	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Model: "m", Status: StatusOK, QuotaGroup: "gemini", Input: 1, CostUSD: &cost}); err != nil {
+	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Account: "main", Model: "m", Status: StatusOK, QuotaGroup: "gemini", Input: 1, CostUSD: &cost}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("requests = %+v, %v", rows, err)
+	}
+	if err := st.AttributeQuota(ctx, "main", "gemini-weekly", time.Now(), map[int64]float64{rows[0].ID: 0.2}); err != nil {
 		t.Fatal(err)
 	}
 	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.5 {
@@ -89,6 +168,9 @@ func TestDeleteKey(t *testing.T) {
 	}
 	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 1 {
 		t.Fatalf("totals = %+v, %v", totals, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h1"); err != nil || len(quotas) != 1 || quotas[0].Used != 0.2 {
+		t.Fatalf("quotas = %+v, %v", quotas, err)
 	}
 
 	if _, err := st.DeleteKey(ctx, "h1"); !errors.Is(err, ErrKeyActive) {
@@ -108,6 +190,9 @@ func TestDeleteKey(t *testing.T) {
 	}
 	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 0 {
 		t.Fatalf("totals after delete = %+v, %v", totals, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h1"); err != nil || len(quotas) != 0 {
+		t.Fatalf("quotas after delete = %+v, %v", quotas, err)
 	}
 	if rows, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10); err != nil || len(rows) != 1 {
 		t.Fatalf("requests after delete = %+v, %v (they stay)", rows, err)
@@ -296,8 +381,11 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 			quota_group   TEXT NOT NULL,
 			quota_used    REAL
 		);
-		INSERT INTO requests (at, key_hash, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish, duration_ms, input, cached, output, reasoning, quota_group)
-			VALUES (1000, 'h1', 'alice', 'main', 'm', 'm', 'chat', 0, 'fresh', '', 'ok', '', 'stop', 100, 10, 0, 5, 0, 'gemini');
+		INSERT INTO requests (at, key_hash, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish, duration_ms, input, cached, output, reasoning, quota_group, quota_used)
+			VALUES
+				(1000, 'h1', 'alice', 'main', 'm', 'm', 'chat', 0, 'fresh', '', 'ok', '', 'stop', 100, 10, 0, 5, 0, 'gemini', 0.15),
+				(2000, 'h1', 'alice', 'main', 'm', 'm', 'chat', 0, 'fresh', '', 'ok', '', 'stop', 100, 10, 0, 5, 0, 'gemini', 0.10),
+				(3000, 'gone', 'old', 'main', 'm', 'm', 'chat', 0, 'fresh', '', 'ok', '', 'stop', 100, 10, 0, 5, 0, 'gemini', 0.50);
 	`)
 	rawDB.Close()
 	if err != nil {
@@ -308,7 +396,6 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
 	ctx := context.Background()
 
 	accounts, err := st.Accounts(ctx)
@@ -320,10 +407,25 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 		t.Fatalf("keys after upgrade = %+v, %v", keys, err)
 	}
 	reqs, err := st.Requests(ctx, RequestFilter{}, 0, 10)
-	if err != nil || len(reqs) != 1 || reqs[0].Effort != "" || reqs[0].QuotaSkip != "" {
+	if err != nil || len(reqs) != 3 || reqs[0].Effort != "" || reqs[0].QuotaSkip != "" {
 		t.Fatalf("requests after upgrade = %+v, %v", reqs, err)
 	}
 	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 0 {
 		t.Fatalf("key_totals after upgrade = %+v, %v", totals, err)
+	}
+	wantQuotas := []KeyQuota{{KeyHash: "h1", Account: "main", Group: "gemini", Used: 0.25}}
+	if quotas, err := st.KeyQuotas(ctx, ""); err != nil || !reflect.DeepEqual(quotas, wantQuotas) {
+		t.Fatalf("key_quota after upgrade = %+v, %v; want %+v", quotas, err, wantQuotas)
+	}
+	st.Close()
+
+	// Reopening must not re-run the one-time backfill.
+	st2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	if quotas, err := st2.KeyQuotas(ctx, ""); err != nil || !reflect.DeepEqual(quotas, wantQuotas) {
+		t.Fatalf("key_quota after reopen = %+v, %v; want %+v", quotas, err, wantQuotas)
 	}
 }

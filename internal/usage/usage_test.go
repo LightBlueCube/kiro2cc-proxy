@@ -146,13 +146,24 @@ func TestRecordAndAttribute(t *testing.T) {
 		t.Fatal("priced models are wrong")
 	}
 
-	// Spend never resets: pruning every request keeps it.
+	// Spend and key_quota never reset: pruning every request keeps them.
 	if err := st.Prune(ctx, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	spends, err := budget.Spends(ctx, "")
 	if err != nil || math.Abs(spends["k"]["gemini"]-0.007) > 1e-9 || math.Abs(spends["k2"]["gemini"]-0.001) > 1e-9 {
 		t.Fatalf("after pruning, spends = %v, %v", spends, err)
+	}
+	quotas, err := st.KeyQuotas(ctx, "")
+	if err != nil || len(quotas) != 2 {
+		t.Fatalf("after pruning, key quotas = %+v, %v", quotas, err)
+	}
+	quotaMap := map[string]float64{}
+	for _, q := range quotas {
+		quotaMap[q.KeyHash+" "+q.Account+" "+q.Group] = q.Used
+	}
+	if math.Abs(quotaMap["k a gemini"]-0.07) > 1e-9 || math.Abs(quotaMap["k2 a gemini"]-0.01) > 1e-9 {
+		t.Fatalf("after pruning, key quotas = %+v", quotas)
 	}
 }
 

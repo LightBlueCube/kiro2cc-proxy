@@ -58,12 +58,43 @@ type keyView struct {
 	MaxWorkers *int     `json:"max_workers"`
 	// LimitTotal, Limits, and Spent are list-price USD; Limits and Spent
 	// are by quota group.
-	LimitTotal *float64           `json:"limit_total"`
-	Limits     map[string]float64 `json:"limits"`
-	Spent      map[string]float64 `json:"spent"`
-	Totals     keyTotalsView      `json:"totals"`
-	CreatedAt  time.Time          `json:"created_at"`
-	RevokedAt  *time.Time         `json:"revoked_at"`
+	LimitTotal *float64                `json:"limit_total"`
+	Limits     map[string]float64      `json:"limits"`
+	Spent      map[string]float64      `json:"spent"`
+	Quota      map[string]keyQuotaView `json:"quota"`
+	Totals     keyTotalsView           `json:"totals"`
+	CreatedAt  time.Time               `json:"created_at"`
+	RevokedAt  *time.Time              `json:"revoked_at"`
+}
+
+// keyQuotaView totals a key's attributed weekly-quota shares in one quota
+// group since the key was created, in all and by account.
+type keyQuotaView struct {
+	Used     float64            `json:"used"`
+	Accounts []accountQuotaView `json:"accounts"`
+}
+
+type accountQuotaView struct {
+	Account string  `json:"account"`
+	Used    float64 `json:"used"`
+}
+
+// keyQuotasByHash groups attributed quota by key hash and quota group,
+// keeping the query order (largest account share first).
+func keyQuotasByHash(quotas []store.KeyQuota) map[string]map[string]keyQuotaView {
+	out := map[string]map[string]keyQuotaView{}
+	for _, q := range quotas {
+		byGroup := out[q.KeyHash]
+		if byGroup == nil {
+			byGroup = map[string]keyQuotaView{}
+			out[q.KeyHash] = byGroup
+		}
+		v := byGroup[q.Group]
+		v.Used += q.Used
+		v.Accounts = append(v.Accounts, accountQuotaView{Account: q.Account, Used: q.Used})
+		byGroup[q.Group] = v
+	}
+	return out
 }
 
 // keyTotalsView counts a key's successful requests and their tokens since
@@ -102,10 +133,10 @@ type keysView struct {
 	Groups []string `json:"groups"`
 }
 
-func buildKeyView(k store.Key, spent map[string]float64, totals keyTotalsView) keyView {
+func buildKeyView(k store.Key, spent map[string]float64, totals keyTotalsView, quota map[string]keyQuotaView) keyView {
 	v := keyView{
 		Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers,
-		LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spent, Totals: totals, CreatedAt: k.CreatedAt,
+		LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spent, Quota: quota, Totals: totals, CreatedAt: k.CreatedAt,
 	}
 	if v.Models == nil {
 		v.Models = []string{}
@@ -115,6 +146,9 @@ func buildKeyView(k store.Key, spent map[string]float64, totals keyTotalsView) k
 	}
 	if v.Spent == nil {
 		v.Spent = map[string]float64{}
+	}
+	if v.Quota == nil {
+		v.Quota = map[string]keyQuotaView{}
 	}
 	if v.Totals.Models == nil {
 		v.Totals.Models = []modelTotalView{}
@@ -142,10 +176,16 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "key totals", err)
 		return
 	}
+	quotas, err := h.control.KeyQuotas(r.Context())
+	if err != nil {
+		h.internalError(w, "key quota", err)
+		return
+	}
 	byHash := keyTotalsByHash(totals)
+	quotaByHash := keyQuotasByHash(quotas)
 	out := keysView{Keys: []keyView{}, Groups: usage.Groups}
 	for _, k := range keys {
-		out.Keys = append(out.Keys, buildKeyView(k, spends[k.Hash], byHash[k.Hash]))
+		out.Keys = append(out.Keys, buildKeyView(k, spends[k.Hash], byHash[k.Hash], quotaByHash[k.Hash]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -169,8 +209,14 @@ func (h *Handler) userKey(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "key totals", err)
 		return
 	}
+	quotas, err := h.control.KeyQuotaFor(r.Context(), k.Hash)
+	if err != nil {
+		h.internalError(w, "key quota", err)
+		return
+	}
 	byHash := keyTotalsByHash(totals)
-	v := buildKeyView(k, spent, byHash[k.Hash])
+	quotaByHash := keyQuotasByHash(quotas)
+	v := buildKeyView(k, spent, byHash[k.Hash], quotaByHash[k.Hash])
 	v.Note = ""
 	writeJSON(w, http.StatusOK, userKeyView{Key: v, Groups: usage.Groups})
 }

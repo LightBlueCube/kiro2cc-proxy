@@ -285,16 +285,34 @@ func TestChangesNeedCSRFAndSameOrigin(t *testing.T) {
 	if totals := list.Keys[0].Totals; totals.Requests != 0 || totals.Models == nil {
 		t.Fatalf("totals of a new key = %+v", totals)
 	}
+	if list.Keys[0].Quota == nil || len(list.Keys[0].Quota) != 0 {
+		t.Fatalf("quota of a new key = %+v", list.Keys[0].Quota)
+	}
 
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
 	for _, req := range []store.Request{
-		{KeyHash: hash, Model: "small", Status: store.StatusOK, Input: 10, Output: 1},
-		{KeyHash: hash, Model: "big", Status: store.StatusOK, Input: 100, Output: 20},
-		{KeyHash: hash, Model: "small", Status: store.StatusOK, Input: 5, Output: 2},
+		{At: now, KeyHash: hash, Account: "a1", QuotaGroup: "gemini", Model: "small", Status: store.StatusOK, Input: 10, Output: 1},
+		{At: now, KeyHash: hash, Account: "a2", QuotaGroup: "gemini", Model: "big", Status: store.StatusOK, Input: 100, Output: 20},
+		{At: now, KeyHash: hash, Account: "a1", QuotaGroup: "claude-gpt", Model: "small", Status: store.StatusOK, Input: 5, Output: 2},
 	} {
-		req.At = time.Now()
-		if err := e.st.AddRequest(context.Background(), req); err != nil {
+		if err := e.st.AddRequest(ctx, req); err != nil {
 			t.Fatal(err)
 		}
+	}
+	reqs, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: hash}, 0, 10)
+	if err != nil || len(reqs) != 3 {
+		t.Fatalf("requests = %+v, %v", reqs, err)
+	}
+	// reqs are newest first: [a1/claude-gpt, a2/gemini, a1/gemini].
+	if err := e.st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[2].ID: 0.12}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.AttributeQuota(ctx, "a2", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[1].ID: 0.28}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.AttributeQuota(ctx, "a1", "3p-weekly", now.Add(time.Minute), map[int64]float64{reqs[0].ID: 0.05}); err != nil {
+		t.Fatal(err)
 	}
 	r = c.do("GET", "/admin/api/keys", nil, nil)
 	json.Unmarshal([]byte(r.raw), &list)
@@ -304,6 +322,13 @@ func TestChangesNeedCSRFAndSameOrigin(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(list.Keys[0].Totals, wantTotals) {
 		t.Fatalf("totals = %+v, want %+v", list.Keys[0].Totals, wantTotals)
+	}
+	wantQuota := map[string]keyQuotaView{
+		"gemini":     {Used: 0.40, Accounts: []accountQuotaView{{Account: "a2", Used: 0.28}, {Account: "a1", Used: 0.12}}},
+		"claude-gpt": {Used: 0.05, Accounts: []accountQuotaView{{Account: "a1", Used: 0.05}}},
+	}
+	if !reflect.DeepEqual(list.Keys[0].Quota, wantQuota) {
+		t.Fatalf("quota = %+v, want %+v", list.Keys[0].Quota, wantQuota)
 	}
 
 	if r := c.do("DELETE", "/admin/api/keys/"+hash, nil, nil); r.status != http.StatusBadRequest {
@@ -896,14 +921,26 @@ func TestUserKeyUsageAndMetadata(t *testing.T) {
 	bobHash := hex.EncodeToString(bobSum[:])
 
 	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
 	costA, costB := 1.25, 2.5
 	for _, req := range []store.Request{
-		{At: time.Now(), KeyHash: aliceHash, KeyName: "alice", Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Cached: 40, Output: 10, CostUSD: &costA},
-		{At: time.Now(), KeyHash: bobHash, KeyName: "bob", Account: "other", QuotaGroup: "gemini", Model: "claude-opus-5-5", Status: store.StatusOK, Input: 500, Output: 50, CostUSD: &costB},
+		{At: now, KeyHash: aliceHash, KeyName: "alice", Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Cached: 40, Output: 10, CostUSD: &costA},
+		{At: now, KeyHash: bobHash, KeyName: "bob", Account: "other", QuotaGroup: "gemini", Model: "claude-opus-5-5", Status: store.StatusOK, Input: 500, Output: 50, CostUSD: &costB},
 	} {
 		if err := e.st.AddRequest(ctx, req); err != nil {
 			t.Fatal(err)
 		}
+	}
+	reqs, err := e.st.Requests(ctx, store.RequestFilter{}, 0, 10)
+	if err != nil || len(reqs) != 2 {
+		t.Fatalf("requests = %+v, %v", reqs, err)
+	}
+	// reqs are newest first: [bob, alice].
+	if err := e.st.AttributeQuota(ctx, "main", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[1].ID: 0.15}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.AttributeQuota(ctx, "other", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[0].ID: 0.35}); err != nil {
+		t.Fatal(err)
 	}
 
 	user := e.client("203.0.113.9")
@@ -926,8 +963,11 @@ func TestUserKeyUsageAndMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.raw), &kv); err != nil {
 		t.Fatal(err)
 	}
+	wantUserQuota := map[string]keyQuotaView{
+		"gemini": {Used: 0.15, Accounts: []accountQuotaView{{Account: "main", Used: 0.15}}},
+	}
 	if kv.Key.Name != "alice" || kv.Key.Hash != aliceHash || kv.Key.Note != "" || kv.Key.MaxWorkers == nil || *kv.Key.MaxWorkers != 3 ||
-		kv.Key.LimitTotal == nil || *kv.Key.LimitTotal != 15.0 || kv.Key.Spent["gemini"] != 1.25 || kv.Key.Totals.Requests != 1 || kv.Key.RevokedAt != nil {
+		kv.Key.LimitTotal == nil || *kv.Key.LimitTotal != 15.0 || kv.Key.Spent["gemini"] != 1.25 || !reflect.DeepEqual(kv.Key.Quota, wantUserQuota) || kv.Key.Totals.Requests != 1 || kv.Key.RevokedAt != nil {
 		t.Fatalf("user key view = %+v", kv)
 	}
 

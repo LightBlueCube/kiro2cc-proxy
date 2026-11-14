@@ -21,7 +21,8 @@ var migrations = []string{
 	// requests keep the key's name for display after the key is deleted.
 	// key_usage keeps each key's list-price spend after old requests are
 	// pruned; key limits count it. key_totals likewise keeps each key's
-	// successful requests and tokens by model.
+	// successful requests and tokens by model, and key_quota keeps each
+	// key's attributed weekly-quota shares by account and quota group.
 	`CREATE TABLE settings (
 		name  TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
@@ -123,6 +124,13 @@ var migrations = []string{
 		input    INTEGER NOT NULL DEFAULT 0,
 		output   INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (key_hash, model)
+	);
+	CREATE TABLE key_quota (
+		key_hash TEXT NOT NULL,
+		account  TEXT NOT NULL,
+		grp      TEXT NOT NULL,
+		used     REAL NOT NULL DEFAULT 0,
+		PRIMARY KEY (key_hash, account, grp)
 	);`,
 }
 
@@ -170,6 +178,11 @@ func (s *Store) migrate() error {
 	}
 	defer tx.Rollback()
 
+	var hadKeyQuota int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'key_quota'`).Scan(&hadKeyQuota); err != nil {
+		return err
+	}
+
 	for i, m := range migrations {
 		if err := applySchema(tx, m); err != nil {
 			return fmt.Errorf("migration %d: %w", i+1, err)
@@ -182,6 +195,15 @@ func (s *Store) migrate() error {
 		`UPDATE api_keys SET limits = '{}' WHERE limits = ''`,
 	} {
 		if _, err := tx.Exec(initSQL); err != nil {
+			return err
+		}
+	}
+	if hadKeyQuota == 0 {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO key_quota (key_hash, account, grp, used)
+			SELECT key_hash, account, quota_group, SUM(quota_used)
+			FROM requests
+			WHERE quota_used > 0 AND account != '' AND quota_group != '' AND key_hash IN (SELECT hash FROM api_keys)
+			GROUP BY key_hash, account, quota_group`); err != nil {
 			return err
 		}
 	}
