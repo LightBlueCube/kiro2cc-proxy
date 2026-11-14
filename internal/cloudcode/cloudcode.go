@@ -157,7 +157,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Error("cloud code request failed", "account", name, "path", r.URL.Path, "err", err)
 			if session := callSession(r); session != "" {
-				ap.onModelCall(session, &CallError{Code: http.StatusBadGateway, Message: "Cloud Code request failed: " + err.Error()})
+				ap.onModelCall(session, &CallError{Code: http.StatusBadGateway, Message: "upstream request failed"})
 			}
 			http.Error(w, "agyrelay: Cloud Code upstream request failed", http.StatusBadGateway)
 		},

@@ -340,7 +340,7 @@ func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, modelID, g
 	}
 	if !g.budget.Priced(modelID) {
 		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf(
-			"this API key has a spending limit, and model %q has no price in agyrelay; ask the agyrelay admin to add its price (Settings → API list prices)", modelID)}
+			"this API key has a spending limit, and model %q has no configured price; ask the administrator to add its price", modelID)}
 	}
 	spent, err := g.budget.Spent(ctx, caller.KeyHash)
 	if err != nil {
@@ -390,13 +390,13 @@ func (g *Gateway) checkContextWindow(req conv.Request, t *transcript, modelID st
 	estimate, err := limits.prompts.estimate(modelID, req, t)
 	if err != nil {
 		g.log.Error("prompt token count failed", "model", modelID, "err", err)
-		return 0, &conv.Error{Kind: conv.ErrUnavailable, Message: "could not count the prompt's tokens: " + err.Error()}
+		return 0, &conv.Error{Kind: conv.ErrUnavailable, Message: "could not count the prompt's tokens"}
 	}
 	if estimate <= window {
 		return estimate, nil
 	}
 	return estimate, &conv.Error{Kind: conv.ErrContextLength, Message: fmt.Sprintf(
-		"This model's maximum context length is %d tokens. However, your messages resulted in about %d tokens (agyrelay's estimate). Please reduce the length of the messages.",
+		"This model's maximum context length is %d tokens. However, your messages resulted in about %d tokens (estimated). Please reduce the length of the messages.",
 		window, estimate)}
 }
 
@@ -562,14 +562,15 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 	failure := at.account.ModelFailure(at.sess.id)
 	at.account.ForgetModelFailure(at.sess.id)
 	if outcome.Err != nil {
+		g.log.Warn("turn failed", "account", account, "session", at.sess.id, "err", outcome.Err)
 		g.forget(at.account.Name(), at.sess.id)
 		if agy.IsAuthError(outcome.Err) {
 			at.account.Disable(outcome.Err)
 		}
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: outcome.Err.Error()}, account: account, retry: true}
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "upstream request failed"}, account: account, retry: true}
 	}
 	if outcome.StopReason == agy.StopCancelled {
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "the Antigravity turn was cancelled by a newer request for this conversation"}}
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "request cancelled by a newer request for this conversation"}}
 	}
 
 	// agy ends a turn whose model call failed for good with end_turn and
