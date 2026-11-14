@@ -340,9 +340,14 @@ func (a *Account) unavailableLocked(group string) error {
 // Cool marks group exhausted on this account until the given time.
 func (a *Account) Cool(group string, until time.Time) {
 	a.mu.Lock()
-	a.cooldown[group] = until
+	wasCooling := time.Now().Before(a.cooldown[group])
+	if until.After(a.cooldown[group]) {
+		a.cooldown[group] = until
+	}
 	a.mu.Unlock()
-	a.pool.log.Warn("account quota cooling down", "account", a.name, "group", group, "until", until)
+	if !wasCooling {
+		a.pool.log.Warn("account quota cooling down", "account", a.name, "group", group, "until", until)
+	}
 }
 
 // ModelFailure is a generation call agy made for a session that failed.
