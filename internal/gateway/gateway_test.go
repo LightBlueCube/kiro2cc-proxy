@@ -922,7 +922,7 @@ func userPreferring(t *testing.T, p *pool.Pool, account string) string {
 	t.Helper()
 	for i := range 100 {
 		candidate := fmt.Sprintf("user%d", i)
-		picked, err := p.Pick(candidate, "gemini", nil)
+		picked, err := p.Pick(candidate, "gemini", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1663,8 +1663,20 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 		t.Fatalf("first account = %s, want acct1 (higher priority)", got.Account)
 	}
 
-	// Park a tool call on acct1 so its 1 turn slot is full; the next
-	// new conversation goes to acct0.
+	// acct1 now holds 1 idle worker (reaching TurnsPerAccount=1) while acct0
+	// is empty, so the next conversation goes to acct0 instead of evicting
+	// acct1's idle worker.
+	second := h.complete(ctx, "dave", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("second")}})
+	if second.err != nil || len(h.gw.Sessions()) != 2 {
+		t.Fatalf("second = %+v, sessions = %+v; want 2 live sessions across both accounts", second.err, h.gw.Sessions())
+	}
+	if got := h.records.all(t, 2)[1]; got.Account != "acct0" {
+		t.Fatalf("second account = %s, want acct0 (acct1 full with idle worker)", got.Account)
+	}
+
+	// Both accounts are now full (1 idle worker each). Park a tool call:
+	// acct1 wins by priority (evicting its idle worker), and while acct1's
+	// slot is busy the next conversation goes to acct0.
 	tools := []conv.ToolSpec{readTool}
 	parked := h.complete(ctx, "bob", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(`@tool read {}`)}, Tools: tools})
 	if parked.err != nil || parked.finish != conv.FinishToolCalls {
@@ -1682,9 +1694,9 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	if unparked.err != nil {
 		t.Fatalf("unparked = %+v", unparked.err)
 	}
-	recs := h.records.all(t, 4)
-	if recs[1].Account != "acct1" || recs[2].Account != "acct0" || recs[3].Account != "acct1" {
-		t.Fatalf("accounts = %s, %s, %s; want acct1, acct0, acct1", recs[1].Account, recs[2].Account, recs[3].Account)
+	recs := h.records.all(t, 5)
+	if recs[2].Account != "acct1" || recs[3].Account != "acct0" || recs[4].Account != "acct1" {
+		t.Fatalf("accounts = %s, %s, %s; want acct1, acct0, acct1", recs[2].Account, recs[3].Account, recs[4].Account)
 	}
 
 	// Limit acct1 to gemini-3.8-flash: claude skips acct1 and runs on acct0.
@@ -1692,7 +1704,7 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	if r := h.complete(ctx, alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("claude")}}); r.err != nil {
 		t.Fatalf("claude = %+v", r.err)
 	}
-	if got := h.records.all(t, 5)[4]; got.Account != "acct0" {
+	if got := h.records.all(t, 6)[5]; got.Account != "acct0" {
 		t.Fatalf("claude account = %s, want acct0", got.Account)
 	}
 
@@ -1706,7 +1718,7 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	if cont.err != nil {
 		t.Fatalf("continue = %+v", cont.err)
 	}
-	if got := h.records.all(t, 6)[5]; got.Account != "acct0" || got.Mode != ModeReplay {
+	if got := h.records.all(t, 7)[6]; got.Account != "acct0" || got.Mode != ModeReplay {
 		t.Fatalf("disallowed warm = %s %s, want acct0 replay", got.Account, got.Mode)
 	}
 
@@ -1825,6 +1837,26 @@ func TestWorkerLimitsAndIdleEviction(t *testing.T) {
 	}
 	if carol := h.complete(ctx, "carol", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}); carol.err != nil || len(h.gw.Sessions()) != 1 {
 		t.Fatalf("carol after bob finished = %+v, sessions=%+v", carol.err, h.gw.Sessions())
+	}
+
+	// Per-account worker limit (TurnsPerAccount=1 across 2 accounts): new
+	// conversations from one user fill both accounts before evicting an idle
+	// worker, and once all accounts are full they rotate by oldest idle.
+	h.gw.SetMaxWorkers(0)
+	h.p.SetTurnsPerAccount(1)
+	s1 := h.complete(ctx, "dave", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("s1")}})
+	s2 := h.complete(ctx, "dave", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("s2")}})
+	if s1.err != nil || s2.err != nil || len(h.gw.Sessions()) != 2 {
+		t.Fatalf("s1=%+v s2=%+v sessions=%+v; want 2 idle sessions across 2 accounts", s1.err, s2.err, h.gw.Sessions())
+	}
+	s3 := h.complete(ctx, "dave", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("s3")}})
+	s4 := h.complete(ctx, "dave", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("s4")}})
+	if s3.err != nil || s4.err != nil || len(h.gw.Sessions()) != 2 {
+		t.Fatalf("s3=%+v s4=%+v sessions=%+v; want 2 sessions after evicting oldest on each account", s3.err, s4.err, h.gw.Sessions())
+	}
+	allRecs := h.records.all(t, 15)
+	if allRecs[11].Account == allRecs[12].Account || allRecs[13].Account != allRecs[11].Account || allRecs[14].Account != allRecs[12].Account {
+		t.Fatalf("dave accounts = %s, %s, %s, %s; want fill both then rotate", allRecs[11].Account, allRecs[12].Account, allRecs[13].Account, allRecs[14].Account)
 	}
 }
 

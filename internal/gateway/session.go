@@ -268,7 +268,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 	var lastErr error
 	var lacking []string
 	for {
-		account, err := g.pool.Pick(r.user, r.group, r.exclude)
+		account, err := g.pickAccount(r)
 		if err != nil {
 			// Catalogs that sessions just reported may show no account
 			// has the model, as the fallback list had promised.
@@ -324,6 +324,29 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 		r.exclude[account.Name()] = true
 		lastErr = err
 	}
+}
+
+func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	idle := make(map[string]pool.IdleSessions, len(g.sessions))
+	for _, sess := range g.sessions {
+		if sess.turn != nil {
+			continue
+		}
+		if !sess.proc.Alive() || !sess.proc.HasSession(sess.id) {
+			g.dropSessionLocked(sess)
+			continue
+		}
+		name := sess.account.Name()
+		cur := idle[name]
+		cur.Count++
+		if cur.Count == 1 || sess.lastUsed.Before(cur.Oldest) {
+			cur.Oldest = sess.lastUsed
+		}
+		idle[name] = cur
+	}
+	return g.pool.Pick(r.user, r.group, r.exclude, idle)
 }
 
 // openSession creates a session on account and claims it.
