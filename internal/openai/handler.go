@@ -18,12 +18,17 @@ const (
 	// heartbeat keeps proxies and clients from timing out while agy works
 	// silently; an SSE comment line is ignored by clients.
 	heartbeat = 15 * time.Second
+	// unlimitedBillingUSD is the conventional hard_limit_usd reported by
+	// OpenAI-compatible relays for API keys without a spending cap.
+	unlimitedBillingUSD = 100000000.0
+	centsPerUSD         = 100.0
 )
 
 // Backend runs completions.
 type Backend interface {
 	Complete(ctx context.Context, caller conv.Caller, req conv.Request) <-chan conv.Event
 	Models() []conv.ModelInfo
+	Spent(ctx context.Context, keyHash string) (float64, error)
 }
 
 type Handler struct {
@@ -47,6 +52,47 @@ func (h *Handler) Models(w http.ResponseWriter, r *http.Request, caller conv.Cal
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+func callerLimitUSD(caller conv.Caller) float64 {
+	if caller.LimitTotal != nil {
+		return *caller.LimitTotal
+	}
+	if len(caller.Limits) > 0 {
+		total := 0.0
+		for _, limit := range caller.Limits {
+			total += limit
+		}
+		return total
+	}
+	return unlimitedBillingUSD
+}
+
+// BillingSubscription serves GET [/v1]/dashboard/billing/subscription.
+func (h *Handler) BillingSubscription(w http.ResponseWriter, _ *http.Request, caller conv.Caller) {
+	limit := callerLimitUSD(caller)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object":                "billing_subscription",
+		"has_payment_method":    true,
+		"soft_limit_usd":        limit,
+		"hard_limit_usd":        limit,
+		"system_hard_limit_usd": limit,
+		"access_until":          0,
+	})
+}
+
+// BillingUsage serves GET [/v1]/dashboard/billing/usage. total_usage is
+// reported in cents (0.01 USD), matching the legacy OpenAI dashboard API.
+func (h *Handler) BillingUsage(w http.ResponseWriter, r *http.Request, caller conv.Caller) {
+	spent, err := h.backend.Spent(r.Context(), caller.KeyHash)
+	if err != nil {
+		WriteError(w, &conv.Error{Kind: conv.ErrUnavailable, Message: "could not read API key usage"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object":      "list",
+		"total_usage": spent * centsPerUSD,
+	})
 }
 
 // decodeBody reads a JSON request body into v, answering 400 on failure.

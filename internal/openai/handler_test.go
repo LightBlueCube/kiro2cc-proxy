@@ -15,6 +15,7 @@ import (
 type stubBackend struct {
 	got    conv.Request
 	events []conv.Event
+	spent  float64
 }
 
 func (b *stubBackend) Complete(_ context.Context, _ conv.Caller, req conv.Request) <-chan conv.Event {
@@ -27,7 +28,8 @@ func (b *stubBackend) Complete(_ context.Context, _ conv.Caller, req conv.Reques
 	return out
 }
 
-func (b *stubBackend) Models() []conv.ModelInfo { return []conv.ModelInfo{{ID: "m"}} }
+func (b *stubBackend) Models() []conv.ModelInfo                           { return []conv.ModelInfo{{ID: "m"}} }
+func (b *stubBackend) Spent(_ context.Context, _ string) (float64, error) { return b.spent, nil }
 
 func post(t *testing.T, serve func(http.ResponseWriter, *http.Request, conv.Caller), body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -298,5 +300,41 @@ func TestResponsesStreamFailureAfterOutput(t *testing.T) {
 	response := last.data["response"].(map[string]any)
 	if last.name != "response.failed" || response["status"] != "failed" || response["error"].(map[string]any)["message"] != "agy exited" {
 		t.Fatalf("last = %v", last)
+	}
+}
+
+func TestBillingSubscriptionAndUsage(t *testing.T) {
+	h := NewHandler(&stubBackend{spent: 1.25})
+	totalLimit := 50.0
+	cases := []struct {
+		caller conv.Caller
+		want   float64
+	}{
+		{caller: conv.Caller{Name: "unlimited"}, want: unlimitedBillingUSD},
+		{caller: conv.Caller{Name: "total", LimitTotal: &totalLimit}, want: 50},
+		{caller: conv.Caller{Name: "groups", Limits: map[string]float64{"gemini": 10, "claude-gpt": 15}}, want: 25},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		h.BillingSubscription(rec, httptest.NewRequest(http.MethodGet, "/v1/dashboard/billing/subscription", nil), tc.caller)
+		var sub map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &sub); err != nil {
+			t.Fatal(err)
+		}
+		if sub["object"] != "billing_subscription" || sub["has_payment_method"] != true ||
+			sub["soft_limit_usd"] != tc.want || sub["hard_limit_usd"] != tc.want || sub["system_hard_limit_usd"] != tc.want ||
+			sub["access_until"] != float64(0) {
+			t.Fatalf("%s subscription = %v", tc.caller.Name, sub)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	h.BillingUsage(rec, httptest.NewRequest(http.MethodGet, "/v1/dashboard/billing/usage?start_date=2026-11-01&end_date=2026-11-15", nil), conv.Caller{KeyHash: "h1"})
+	var usage map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &usage); err != nil {
+		t.Fatal(err)
+	}
+	if usage["object"] != "list" || usage["total_usage"] != float64(125) {
+		t.Fatalf("usage = %v", usage)
 	}
 }

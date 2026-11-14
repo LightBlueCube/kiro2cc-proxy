@@ -42,21 +42,20 @@ var apiKeyLimits = guard.Config{PerClient: 20, Global: 500, Window: 10 * time.Mi
 
 func New(cfg Config) *Server {
 	s := &Server{keys: cfg.Keys, openai: cfg.OpenAI, limiter: guard.NewLimiter(apiKeyLimits), proxies: cfg.Proxies, mux: http.NewServeMux()}
-	s.mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		if caller, ok := s.authenticate(w, r); ok {
-			s.openai.Chat(w, r, caller)
-		}
-	})
-	s.mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) {
-		if caller, ok := s.authenticate(w, r); ok {
-			s.openai.Responses(w, r, caller)
-		}
-	})
-	s.mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if caller, ok := s.authenticate(w, r); ok {
-			s.openai.Models(w, r, caller)
-		}
-	})
+	handle := func(pattern string, fn func(http.ResponseWriter, *http.Request, conv.Caller)) {
+		s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			if caller, ok := s.authenticate(w, r); ok {
+				fn(w, r, caller)
+			}
+		})
+	}
+	handle("POST /v1/chat/completions", s.openai.Chat)
+	handle("POST /v1/responses", s.openai.Responses)
+	handle("GET /v1/models", s.openai.Models)
+	handle("GET /v1/dashboard/billing/subscription", s.openai.BillingSubscription)
+	handle("GET /dashboard/billing/subscription", s.openai.BillingSubscription)
+	handle("GET /v1/dashboard/billing/usage", s.openai.BillingUsage)
+	handle("GET /dashboard/billing/usage", s.openai.BillingUsage)
 	s.mux.HandleFunc("/{$}", func(http.ResponseWriter, *http.Request) {
 		panic(http.ErrAbortHandler)
 	})
