@@ -291,10 +291,16 @@
 
   "status.tool_calls": "The reply ended on tool calls; the turn waits for their results",
   "status.length": "The reply hit the output token limit",
+  "status.cancelled": "The client disconnected, or the turn was cancelled",
   "status.quota": "The account's quota ran out, after trying another account when there was one",
   "status.key_limit": "The API key hit its spend or worker limit",
+  "status.overloaded": "Upstream model capacity is temporarily exhausted",
   "status.unavailable": "No account was free, or an internal check failed",
   "status.forbidden": "The API key may not use this model",
+  "status.context_length": "The conversation exceeds the model's context window",
+  "status.invalid_request": "The request was rejected as invalid",
+  "status.unknown_model": "No account offers this model",
+  "status.upstream_error": "Antigravity or Cloud Code failed",
 
   "calls.title": "Calls",
   "calls.range": "Range",

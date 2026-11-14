@@ -360,6 +360,8 @@ func streamChat(w http.ResponseWriter, events <-chan conv.Event, meta chatMeta, 
 	})
 }
 
+const statusClientClosed = 499
+
 func statusFor(kind conv.ErrorKind) (int, string) {
 	switch kind {
 	case conv.ErrInvalidRequest:
@@ -381,6 +383,8 @@ func statusFor(kind conv.ErrorKind) (int, string) {
 		return http.StatusTooManyRequests, "insufficient_quota"
 	case conv.ErrOverloaded, conv.ErrUnavailable:
 		return http.StatusServiceUnavailable, "service_unavailable"
+	case conv.ErrCancelled:
+		return statusClientClosed, "request_cancelled"
 	}
 	return http.StatusBadGateway, "upstream_error"
 }

@@ -60,6 +60,10 @@ const (
 // StatusOK is the Status of a request that succeeded.
 const StatusOK = "ok"
 
+// StatusCancelled is the Status of a request whose client disconnected or
+// whose turn was cancelled.
+const StatusCancelled = "cancelled"
+
 const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip`
 
@@ -226,7 +230,7 @@ func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tz
 		return nil, fmt.Errorf("unknown grouping %q", by)
 	}
 	where, args := f.where()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+group+`, `+keyName+`, COUNT(*), SUM(status != 'ok'), SUM(input), SUM(cached), SUM(output), SUM(reasoning),
+	rows, err := s.db.QueryContext(ctx, `SELECT `+group+`, `+keyName+`, COUNT(*), SUM(status != 'ok' AND status != 'cancelled'), SUM(input), SUM(cached), SUM(output), SUM(reasoning),
 		COALESCE(SUM(cost_usd), 0), SUM(cost_usd IS NULL AND input + output > 0)
 		FROM requests`+where+` GROUP BY 1 ORDER BY 1`, args...)
 	if err != nil {

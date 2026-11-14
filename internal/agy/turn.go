@@ -349,8 +349,8 @@ func (t *Turn) settle(outcome Outcome) {
 	if t.closed {
 		return
 	}
-	if t.cancelled && outcome.Err == nil {
-		outcome.StopReason = StopCancelled
+	if t.cancelled {
+		outcome = Outcome{StopReason: StopCancelled}
 	}
 	t.closed = true
 	t.outcome = outcome

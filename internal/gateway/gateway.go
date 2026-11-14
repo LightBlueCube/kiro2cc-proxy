@@ -138,8 +138,9 @@ type activeTurn struct {
 	// started is when the prompt was launched.
 	started time.Time
 	// consuming is true while a response reads the turn's events.
-	consuming bool
-	finished  bool
+	consuming        bool
+	cancelledByAdmin bool
+	finished         bool
 	// baseSteps is a lower bound of the session's native steps at launch.
 	baseSteps int
 	// The turn's earlier responses reported the model calls before step
@@ -286,6 +287,9 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		return err
 	}
 	g.refreshUnreported(ctx)
+	if ctx.Err() != nil {
+		return &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}
+	}
 	offered := g.offered()
 	model, ok := lookupModel(offered, req.Model, req.Effort)
 	if !ok {
@@ -586,7 +590,13 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "upstream request failed"}, account: account, retry: true}
 	}
 	if outcome.StopReason == agy.StopCancelled {
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "request cancelled by a newer request for this conversation"}}
+		msg := "request cancelled by a newer request for this conversation"
+		g.mu.Lock()
+		if at.cancelledByAdmin {
+			msg = "turn cancelled by the administrator"
+		}
+		g.mu.Unlock()
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: msg}}
 	}
 
 	// agy ends a turn whose model call failed for good with end_turn and
@@ -598,23 +608,25 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 	}
 
 	if !release() {
-		return nil
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 	}
 	mark := g.record(at, r, &conv.Message{Role: conv.RoleAssistant, Text: text.String()}, at.endSteps)
 	if outcome.Usage != nil {
 		rest := minusUsage(usageFrom(outcome.Usage), at.reported)
 		if !w.send(conv.Event{Usage: &rest}) {
-			return nil
+			return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 		}
 	}
 	if !w.send(conv.Event{Anchor: mark}) {
-		return nil
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 	}
 	finish := conv.FinishStop
 	if outcome.StopReason == agy.StopMaxTokens {
 		finish = conv.FinishLength
 	}
-	w.send(conv.Event{Finish: finish})
+	if !w.send(conv.Event{Finish: finish}) {
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
+	}
 	return nil
 }
 
@@ -626,7 +638,7 @@ func (g *Gateway) abandon(at *activeTurn, r *run) *attemptFailure {
 	g.mu.Unlock()
 	at.turn.Cancel()
 	g.record(at, r, nil, 0)
-	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "client disconnected"}}
+	return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 }
 
 // park leaves the turn waiting for the client's tool results.
@@ -795,6 +807,8 @@ func (g *Gateway) countSteps(at *activeTurn) int {
 //	gpt-oss-120b: The input (183641 tokens) is longer than the model's context length (131072 tokens).
 var contextOverflow = regexp.MustCompile(`exceeds the maximum number of tokens allowed|exceeds the model's maximum context length|is longer than the model's context length`)
 
+const statusSiteOverloaded = 529
+
 // modelFailure maps the failed model call that ended the turn. Messages
 // pass through: clients recognize overflow by their text as well. A 429
 // that names a retry time is the account's quota: the account cools down
@@ -805,15 +819,20 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 	switch {
 	case failure.Code == http.StatusBadRequest && contextOverflow.MatchString(failure.Message):
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrContextLength, Message: failure.Message}, account: account}
+	case failure.Code == http.StatusBadRequest:
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message}, account: account}
 	case failure.Code == http.StatusTooManyRequests:
 		wait := time.Until(failure.Reset)
 		if wait <= 0 {
-			return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account}
+			return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account, retry: true}
 		}
 		at.account.Cool(r.group, failure.Reset)
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}, account: account, retry: true}
+	case failure.Code == http.StatusServiceUnavailable || failure.Code == statusSiteOverloaded:
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account, retry: true}
 	}
-	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, account: account}
+	retry := at.account.Available(r.group) != nil || failure.Code == http.StatusUnauthorized || failure.Code == http.StatusForbidden
+	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, account: account, retry: retry}
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if

@@ -57,7 +57,7 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 			return nil, &attemptFailure{err: limitErr}
 		}
 		if ctx.Err() != nil {
-			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
+			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 		}
 		g.log.Info("warm session unusable; replaying fresh", "session", snap.SessionID, "err", err)
 		return g.startFresh(ctx, r, ReplayWarmFailed)
@@ -315,7 +315,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			return nil, &attemptFailure{err: limitErr}
 		}
 		if ctx.Err() != nil {
-			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
+			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 		}
 		if agy.IsAuthError(err) {
 			account.Disable(err)

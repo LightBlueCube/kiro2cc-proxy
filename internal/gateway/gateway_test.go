@@ -1227,11 +1227,38 @@ func TestDisconnectCancelsTurn(t *testing.T) {
 	}
 	cancel()
 	<-done
+	if rec := h.records.all(t, 1)[0]; rec.Err == nil || rec.Err.Kind != conv.ErrCancelled || rec.Err.Message != "client disconnected" {
+		t.Fatalf("disconnect record = %+v, want ErrCancelled client disconnected", rec)
+	}
 	for len(h.requests("session/cancel")) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("session/cancel never sent")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestAdminCancelTurnReportsCancelled(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	done := make(chan result, 1)
+	go func() {
+		done <- h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}})
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(h.requests("session/prompt")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("prompt never sent")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	sessionID := h.requests("session/prompt")[0].Params.SessionID
+	if err := h.gw.CancelTurn("acct0", sessionID); err != nil {
+		t.Fatalf("CancelTurn = %v", err)
+	}
+	r := <-done
+	if r.err == nil || r.err.Kind != conv.ErrCancelled || r.err.Message != "turn cancelled by the administrator" {
+		t.Fatalf("admin cancel = %+v, want ErrCancelled by administrator", r)
 	}
 }
 

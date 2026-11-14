@@ -114,6 +114,8 @@ const (
 	ErrKeyLimit
 	ErrOverloaded
 	ErrUnavailable
+	// ErrCancelled means the client disconnected or the turn was cancelled.
+	ErrCancelled
 	ErrUpstream
 )
 
