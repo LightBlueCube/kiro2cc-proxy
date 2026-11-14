@@ -234,29 +234,34 @@ func (p *Pool) accountLocked(name string) *Account {
 	return nil
 }
 
+// IdleSessions describes an account's idle workers in agy.
+type IdleSessions struct {
+	Count  int
+	Oldest time.Time
+}
+
 // Pick reserves a turn slot on the best account for user and the model's
-// quota group, skipping excluded accounts. Accounts are ranked by priority
-// (higher first) and then by rendezvous hash of (user, account), so a user
-// stays on one account among equals while it is healthy and moves to the
-// same fallback when it is not. The caller must Release the slot.
-func (p *Pool) Pick(user, group string, exclude map[string]bool) (*Account, error) {
+// quota group, skipping excluded accounts. It first tries accounts with a
+// free worker slot (busy + idle < TurnsPerAccount), ranked by priority and
+// rendezvous hash of (user, account), and only falls back to accounts that
+// must evict an idle worker (oldest idle session first within the same
+// priority) when every eligible account is full. The caller must Release
+// the slot.
+func (p *Pool) Pick(user, group string, exclude map[string]bool, idle map[string]IdleSessions) (*Account, error) {
 	ranked := p.Accounts()
 	slices.SortFunc(ranked, func(a, b *Account) int {
-		pa, pb := a.Priority(), b.Priority()
-		switch {
-		case pa > pb:
-			return -1
-		case pa < pb:
-			return 1
+		return compareAccounts(user, a, b, nil)
+	})
+	for _, a := range ranked {
+		if exclude[a.name] {
+			continue
 		}
-		ra, rb := rendezvous(user, a.name), rendezvous(user, b.name)
-		switch {
-		case ra > rb:
-			return -1
-		case ra < rb:
-			return 1
+		if err := a.tryAcquire(group, idle[a.name].Count); err == nil {
+			return a, nil
 		}
-		return strings.Compare(a.name, b.name)
+	}
+	slices.SortFunc(ranked, func(a, b *Account) int {
+		return compareAccounts(user, a, b, idle)
 	})
 	var reasons []string
 	for _, a := range ranked {
@@ -273,6 +278,39 @@ func (p *Pool) Pick(user, group string, exclude map[string]bool) (*Account, erro
 		return nil, ErrNoAccount
 	}
 	return nil, fmt.Errorf("%w (%s)", ErrNoAccount, strings.Join(reasons, "; "))
+}
+
+func compareAccounts(user string, a, b *Account, idle map[string]IdleSessions) int {
+	pa, pb := a.Priority(), b.Priority()
+	switch {
+	case pa > pb:
+		return -1
+	case pa < pb:
+		return 1
+	}
+	if idle != nil {
+		ia, ib := idle[a.name], idle[b.name]
+		if (ia.Count > 0) != (ib.Count > 0) {
+			if ia.Count > 0 {
+				return -1
+			}
+			return 1
+		}
+		if ia.Count > 0 && !ia.Oldest.Equal(ib.Oldest) {
+			if ia.Oldest.Before(ib.Oldest) {
+				return -1
+			}
+			return 1
+		}
+	}
+	ra, rb := rendezvous(user, a.name), rendezvous(user, b.name)
+	switch {
+	case ra > rb:
+		return -1
+	case ra < rb:
+		return 1
+	}
+	return strings.Compare(a.name, b.name)
 }
 
 func rendezvous(user, account string) uint64 {
@@ -298,12 +336,16 @@ var ErrSlotBusy = errors.New("all worker slots busy")
 
 // TryAcquire reserves a turn slot when the account is usable for group.
 func (a *Account) TryAcquire(group string) error {
+	return a.tryAcquire(group, 0)
+}
+
+func (a *Account) tryAcquire(group string, idle int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.unavailableLocked(group); err != nil {
 		return err
 	}
-	if int64(a.turns) >= a.pool.turnsPerAccount.Load() {
+	if int64(a.turns+idle) >= a.pool.turnsPerAccount.Load() {
 		return ErrSlotBusy
 	}
 	a.turns++

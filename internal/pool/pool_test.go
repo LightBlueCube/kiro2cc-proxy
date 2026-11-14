@@ -25,22 +25,22 @@ func TestProxyEnvAndBlocking(t *testing.T) {
 	}
 
 	a.SetBlocked(errors.New("no route"))
-	if _, err := p.Pick("u", "gemini", nil); err == nil || a.Status().Blocked != "no route" {
+	if _, err := p.Pick("u", "gemini", nil, nil); err == nil || a.Status().Blocked != "no route" {
 		t.Fatalf("blocked account picked: %v", err)
 	}
 	a.SetBlocked(nil)
-	got, err := p.Pick("u", "gemini", nil)
+	got, err := p.Pick("u", "gemini", nil, nil)
 	if err != nil || got != a {
 		t.Fatalf("unblocked pick = %v, %v", got, err)
 	}
 	a.Release()
 
 	a.SetVerification(true, "https://accounts.google.com/x")
-	if _, err := p.Pick("u", "gemini", nil); !errors.Is(err, ErrNoAccount) || !a.Status().Verify || a.Status().VerifyURL != "https://accounts.google.com/x" {
+	if _, err := p.Pick("u", "gemini", nil, nil); !errors.Is(err, ErrNoAccount) || !a.Status().Verify || a.Status().VerifyURL != "https://accounts.google.com/x" {
 		t.Fatalf("account awaiting verification picked: %v, %+v", err, a.Status())
 	}
 	a.SetVerification(false, "")
-	if got, err := p.Pick("u", "gemini", nil); err != nil || got != a {
+	if got, err := p.Pick("u", "gemini", nil, nil); err != nil || got != a {
 		t.Fatalf("verified pick = %v, %v", got, err)
 	}
 	a.Release()
@@ -72,7 +72,7 @@ func TestPriorityAndAllowedModels(t *testing.T) {
 
 	// Higher priority wins for every user while a turn slot is free.
 	for _, user := range []string{"u1", "u2", "u3", "u4"} {
-		got, err := p.Pick(user, "gemini", nil)
+		got, err := p.Pick(user, "gemini", nil, nil)
 		if err != nil || got != high {
 			t.Fatalf("pick(%s) = %v, %v; want high", user, got, err)
 		}
@@ -80,11 +80,11 @@ func TestPriorityAndAllowedModels(t *testing.T) {
 	}
 
 	// With high's slot full, Pick moves to low.
-	first, err := p.Pick("u1", "gemini", nil)
+	first, err := p.Pick("u1", "gemini", nil, nil)
 	if err != nil || first != high {
 		t.Fatalf("first pick = %v, %v", first, err)
 	}
-	second, err := p.Pick("u1", "gemini", nil)
+	second, err := p.Pick("u1", "gemini", nil, nil)
 	if err != nil || second != low {
 		t.Fatalf("second pick with high busy = %v, %v; want low", second, err)
 	}
