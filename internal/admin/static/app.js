@@ -92,14 +92,17 @@ const hashText = hash => h("span", { class: "mono muted", title: hash }, shortHa
 const keyName = (name, hash) => h("span", {}, name ? name + " " : "", hashText(hash));
 const keyText = (name, hash) => name ? `${name} (${shortHash(hash)})` : shortHash(hash);
 
-// table renders rows; a column's hint explains its title on hover.
+// table renders rows; a column's hint explains its title on hover. A num
+// column aligns right; a fit column is as narrow as its content, leaving
+// spare width to the others.
 function table(columns, rows, rowClass) {
+  const cellClass = c => [c.num && "num", c.fit && "fit"].filter(Boolean).join(" ");
   return h("div", { class: "table-wrap" }, h("table", {},
-    h("thead", {}, h("tr", {}, columns.map(c => h("th", { class: c.num ? "num" : "" }, term(c.title, c.hint))))),
+    h("thead", {}, h("tr", {}, columns.map(c => h("th", { class: cellClass(c) }, term(c.title, c.hint))))),
     h("tbody", {}, rows.length === 0
       ? h("tr", {}, h("td", { colspan: columns.length, class: "muted" }, t("common.nothing_yet")))
       : rows.map(row => h("tr", { class: rowClass ? rowClass(row) : "" },
-          columns.map(c => h("td", { class: c.num ? "num" : "" }, c.cell(row))))))));
+          columns.map(c => h("td", { class: cellClass(c) }, c.cell(row))))))));
 }
 
 // ---- shell -----------------------------------------------------------
@@ -285,54 +288,58 @@ function accessCell(k) {
     k.max_workers !== null ? t("keys.workers.max", { count: k.max_workers }) : t("keys.workers.unlimited")));
 }
 
-// usageGroups are the quota groups a key has a limit, spend, or quota in.
-// The spend and quota cells show one line per group, in the same order
-// and of the same height, so a group's numbers line up across the cells:
-//
-//   Total         [=====---]  $64.05 / $100.00
-//   Gemini                    $40.00                 18.35%
-//   Claude + GPT              $20.00                 51.61%
-function usageGroups(k, groups) {
-  return groups.filter(g => k.limits[g] !== undefined || (k.spent[g] || 0) > 0 || (k.quota[g]?.used || 0) > 0);
-}
-
 function spendBar(spent, limit) {
   const level = spent >= limit ? "low" : spent >= limit * 0.8 ? "mid" : "";
   const fill = limit > 0 ? Math.min(100, (spent / limit) * 100) : 100;
   return h("div", { class: "bar " + level }, h("span", { style: `width:${fill}%` }));
 }
 
-// spendCell lines are label, bar, and amount. Under a total limit the
-// total line has the bar and the group lines just their spend; otherwise
+// usageGroups are the quota groups a key has a limit, spend, or quota in.
+// The spend and quota cells show a total line, then one line per group, of
+// the same height, so a line's numbers read across the cells. A bar shows
+// wherever a limit applies:
+//
+//   Total         [=====---]  $60.00 / $100.00  │   69.96%
+//   Gemini                              $40.00  │   18.35%
+//   Claude + GPT                        $20.00  │   51.61%
+//
+//   Total                               $58.19  │   59.66%
+//   Gemini        [=====---]  $55.38 / $100.00  │   54.95%
+//   Claude + GPT  [==------]    $2.52 / $10.00  │    4.71%
+function usageGroups(k, groups) {
+  return groups.filter(g => k.limits[g] !== undefined || (k.spent[g] || 0) > 0 || (k.quota[g]?.used || 0) > 0);
+}
+
+// spendCell lines are label, limit bar, and amount. Without a total limit
 // each group line has its own limit or none.
 function spendCell(k, lines) {
   const hasTotal = k.limit_total !== null;
   if (!hasTotal && !lines.length) return h("span", { class: "muted" }, t("keys.usage.none"));
 
   const spent = g => k.spent[g] || 0;
-  const amount = (value, limit) => h("span", { class: "mono" },
+  const amount = (value, limit, cls) => h("span", { class: "mono amount " + cls },
     limit === undefined ? fmt.usd(value) : `${fmt.usd(value)} / ${fmt.usd(limit)}`);
-  const cells = [];
-  if (hasTotal) {
-    const total = Object.values(k.spent).reduce((a, b) => a + b, 0);
-    cells.push(h("span", {}, t("keys.usage.total")), spendBar(total, k.limit_total), amount(total, k.limit_total));
-  }
+  const total = lines.reduce((sum, g) => sum + spent(g), 0);
+  const cells = [h("span", { class: "total" }, t("keys.usage.total")),
+    hasTotal ? spendBar(total, k.limit_total) : h("span"),
+    amount(total, hasTotal ? k.limit_total : undefined, "total")];
   for (const g of lines) {
     const limit = k.limits[g];
-    const slot = hasTotal ? h("span")
-      : limit === undefined ? h("span", { class: "sub" }, t("keys.usage.no_limit"))
-      : spendBar(spent(g), limit);
-    cells.push(h("span", { class: hasTotal ? "muted" : "" }, groupName(g)), slot, amount(spent(g), limit));
+    const slot = limit !== undefined ? spendBar(spent(g), limit)
+      : hasTotal ? h("span")
+      : h("span", { class: "muted" }, t("keys.usage.no_limit"));
+    cells.push(h("span", {}, groupName(g)), slot, amount(spent(g), limit, ""));
   }
   return h("div", { class: "lines spend" }, cells);
 }
 
-// quotaCell shows a key's attributed weekly-quota share on each group line
-// of spendCell, leaving the total line blank; hovering lists each
-// account's shares.
+// quotaCell shows a key's attributed weekly-quota share on each line of
+// spendCell; the total line plainly adds the groups' shares up. Hovering
+// lists each account's shares.
 function quotaCell(k, lines) {
   const used = g => k.quota[g]?.used || 0;
-  if (!lines.some(g => used(g) > 0)) return h("span", { class: "muted" }, t("keys.quota.none"));
+  const total = lines.reduce((sum, g) => sum + used(g), 0);
+  if (total === 0) return h("span", { class: "muted" }, t("keys.quota.none"));
 
   const byAccount = {};
   for (const g of lines) {
@@ -343,9 +350,8 @@ function quotaCell(k, lines) {
   const hover = Object.keys(byAccount).sort()
     .map(a => `${a}: ${quotaText(byAccount[a], 3)}`)
     .join("\n");
-  const blank = k.limit_total !== null ? [h("span")] : [];
-  return h("div", { class: "lines", title: hover }, blank,
-    lines.map(g => used(g) > 0 ? h("span", {}, fmt.pct(used(g), 2)) : h("span", { class: "muted" }, "—")));
+  const share = (value, cls) => value > 0 ? h("span", { class: cls }, fmt.pct(value, 2)) : h("span", { class: "muted" }, "—");
+  return h("div", { class: "lines quota", title: hover }, share(total, "total"), lines.map(g => share(used(g), "")));
 }
 
 // totalsCell shows a key's successful calls over their tokens; hovering
@@ -366,7 +372,7 @@ function keyColumns(groups) {
     { title: t("keys.col.key"), hint: t("keys.col.key.hint"), cell: keyCell },
     { title: t("keys.col.access"), cell: accessCell },
     { title: t("keys.col.usage"), cell: k => spendCell(k, usageGroups(k, groups)) },
-    { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), num: true, cell: k => quotaCell(k, usageGroups(k, groups)) },
+    { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), num: true, fit: true, cell: k => quotaCell(k, usageGroups(k, groups)) },
     { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
   ];
 }

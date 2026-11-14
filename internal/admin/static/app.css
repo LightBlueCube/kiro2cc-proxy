@@ -68,10 +68,15 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 tr.revoked td { color: var(--muted); }
 tr.revoked td:not(:last-child) { text-decoration: line-through; }
 .table-wrap { overflow-x: auto; }
-/* A key's per-group lines; the spend and quota cells share the row height
-   so a group's numbers line up. */
-.lines { display: grid; grid-auto-rows: 22px; align-items: center; column-gap: 10px; white-space: nowrap; }
-.lines.spend { grid-template-columns: max-content 80px max-content; }
+/* A key's total and per-group lines. Spend and quota lines share their
+   height, so a line's numbers read across; minimum label and amount widths
+   line the keys' bars up, and the bars take the spend column's spare width. */
+.lines { display: grid; align-items: center; column-gap: 10px; font-size: 12px; line-height: 18px; white-space: nowrap; }
+.lines .total { font-weight: 600; }
+.lines.spend { grid-template-columns: minmax(8em, max-content) minmax(60px, 1fr) minmax(11em, max-content); }
+.lines.spend .amount { justify-self: end; }
+.lines.quota { justify-items: end; font-variant-numeric: tabular-nums; }
+th.fit, td.fit { width: 1%; }
 .actions { display: flex; gap: 8px; }
 .nowrap { white-space: nowrap; }
 details.fold { margin-top: 16px; }
