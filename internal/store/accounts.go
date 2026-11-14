@@ -98,6 +98,9 @@ type Key struct {
 	Note string
 	// Models limits the key to these client model names; empty allows all.
 	Models []string
+	// MaxWorkers caps the key's concurrent workers (open sessions; excess
+	// idle ones are closed first); nil is unlimited.
+	MaxWorkers *int
 	// LimitTotal caps the key's whole list-price spend (key_usage) in USD;
 	// nil is no total limit.
 	LimitTotal *float64
@@ -110,7 +113,7 @@ type Key struct {
 }
 
 func (s *Store) Keys(ctx context.Context) ([]Key, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT hash, name, note, models, limit_total, limits, created_at, revoked_at FROM api_keys ORDER BY created_at, name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT hash, name, note, models, max_workers, limit_total, limits, created_at, revoked_at FROM api_keys ORDER BY created_at, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -119,11 +122,16 @@ func (s *Store) Keys(ctx context.Context) ([]Key, error) {
 	for rows.Next() {
 		var k Key
 		var models, limits string
+		var maxWorkers sql.NullInt64
 		var total sql.NullFloat64
 		var created int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&k.Hash, &k.Name, &k.Note, &models, &total, &limits, &created, &revoked); err != nil {
+		if err := rows.Scan(&k.Hash, &k.Name, &k.Note, &models, &maxWorkers, &total, &limits, &created, &revoked); err != nil {
 			return nil, err
+		}
+		if maxWorkers.Valid {
+			n := int(maxWorkers.Int64)
+			k.MaxWorkers = &n
 		}
 		if total.Valid {
 			k.LimitTotal = &total.Float64
@@ -152,8 +160,8 @@ func (s *Store) AddKey(ctx context.Context, k Key) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, limit_total, limits, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		k.Hash, k.Name, k.Note, string(models), k.LimitTotal, string(limits), k.CreatedAt.Unix())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, max_workers, limit_total, limits, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		k.Hash, k.Name, k.Note, string(models), k.MaxWorkers, k.LimitTotal, string(limits), k.CreatedAt.Unix())
 	return uniqueErr(err)
 }
 
@@ -161,6 +169,7 @@ func (s *Store) AddKey(ctx context.Context, k Key) error {
 type KeyUpdate struct {
 	Note       string
 	Models     []string
+	MaxWorkers *int
 	LimitTotal *float64
 	Limits     map[string]float64
 }
@@ -174,8 +183,8 @@ func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
 	if err != nil {
 		return err
 	}
-	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, limit_total = ?, limits = ? WHERE hash = ?`,
-		u.Note, string(models), u.LimitTotal, string(limits), hash))
+	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, max_workers = ?, limit_total = ?, limits = ? WHERE hash = ?`,
+		u.Note, string(models), u.MaxWorkers, u.LimitTotal, string(limits), hash))
 }
 
 func (s *Store) RevokeKey(ctx context.Context, hash string, at time.Time) error {

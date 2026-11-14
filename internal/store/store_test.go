@@ -54,8 +54,18 @@ func TestDeleteKey(t *testing.T) {
 	defer st.Close()
 	ctx := context.Background()
 
-	if err := st.AddKey(ctx, Key{Hash: "h1", Name: "alice", CreatedAt: time.Now()}); err != nil {
+	maxWorkers := 3
+	if err := st.AddKey(ctx, Key{Hash: "h1", Name: "alice", MaxWorkers: &maxWorkers, CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
+	}
+	if keys, err := st.Keys(ctx); err != nil || len(keys) != 1 || keys[0].MaxWorkers == nil || *keys[0].MaxWorkers != 3 {
+		t.Fatalf("keys = %+v, %v", keys, err)
+	}
+	if err := st.UpdateKey(ctx, "h1", KeyUpdate{Note: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := st.Keys(ctx); err != nil || keys[0].MaxWorkers != nil {
+		t.Fatalf("after clearing max_workers: %+v, %v", keys, err)
 	}
 	cost := 0.5
 	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Model: "m", Status: StatusOK, QuotaGroup: "gemini", Input: 1, CostUSD: &cost}); err != nil {

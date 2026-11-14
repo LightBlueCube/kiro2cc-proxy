@@ -53,6 +53,10 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 		if errors.Is(err, errPositionGone) {
 			continue
 		}
+		var limitErr *conv.Error
+		if errors.As(err, &limitErr) {
+			return nil, &attemptFailure{err: limitErr}
+		}
 		if ctx.Err() != nil {
 			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
 		}
@@ -107,7 +111,11 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 	}
 	at, err := g.claimSession(ctx, snap, account, r)
 	if err != nil {
-		if !errors.Is(err, errSessionBusy) && ctx.Err() == nil {
+		var limitErr *conv.Error
+		if errors.As(err, &limitErr) {
+			return nil, err
+		}
+		if !errors.Is(err, errSessionBusy) && !errors.Is(err, pool.ErrSlotBusy) && ctx.Err() == nil {
 			g.forget(snap.Account, snap.SessionID)
 		}
 		return nil, err
@@ -131,10 +139,6 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 		if rewound {
 			r.mode = ModeRewind
 		}
-	}
-	if err := account.TryAcquire(r.group); err != nil {
-		g.releaseClaim(at)
-		return nil, err
 	}
 	g.launch(at, account, r, slug, tier, deltaPromptBlocks(r.t.body[snap.Count:]), snap.Steps)
 	return at, nil
@@ -195,21 +199,35 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 				return nil, ctx.Err()
 			}
 		}
+		if err := g.tryAcquireBusyLocked(r); err != nil {
+			g.mu.Unlock()
+			return nil, err
+		}
+		if err := account.TryAcquire(r.group); err != nil {
+			g.releaseBusyLocked(r.user)
+			g.mu.Unlock()
+			return nil, err
+		}
 		live := sess != nil && sess.proc.Alive() && sess.proc.HasSession(snap.SessionID)
 		if sess == nil {
 			sess = &session{ref: ref, id: snap.SessionID, user: snap.User, account: account}
 			g.sessions[ref] = sess
 		}
 		at := newActiveTurn(sess)
+		at.account = account
 		sess.turn = at
+		evicted := g.evictIdleLocked(r.user, r.maxWorkers, account)
 		g.mu.Unlock()
+		g.closeEvicted(evicted)
 		if live {
 			return at, nil
 		}
 		if err := g.reopen(ctx, sess, r); err != nil {
 			g.mu.Lock()
 			g.dropSessionLocked(sess)
+			g.releaseTurnLocked(at)
 			g.mu.Unlock()
+			close(at.closed)
 			return nil, err
 		}
 		return at, nil
@@ -286,7 +304,8 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			slug, tier, ok := slugOn(account, r)
 			if !ok {
 				g.releaseClaim(at)
-				skip()
+				r.exclude[account.Name()] = true
+				lacking = append(lacking, account.Name())
 				continue
 			}
 			r.mode, r.replayReason = ModeFresh, ""
@@ -297,6 +316,10 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			return at, nil
 		}
 		account.Release()
+		var limitErr *conv.Error
+		if errors.As(err, &limitErr) {
+			return nil, &attemptFailure{err: limitErr}
+		}
 		if ctx.Err() != nil {
 			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: ctx.Err().Error()}}
 		}
@@ -311,23 +334,36 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 
 // openSession creates a session on account and claims it.
 func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account) (*activeTurn, error) {
+	g.mu.Lock()
+	if err := g.tryAcquireBusyLocked(r); err != nil {
+		g.mu.Unlock()
+		return nil, err
+	}
+	evicted := g.evictIdleLocked(r.user, r.maxWorkers, account)
+	g.mu.Unlock()
+	g.closeEvicted(evicted)
+
 	proc, err := account.Proc(context.WithoutCancel(ctx), profileFor(r.req.Tools))
 	if err != nil {
+		g.releaseBusy(r.user)
 		return nil, err
 	}
 	sess := &session{user: r.user, account: account, proc: proc, known: toolNames(r.req.Tools)}
 	binding, err := g.bridge.Bind(bridgeTools(r.req.Tools), sessionTools{g: g, sess: sess})
 	if err != nil {
+		g.releaseBusy(r.user)
 		return nil, err
 	}
 	id, models, err := proc.NewSession(ctx, sessionSpec(account, binding, r))
 	if err != nil {
 		binding.Close()
+		g.releaseBusy(r.user)
 		return nil, err
 	}
 	account.SetModels(models)
 	sess.id, sess.ref, sess.binding = id, sessionRef(account.Name(), id), binding
 	at := newActiveTurn(sess)
+	at.account = account
 	g.mu.Lock()
 	sess.turn = at
 	g.sessions[sess.ref] = sess
@@ -357,7 +393,134 @@ func (g *Gateway) releaseClaim(at *activeTurn) {
 	if at.sess.turn == at {
 		at.sess.turn = nil
 	}
+	g.releaseTurnLocked(at)
 	g.mu.Unlock()
+	close(at.closed)
+}
+
+// tryAcquireBusyLocked reserves one active-turn slot for r's key and the
+// global pool, or returns the limit error when busy turns already fill
+// either cap. It needs g.mu.
+func (g *Gateway) tryAcquireBusyLocked(r *run) *conv.Error {
+	if r.maxWorkers != nil && g.busyByKey[r.user] >= *r.maxWorkers {
+		return &conv.Error{
+			Kind:    conv.ErrKeyLimit,
+			Message: fmt.Sprintf("this API key reached its limit of %d concurrent workers", *r.maxWorkers),
+		}
+	}
+	if max := int(g.maxWorkers.Load()); max > 0 && g.busyTotal >= max {
+		return &conv.Error{
+			Kind:    conv.ErrUnavailable,
+			Message: fmt.Sprintf("all %d worker slots are busy", max),
+		}
+	}
+	g.busyTotal++
+	g.busyByKey[r.user]++
+	return nil
+}
+
+func (g *Gateway) releaseTurnLocked(at *activeTurn) {
+	g.releaseBusyLocked(at.sess.user)
+	at.account.Release()
+}
+
+func (g *Gateway) releaseBusyLocked(user string) {
+	if g.busyTotal > 0 {
+		g.busyTotal--
+	}
+	if n := g.busyByKey[user] - 1; n > 0 {
+		g.busyByKey[user] = n
+	} else {
+		delete(g.busyByKey, user)
+	}
+}
+
+func (g *Gateway) releaseBusy(user string) {
+	g.mu.Lock()
+	g.releaseBusyLocked(user)
+	g.mu.Unlock()
+}
+
+// evictIdleLocked claims the oldest idle sessions for closing until total
+// workers (busy + idle) fit within the key, account, and global caps.
+// Passing account == nil checks every account in the pool. It needs g.mu.
+func (g *Gateway) evictIdleLocked(user string, keyMax *int, account *pool.Account) []*activeTurn {
+	for _, sess := range g.sessions {
+		if sess.turn == nil && (!sess.proc.Alive() || !sess.proc.HasSession(sess.id)) {
+			g.dropSessionLocked(sess)
+		}
+	}
+	var evicted []*activeTurn
+	if keyMax != nil {
+		for g.busyByKey[user]+g.idleCountLocked(func(s *session) bool { return s.user == user }) > *keyMax {
+			claim := g.evictOldestIdleLocked(func(s *session) bool { return s.user == user })
+			if claim == nil {
+				break
+			}
+			evicted = append(evicted, claim)
+		}
+	}
+	if acctMax := g.pool.TurnsPerAccount(); acctMax > 0 {
+		accounts := g.pool.Accounts()
+		if account != nil {
+			accounts = []*pool.Account{account}
+		}
+		for _, acct := range accounts {
+			for acct.Turns()+g.idleCountLocked(func(s *session) bool { return s.account == acct }) > acctMax {
+				claim := g.evictOldestIdleLocked(func(s *session) bool { return s.account == acct })
+				if claim == nil {
+					break
+				}
+				evicted = append(evicted, claim)
+			}
+		}
+	}
+	if globalMax := int(g.maxWorkers.Load()); globalMax > 0 {
+		for g.busyTotal+g.idleCountLocked(func(*session) bool { return true }) > globalMax {
+			claim := g.evictOldestIdleLocked(func(*session) bool { return true })
+			if claim == nil {
+				break
+			}
+			evicted = append(evicted, claim)
+		}
+	}
+	return evicted
+}
+
+func (g *Gateway) idleCountLocked(match func(*session) bool) int {
+	n := 0
+	for _, sess := range g.sessions {
+		if sess.turn == nil && match(sess) {
+			n++
+		}
+	}
+	return n
+}
+
+func (g *Gateway) evictOldestIdleLocked(match func(*session) bool) *activeTurn {
+	var oldest *session
+	for _, sess := range g.sessions {
+		if sess.turn != nil || !match(sess) {
+			continue
+		}
+		if oldest == nil || sess.lastUsed.Before(oldest.lastUsed) || (sess.lastUsed.Equal(oldest.lastUsed) && sess.ref < oldest.ref) {
+			oldest = sess
+		}
+	}
+	if oldest == nil {
+		return nil
+	}
+	return g.claimClosingLocked(oldest)
+}
+
+func (g *Gateway) closeEvicted(claims []*activeTurn) {
+	for _, claim := range claims {
+		if err := g.closeClaimed(context.Background(), claim); err != nil {
+			g.log.Warn("closing an evicted idle session failed", "session", claim.sess.id, "err", err)
+			continue
+		}
+		g.log.Debug("idle session evicted for worker limit", "account", claim.sess.account.Name(), "session", claim.sess.id)
+	}
 }
 
 // sessionSpec appends the tool policy and the client's leading system

@@ -36,6 +36,9 @@ const settingsKey = "settings"
 // Settings are the admin-editable knobs.
 type Settings struct {
 	TurnsPerAccount int `json:"turns_per_account"`
+	// MaxWorkers caps open session workers across all accounts (0 =
+	// unlimited); excess idle sessions are closed first.
+	MaxWorkers int `json:"max_workers"`
 	// SnapshotTTL is a Go duration ("24h"): how long an idle session stays
 	// reusable.
 	SnapshotTTL string `json:"snapshot_ttl"`
@@ -73,6 +76,9 @@ var logLevels = map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.Lev
 func (s Settings) validate() error {
 	if s.TurnsPerAccount < 1 || s.TurnsPerAccount > 64 {
 		return errors.New("turns_per_account must be between 1 and 64")
+	}
+	if s.MaxWorkers < 0 || s.MaxWorkers > 1024 {
+		return errors.New("max_workers must be between 0 and 1024")
 	}
 	ttl, err := time.ParseDuration(s.SnapshotTTL)
 	if err != nil || ttl < time.Minute {
@@ -247,6 +253,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.settings = s
 	c.mu.Unlock()
 	c.cfg.Pool.SetTurnsPerAccount(s.TurnsPerAccount)
+	c.cfg.Gateway.SetMaxWorkers(s.MaxWorkers)
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
 	c.cfg.Level.Set(s.Level())
@@ -595,7 +602,7 @@ func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate)
 	token = keyPrefix + rand.Text()
 	hash = keyHash(token)
 	err = c.cfg.Store.AddKey(ctx, store.Key{
-		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), LimitTotal: u.LimitTotal, Limits: u.Limits, CreatedAt: time.Now(),
+		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), MaxWorkers: u.MaxWorkers, LimitTotal: u.LimitTotal, Limits: u.Limits, CreatedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrExists) {
 		return "", "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
@@ -614,7 +621,11 @@ func (c *Control) UpdateKey(ctx context.Context, hash string, u store.KeyUpdate)
 	if err := c.cfg.Store.UpdateKey(ctx, hash, u); err != nil {
 		return err
 	}
-	return c.reloadKeys(ctx)
+	if err := c.reloadKeys(ctx); err != nil {
+		return err
+	}
+	c.cfg.Gateway.TrimKeyIdle(hash, u.MaxWorkers)
+	return nil
 }
 
 // Sessions lists the gateway's ACP sessions.
@@ -666,6 +677,9 @@ func (c *Control) Quota(ctx context.Context, f store.RequestFilter) (usage.Quota
 }
 
 func validateLimits(u store.KeyUpdate) error {
+	if u.MaxWorkers != nil && (*u.MaxWorkers < 1 || *u.MaxWorkers > 1024) {
+		return &InputError{"max_workers must be between 1 and 1024"}
+	}
 	if u.LimitTotal != nil && len(u.Limits) > 0 {
 		return &InputError{"set either a total limit or per-group limits, not both"}
 	}
@@ -687,7 +701,12 @@ func (c *Control) RevokeKey(ctx context.Context, hash string) error {
 	if err := c.cfg.Store.RevokeKey(ctx, hash, time.Now()); err != nil {
 		return err
 	}
-	return c.reloadKeys(ctx)
+	if err := c.reloadKeys(ctx); err != nil {
+		return err
+	}
+	zero := 0
+	c.cfg.Gateway.TrimKeyIdle(hash, &zero)
+	return nil
 }
 
 func (c *Control) RestoreKey(ctx context.Context, hash string) error {
@@ -714,7 +733,7 @@ func (c *Control) reloadKeys(ctx context.Context) error {
 	byHash := make(map[string]conv.Caller, len(keys))
 	for _, k := range keys {
 		if k.RevokedAt.IsZero() {
-			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, LimitTotal: k.LimitTotal, Limits: k.Limits}
+			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits}
 		}
 	}
 	c.mu.Lock()

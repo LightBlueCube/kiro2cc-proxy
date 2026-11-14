@@ -355,37 +355,38 @@ func TestKeyLimits(t *testing.T) {
 		{"limits": map[string]float64{"gemini": -0.1}},
 		{"limit_total": -1},
 		{"limit_total": 5, "limits": map[string]float64{"gemini": 1}},
+		{"max_workers": 0},
 	} {
 		bad["name"] = "bad"
 		if r := c.do("POST", "/admin/api/keys", bad, nil); r.status != http.StatusBadRequest {
 			t.Fatalf("limits %v = %d %s", bad, r.status, r.raw)
 		}
 	}
-	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "limits": map[string]float64{"claude-gpt": 30}}, nil)
+	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "max_workers": 2, "limits": map[string]float64{"claude-gpt": 30}}, nil)
 	token, _ := r.body["key"].(string)
-	if caller, ok := e.ctl.Lookup(token); !ok || caller.Limits["claude-gpt"] != 30 || len(caller.Limits) != 1 || caller.LimitTotal != nil {
+	if caller, ok := e.ctl.Lookup(token); !ok || caller.MaxWorkers == nil || *caller.MaxWorkers != 2 || caller.Limits["claude-gpt"] != 30 || len(caller.Limits) != 1 || caller.LimitTotal != nil {
 		t.Fatalf("lookup = %+v %v (%s)", caller, ok, r.raw)
 	}
 
 	r = c.do("GET", "/admin/api/keys", nil, nil)
 	var list keysView
 	json.Unmarshal([]byte(r.raw), &list)
-	if len(list.Keys) != 1 || list.Keys[0].Limits["claude-gpt"] != 30 || list.Keys[0].LimitTotal != nil || len(list.Groups) != 3 {
+	if len(list.Keys) != 1 || list.Keys[0].MaxWorkers == nil || *list.Keys[0].MaxWorkers != 2 || list.Keys[0].Limits["claude-gpt"] != 30 || list.Keys[0].LimitTotal != nil || len(list.Groups) != 3 {
 		t.Fatalf("keys = %s", r.raw)
 	}
 
 	// Switching to a total limit drops the group limits.
 	hash := list.Keys[0].Hash
-	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"note": "n", "limit_total": 20, "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"note": "n", "max_workers": 4, "limit_total": 20, "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
 		t.Fatalf("update = %d %s", r.status, r.raw)
 	}
-	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.LimitTotal == nil || *caller.LimitTotal != 20 {
+	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers == nil || *caller.MaxWorkers != 4 || caller.LimitTotal == nil || *caller.LimitTotal != 20 {
 		t.Fatalf("after switching to a total = %+v", caller)
 	}
 	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"note": "n"}, nil); r.status != http.StatusOK {
 		t.Fatalf("clear = %d %s", r.status, r.raw)
 	}
-	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.LimitTotal != nil {
+	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers != nil || caller.LimitTotal != nil {
 		t.Fatalf("limits after clearing = %+v", caller)
 	}
 }
@@ -629,17 +630,17 @@ func TestSettingsValidation(t *testing.T) {
 	if r := c.do("PUT", "/admin/api/settings", bad, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad settings = %d %s", r.status, r.raw)
 	}
-	good := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30,
+	good := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30,
 		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
 	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30,
 		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}, {"model": "m", "input": 2, "cached": 0.1, "output": 2}}}
 	if r := c.do("PUT", "/admin/api/settings", badPrice, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad price = %d %s", r.status, r.raw)
 	}
-	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK || r.body["turns_per_account"] != float64(3) {
+	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK || r.body["turns_per_account"] != float64(3) || r.body["max_workers"] != float64(10) {
 		t.Fatalf("good settings = %d %s", r.status, r.raw)
 	}
-	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.TurnsPerAccount != 3 {
+	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.TurnsPerAccount != 3 || got.MaxWorkers != 10 {
 		t.Fatalf("applied = %+v", got)
 	}
 }

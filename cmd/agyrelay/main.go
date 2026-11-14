@@ -155,6 +155,7 @@ func runServe(args []string) error {
 		DataDir:     cfg.DataDir,
 		SnapshotTTL: settings.SnapshotTTLDuration(),
 		IdleClose:   settings.SessionIdleCloseDuration(),
+		MaxWorkers:  settings.MaxWorkers,
 		Recorder:    recorder,
 		Budget:      budget,
 		Refresh: func(ctx context.Context, account *pool.Account) error {

@@ -201,9 +201,12 @@ func (p *Pool) Remove(name string) error {
 // which escalates to SIGKILL within a second.
 const removeWait = 5 * time.Second
 
-// SetTurnsPerAccount changes the per-account turn cap; turns running
+// SetTurnsPerAccount changes the per-account worker cap; turns running
 // above a lowered cap finish normally.
 func (p *Pool) SetTurnsPerAccount(n int) { p.turnsPerAccount.Store(int64(n)) }
+
+// TurnsPerAccount returns the per-account worker cap.
+func (p *Pool) TurnsPerAccount() int { return int(p.turnsPerAccount.Load()) }
 
 func (p *Pool) Accounts() []*Account {
 	p.mu.RLock()
@@ -286,6 +289,9 @@ func (a *Account) ConversationStore(sessionID string) string {
 	return filepath.Join(a.geminiDir, "antigravity-cli", "conversations", sessionID+".db")
 }
 
+// ErrSlotBusy means all worker slots on the account are busy with active turns.
+var ErrSlotBusy = errors.New("all worker slots busy")
+
 // TryAcquire reserves a turn slot when the account is usable for group.
 func (a *Account) TryAcquire(group string) error {
 	a.mu.Lock()
@@ -294,7 +300,7 @@ func (a *Account) TryAcquire(group string) error {
 		return err
 	}
 	if int64(a.turns) >= a.pool.turnsPerAccount.Load() {
-		return errors.New("all turn slots busy")
+		return ErrSlotBusy
 	}
 	a.turns++
 	return nil
@@ -306,6 +312,13 @@ func (a *Account) Release() {
 		a.turns--
 	}
 	a.mu.Unlock()
+}
+
+// Turns returns the number of active (running or parked) turns on the account.
+func (a *Account) Turns() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.turns
 }
 
 // Available reports why the account cannot serve group now (nil = usable).

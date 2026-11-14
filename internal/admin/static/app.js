@@ -195,6 +195,8 @@ const groupName = g => lookup("group", g) || g;
 function limitEditor(groups, k) {
   const usd = value => h("input", { type: "number", min: 0, step: "any", placeholder: t("keys.limit.placeholder"), style: "width:110px",
     value: value === undefined || value === null ? "" : String(value) });
+  const workers = h("input", { type: "number", min: 1, max: 1024, step: 1, placeholder: t("keys.limit.placeholder"), style: "width:110px",
+    value: k.max_workers === undefined || k.max_workers === null ? "" : String(k.max_workers) });
   const total = usd(k.limit_total);
   const perGroup = Object.fromEntries(groups.map(g => [g, usd(k.limits[g])]));
   const initial = k.limit_total !== null ? "total" : Object.keys(k.limits).length ? "group" : "none";
@@ -210,8 +212,9 @@ function limitEditor(groups, k) {
   show(initial);
   const groupLimits = () => Object.fromEntries(groups.filter(g => perGroup[g].value.trim() !== "").map(g => [g, Number(perGroup[g].value)]));
   return {
-    nodes: [h("label", {}, t("keys.limit.mode"), mode), fields],
+    nodes: [h("label", {}, t("keys.workers"), workers), h("label", {}, t("keys.limit.mode"), mode), fields],
     read: () => ({
+      max_workers: workers.value.trim() !== "" ? Number(workers.value) : null,
       limit_total: mode.value === "total" ? Number(total.value) : null,
       limits: mode.value === "group" ? groupLimits() : {},
     }),
@@ -323,7 +326,7 @@ views.keys = container => {
     groups = data.groups;
     offered = catalog.map(m => m.id);
     if (!newLimits) {
-      newLimits = limitEditor(groups, { limit_total: null, limits: {} });
+      newLimits = limitEditor(groups, { max_workers: null, limit_total: null, limits: {} });
       limitsRow.replaceChildren(...newLimits.nodes);
     }
     if (!newModels) {
@@ -335,6 +338,7 @@ views.keys = container => {
       { title: t("keys.col.hash"), hint: t("keys.col.hash.hint"), cell: k => hashText(k.hash) },
       { title: t("common.note"), cell: k => k.note || h("span", { class: "muted" }, "—") },
       { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
+      { title: t("keys.col.workers"), cell: k => k.max_workers !== null ? k.max_workers : h("span", { class: "muted" }, t("keys.limit.placeholder")) },
       { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
       { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
       { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
@@ -450,6 +454,7 @@ views.settings = container => {
     const [s, catalog] = await Promise.all([api("GET", "settings"), api("GET", "models")]);
     const d = s.defaults;
     const turns = h("input", { type: "number", min: 1, max: 64, value: s.turns_per_account });
+    const maxWorkers = h("input", { type: "number", min: 0, max: 1024, value: s.max_workers });
     const ttl = h("input", { value: s.snapshot_ttl, pattern: "[0-9hms.]+" });
     const idleClose = h("input", { value: s.session_idle_close, pattern: "[0-9hms.]+" });
     const level = h("select", {}, ["debug", "info", "warn", "error"].map(l => h("option", { value: l, selected: l === s.log_level }, l)));
@@ -476,7 +481,7 @@ views.settings = container => {
       event.preventDefault();
       guarded(async () => {
         await api("PUT", "settings", {
-          turns_per_account: Number(turns.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
+          turns_per_account: Number(turns.value), max_workers: Number(maxWorkers.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
           retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
         });
@@ -487,6 +492,7 @@ views.settings = container => {
       h("datalist", { id: "settings-models" }, catalog.map(m => h("option", { value: m.id }, m.name))),
       h("div", { class: "row" },
         h("label", {}, t("settings.turns"), withReset(turns, d.turns_per_account)),
+        h("label", {}, t("settings.max_workers"), withReset(maxWorkers, d.max_workers)),
         h("label", {}, t("settings.ttl"), withReset(ttl, d.snapshot_ttl)),
         h("label", { title: t("settings.idle_close.hint") }, t("settings.idle_close"), withReset(idleClose, d.session_idle_close)),
         h("label", {}, t("settings.log_level"), withReset(level, d.log_level)),
