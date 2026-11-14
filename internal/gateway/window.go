@@ -108,8 +108,7 @@ func newPromptEstimator(set *tokens.Set) *promptEstimator {
 
 // estimate counts what replaying the request would send: agy's prompt,
 // the client's system text, every message as replay renders it, the tool
-// declarations, and every image (replay drops older ones, a warm session
-// keeps them).
+// declarations, and every image.
 func (e *promptEstimator) estimate(modelID string, req conv.Request, t *transcript) (int, error) {
 	counter := e.tokens.For(modelID)
 	texts := make([]string, 0, len(t.body)+len(req.Tools)+1)

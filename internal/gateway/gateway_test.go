@@ -738,12 +738,43 @@ func TestHistoryNamesToolsAsTheModelCallsThem(t *testing.T) {
 	call := conv.Message{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "read", Arguments: json.RawMessage(`{"path":"a.go"}`)}}}
 	result := conv.Message{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "read", Text: "x"}
 	orphan := conv.Message{Role: conv.RoleTool, ToolCallID: "c0", Text: "y"}
-	got := renderHistory([]conv.Message{call, result, orphan})
+	got, _ := renderHistory([]conv.Message{call, result, orphan})
 	for _, want := range []string{"<assistant-tool-call name=\"mcp_client_read\" id=\"c1\">\n{\"path\":\"a.go\",\"toolSummary\":\"\"}\n",
 		`<tool-result name="mcp_client_read" id="c1">`, `<tool-result name="" id="c0">`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("history lacks %s:\n%s", want, got)
 		}
+	}
+}
+
+// A replayed conversation keeps the images of its history, numbered in the
+// text and attached ahead of the newest input's own.
+func TestFreshPromptCarriesHistoryImages(t *testing.T) {
+	image := func(data string) []conv.Image { return []conv.Image{{Data: data, MimeType: "image/png"}} }
+	messages := []conv.Message{
+		{Role: conv.RoleUser, Text: "first", Images: image("AAAA")},
+		{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "shot", Arguments: json.RawMessage(`{}`)}}},
+		{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "shot", Text: "done", Images: image("BBBB")},
+		{Role: conv.RoleAssistant, Text: "seen"},
+		{Role: conv.RoleUser, Text: "newest", Images: image("CCCC")},
+	}
+	blocks := freshPrompt(newTranscript(messages))
+
+	var got []string
+	for _, block := range blocks[:len(blocks)-1] {
+		got = append(got, block.Type+":"+block.Data)
+	}
+	if want := []string{"image:AAAA", "image:BBBB", "image:CCCC"}; !slices.Equal(got, want) {
+		t.Fatalf("blocks before the text = %v, want %v", got, want)
+	}
+	text := blocks[len(blocks)-1].Text
+	for _, want := range []string{"first\n[Attached image 1]", "done\n[Attached image 2]", "\n\nnewest"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, historyPlaceholder) {
+		t.Errorf("history images still replaced by a placeholder:\n%s", text)
 	}
 }
 
