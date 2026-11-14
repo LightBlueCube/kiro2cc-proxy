@@ -102,6 +102,30 @@ type keysView struct {
 	Groups []string `json:"groups"`
 }
 
+func buildKeyView(k store.Key, spent map[string]float64, totals keyTotalsView) keyView {
+	v := keyView{
+		Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers,
+		LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spent, Totals: totals, CreatedAt: k.CreatedAt,
+	}
+	if v.Models == nil {
+		v.Models = []string{}
+	}
+	if v.Limits == nil {
+		v.Limits = map[string]float64{}
+	}
+	if v.Spent == nil {
+		v.Spent = map[string]float64{}
+	}
+	if v.Totals.Models == nil {
+		v.Totals.Models = []modelTotalView{}
+	}
+	if !k.RevokedAt.IsZero() {
+		revoked := k.RevokedAt
+		v.RevokedAt = &revoked
+	}
+	return v
+}
+
 func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := h.control.Keys(r.Context())
 	if err != nil {
@@ -121,27 +145,34 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	byHash := keyTotalsByHash(totals)
 	out := keysView{Keys: []keyView{}, Groups: usage.Groups}
 	for _, k := range keys {
-		v := keyView{Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spends[k.Hash],
-			Totals: byHash[k.Hash], CreatedAt: k.CreatedAt}
-		if v.Models == nil {
-			v.Models = []string{}
-		}
-		if v.Limits == nil {
-			v.Limits = map[string]float64{}
-		}
-		if v.Spent == nil {
-			v.Spent = map[string]float64{}
-		}
-		if v.Totals.Models == nil {
-			v.Totals.Models = []modelTotalView{}
-		}
-		if !k.RevokedAt.IsZero() {
-			revoked := k.RevokedAt
-			v.RevokedAt = &revoked
-		}
-		out.Keys = append(out.Keys, v)
+		out.Keys = append(out.Keys, buildKeyView(k, spends[k.Hash], byHash[k.Hash]))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+type userKeyView struct {
+	Key    keyView  `json:"key"`
+	Groups []string `json:"groups"`
+}
+
+// userKey serves the authenticated key's metadata on /user/api/key, omitting
+// the admin note.
+func (h *Handler) userKey(w http.ResponseWriter, r *http.Request) {
+	k, _ := currentUserKey(r)
+	spends, err := h.control.KeySpends(r.Context())
+	if err != nil {
+		h.internalError(w, "key spend", err)
+		return
+	}
+	totals, err := h.control.KeyTotals(r.Context())
+	if err != nil {
+		h.internalError(w, "key totals", err)
+		return
+	}
+	byHash := keyTotalsByHash(totals)
+	v := buildKeyView(k, spends[k.Hash], byHash[k.Hash])
+	v.Note = ""
+	writeJSON(w, http.StatusOK, userKeyView{Key: v, Groups: usage.Groups})
 }
 
 type keyRequest struct {

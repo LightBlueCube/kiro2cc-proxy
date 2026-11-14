@@ -118,6 +118,15 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestRootAbortsWithoutResponse(t *testing.T) {
+	r := newRelay(t)
+	resp, err := http.DefaultClient.Get(r.url + "/")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("GET / returned status %d, want connection closed without HTTP response", resp.StatusCode)
+	}
+}
+
 // The client returns the output items verbatim plus its tool result; the
 // relay must recognize its own transcript and continue the parked turn.
 func TestResponsesToolRoundTripContinuesTurn(t *testing.T) {

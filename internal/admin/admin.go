@@ -1,9 +1,11 @@
-// Package admin serves the admin UI under /admin/: an embedded single-page
-// app and its JSON API, behind a password session.
+// Package admin serves the admin UI under /admin/ and the key usage view
+// under /user/: an embedded single-page app and its JSON API.
 //
 //	/admin/            static app (no data; public)
 //	/admin/api/login   password → session cookie + CSRF token
 //	/admin/api/...     session required; changes also need X-CSRF-Token
+//	/user/             static app (key usage view)
+//	/user/api/...      Bearer API key required; scoped to that key
 package admin
 
 import (
@@ -48,6 +50,7 @@ type Handler struct {
 	log          *slog.Logger
 	proxies      guard.Proxies
 	loginLimiter *guard.Limiter
+	keyLimiter   *guard.Limiter
 	hashing      chan struct{}
 	mux          *http.ServeMux
 }
@@ -62,6 +65,7 @@ func New(cfg Config) *Handler {
 		log:          cfg.Log,
 		proxies:      cfg.Proxies,
 		loginLimiter: guard.NewLimiter(loginLimits),
+		keyLimiter:   guard.NewLimiter(userKeyLimits),
 		hashing:      make(chan struct{}, maxHashing),
 		mux:          http.NewServeMux(),
 	}
@@ -70,6 +74,7 @@ func New(cfg Config) *Handler {
 		panic(err) // the embedded tree is fixed at build time
 	}
 	h.mux.Handle("GET /admin/", http.StripPrefix("/admin/", http.FileServerFS(static)))
+	h.mux.Handle("GET /user/", http.StripPrefix("/user/", http.FileServerFS(static)))
 
 	h.mux.HandleFunc("POST /admin/api/login", h.login)
 	h.mux.HandleFunc("POST /admin/api/logout", h.authed(h.logout))
@@ -118,6 +123,15 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/keys/{hash}/restore", h.authed(h.restoreKey))
 	h.mux.HandleFunc("DELETE /admin/api/keys/{hash}", h.authed(h.deleteKey))
 	h.mux.HandleFunc("GET /admin/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "no such endpoint")
+	})
+
+	h.mux.HandleFunc("GET /user/api/key", h.userAuthed(h.userKey))
+	h.mux.HandleFunc("GET /user/api/requests", h.userAuthed(h.listRequests))
+	h.mux.HandleFunc("GET /user/api/usage", h.userAuthed(h.summarize))
+	h.mux.HandleFunc("GET /user/api/usage/filters", h.userAuthed(h.filterValues))
+	h.mux.HandleFunc("GET /user/api/usage/quota", h.userAuthed(h.quota))
+	h.mux.HandleFunc("GET /user/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})
 	return h

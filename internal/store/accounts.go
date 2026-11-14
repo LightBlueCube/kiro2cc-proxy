@@ -112,43 +112,63 @@ type Key struct {
 	RevokedAt time.Time
 }
 
+const keyColumns = `hash, name, note, models, max_workers, limit_total, limits, created_at, revoked_at`
+
+func scanKey(scan func(dest ...any) error) (Key, error) {
+	var k Key
+	var models, limits string
+	var maxWorkers sql.NullInt64
+	var total sql.NullFloat64
+	var created int64
+	var revoked sql.NullInt64
+	if err := scan(&k.Hash, &k.Name, &k.Note, &models, &maxWorkers, &total, &limits, &created, &revoked); err != nil {
+		return Key{}, err
+	}
+	if maxWorkers.Valid {
+		n := int(maxWorkers.Int64)
+		k.MaxWorkers = &n
+	}
+	if total.Valid {
+		k.LimitTotal = &total.Float64
+	}
+	if err := json.Unmarshal([]byte(models), &k.Models); err != nil {
+		return Key{}, err
+	}
+	if err := json.Unmarshal([]byte(limits), &k.Limits); err != nil {
+		return Key{}, err
+	}
+	k.CreatedAt = time.Unix(created, 0)
+	if revoked.Valid {
+		k.RevokedAt = time.Unix(revoked.Int64, 0)
+	}
+	return k, nil
+}
+
 func (s *Store) Keys(ctx context.Context) ([]Key, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT hash, name, note, models, max_workers, limit_total, limits, created_at, revoked_at FROM api_keys ORDER BY created_at, name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+keyColumns+` FROM api_keys ORDER BY created_at, name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Key
 	for rows.Next() {
-		var k Key
-		var models, limits string
-		var maxWorkers sql.NullInt64
-		var total sql.NullFloat64
-		var created int64
-		var revoked sql.NullInt64
-		if err := rows.Scan(&k.Hash, &k.Name, &k.Note, &models, &maxWorkers, &total, &limits, &created, &revoked); err != nil {
+		k, err := scanKey(rows.Scan)
+		if err != nil {
 			return nil, err
-		}
-		if maxWorkers.Valid {
-			n := int(maxWorkers.Int64)
-			k.MaxWorkers = &n
-		}
-		if total.Valid {
-			k.LimitTotal = &total.Float64
-		}
-		if err := json.Unmarshal([]byte(models), &k.Models); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal([]byte(limits), &k.Limits); err != nil {
-			return nil, err
-		}
-		k.CreatedAt = time.Unix(created, 0)
-		if revoked.Valid {
-			k.RevokedAt = time.Unix(revoked.Int64, 0)
 		}
 		out = append(out, k)
 	}
 	return out, rows.Err()
+}
+
+// Key returns the key with the given hash (active or revoked), or ErrNotFound.
+func (s *Store) Key(ctx context.Context, hash string) (Key, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+keyColumns+` FROM api_keys WHERE hash = ?`, hash)
+	k, err := scanKey(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Key{}, ErrNotFound
+	}
+	return k, err
 }
 
 func (s *Store) AddKey(ctx context.Context, k Key) error {

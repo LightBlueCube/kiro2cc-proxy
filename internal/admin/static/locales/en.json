@@ -1,6 +1,7 @@
 {
   "login.password": "Admin password",
   "login.submit": "Sign in",
+  "user.key": "API key",
   "nav.accounts": "Accounts",
   "nav.workers": "Workers",
   "nav.calls": "Calls",

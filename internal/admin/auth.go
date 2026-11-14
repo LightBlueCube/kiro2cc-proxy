@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -51,6 +52,9 @@ const (
 // minutes doubling to a day; 30 in total per 15 minutes, which keeps
 // guessing a 12-character password hopeless even from many addresses.
 var loginLimits = guard.Config{PerClient: 5, Global: 30, Window: 15 * time.Minute, Lockout: 15 * time.Minute, MaxLockout: 24 * time.Hour}
+
+// Bad API keys on /user/api/: 20 tries per client per 10 minutes, 500 in total.
+var userKeyLimits = guard.Config{PerClient: 20, Global: 500, Window: 10 * time.Minute, Lockout: 10 * time.Minute, MaxLockout: 24 * time.Hour}
 
 type passwordRecord struct {
 	Alg       string `json:"alg"`
@@ -281,6 +285,41 @@ func (h *Handler) authed(next http.HandlerFunc) http.HandlerFunc {
 
 func currentSession(r *http.Request) store.AdminSession {
 	return r.Context().Value(sessionKey{}).(store.AdminSession)
+}
+
+type userKeyCtx struct{}
+
+// userAuthed wraps a /user/api/ handler: it authenticates the Bearer API key
+// (active or revoked) and scopes the request to that key.
+func (h *Handler) userAuthed(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := h.proxies.ClientIP(r)
+		if ok, wait := h.keyLimiter.Allow(ip); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("too many invalid API keys; try again in %s", wait.Round(time.Second)))
+			return
+		}
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			token = r.Header.Get("X-Api-Key")
+		}
+		key, err := h.control.LookupKey(r.Context(), strings.TrimSpace(token))
+		if errors.Is(err, store.ErrNotFound) {
+			h.keyLimiter.Fail(ip)
+			writeError(w, http.StatusUnauthorized, "invalid API key")
+			return
+		}
+		if err != nil {
+			h.internalError(w, "read API key", err)
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), userKeyCtx{}, key)))
+	}
+}
+
+func currentUserKey(r *http.Request) (store.Key, bool) {
+	key, ok := r.Context().Value(userKeyCtx{}).(store.Key)
+	return key, ok
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
