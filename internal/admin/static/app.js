@@ -265,56 +265,110 @@ function limitEditor(groups, k) {
   };
 }
 
-function spendBar(label, spent, limit, title) {
+// keyCell shows a key's name over its short hash, note, and dates; hovering
+// a date shows its time.
+function keyCell(k) {
+  const created = t("keys.created", { date: fmt.date(k.created_at) });
+  const revoked = k.revoked_at && t("keys.revoked", { date: fmt.date(k.revoked_at) });
+  return stack(k.name, hashText(k.hash), k.note,
+    h("span", { class: "nowrap", title: fmt.time(k.created_at) }, created),
+    revoked ? h("span", { class: "bad nowrap", title: fmt.time(k.revoked_at) }, revoked) : null);
+}
+
+// accessCell shows the models a key may use over its worker limit. Lines
+// break only between model ids.
+function accessCell(k) {
+  const models = k.models.length
+    ? k.models.map((m, i) => [i ? ", " : "", h("span", { class: "nowrap" }, m)])
+    : h("span", { class: "muted" }, t("keys.models.all"));
+  return stack(models, h("span", { class: "nowrap" },
+    k.max_workers !== null ? t("keys.workers.max", { count: k.max_workers }) : t("keys.workers.unlimited")));
+}
+
+// usageGroups are the quota groups a key has a limit, spend, or quota in.
+// The spend and quota cells show one line per group, in the same order
+// and of the same height, so a group's numbers line up across the cells:
+//
+//   Total         [=====---]  $64.05 / $100.00
+//   Gemini                    $40.00                 18.35%
+//   Claude + GPT              $20.00                 51.61%
+function usageGroups(k, groups) {
+  return groups.filter(g => k.limits[g] !== undefined || (k.spent[g] || 0) > 0 || (k.quota[g]?.used || 0) > 0);
+}
+
+function spendBar(spent, limit) {
   const level = spent >= limit ? "low" : spent >= limit * 0.8 ? "mid" : "";
   const fill = limit > 0 ? Math.min(100, (spent / limit) * 100) : 100;
-  return h("div", { class: "row", title },
-    h("span", { style: "width:120px" }, label),
-    h("div", { class: "bar " + level, style: "width:120px" }, h("span", { style: `width:${fill}%` })),
-    h("span", { class: "mono" }, `${fmt.usd(spent)} / ${fmt.usd(limit)}`));
+  return h("div", { class: "bar " + level }, h("span", { style: `width:${fill}%` }));
 }
 
-function spendCell(k, groups) {
+// spendCell lines are label, bar, and amount. Under a total limit the
+// total line has the bar and the group lines just their spend; otherwise
+// each group line has its own limit or none.
+function spendCell(k, lines) {
+  const hasTotal = k.limit_total !== null;
+  if (!hasTotal && !lines.length) return h("span", { class: "muted" }, t("keys.usage.none"));
+
   const spent = g => k.spent[g] || 0;
-  if (k.limit_total !== null) {
-    const byGroup = groups.filter(g => spent(g) > 0).map(g => `${groupName(g)}: ${fmt.usd(spent(g))}`).join("\n");
-    return spendBar(t("keys.limit.mode.total"), Object.values(k.spent).reduce((a, b) => a + b, 0), k.limit_total, byGroup);
+  const amount = (value, limit) => h("span", { class: "mono" },
+    limit === undefined ? fmt.usd(value) : `${fmt.usd(value)} / ${fmt.usd(limit)}`);
+  const cells = [];
+  if (hasTotal) {
+    const total = Object.values(k.spent).reduce((a, b) => a + b, 0);
+    cells.push(h("span", {}, t("keys.usage.total")), spendBar(total, k.limit_total), amount(total, k.limit_total));
   }
-  const shown = groups.filter(g => k.limits[g] !== undefined || spent(g) > 0);
-  if (!shown.length) return h("span", { class: "muted" }, t("keys.usage.none"));
-  return shown.map(g => k.limits[g] === undefined
-    ? h("div", {}, t("keys.usage.unlimited", { group: groupName(g), spent: fmt.usd(spent(g)) }))
-    : spendBar(groupName(g), spent(g), k.limits[g]));
+  for (const g of lines) {
+    const limit = k.limits[g];
+    const slot = hasTotal ? h("span")
+      : limit === undefined ? h("span", { class: "sub" }, t("keys.usage.no_limit"))
+      : spendBar(spent(g), limit);
+    cells.push(h("span", { class: hasTotal ? "muted" : "" }, groupName(g)), slot, amount(spent(g), limit));
+  }
+  return h("div", { class: "lines spend" }, cells);
 }
 
-// quotaCell shows a key's attributed weekly-quota share by quota group
-// since creation; hovering lists each account's shares.
-function quotaCell(k, groups) {
-  const quota = k.quota || {};
-  const ordered = [...groups, ...Object.keys(quota).filter(g => !groups.includes(g))];
-  const shown = ordered.filter(g => (quota[g]?.used || 0) > 0);
-  if (!shown.length) return h("span", { class: "muted" }, t("keys.quota.none"));
+// quotaCell shows a key's attributed weekly-quota share on each group line
+// of spendCell, leaving the total line blank; hovering lists each
+// account's shares.
+function quotaCell(k, lines) {
+  const used = g => k.quota[g]?.used || 0;
+  if (!lines.some(g => used(g) > 0)) return h("span", { class: "muted" }, t("keys.quota.none"));
+
   const byAccount = {};
-  for (const g of shown) {
-    for (const a of quota[g].accounts || []) {
+  for (const g of lines) {
+    for (const a of k.quota[g]?.accounts || []) {
       (byAccount[a.account] ||= {})[g] = a.used;
     }
   }
   const hover = Object.keys(byAccount).sort()
     .map(a => `${a}: ${quotaText(byAccount[a], 3)}`)
     .join("\n");
-  return h("div", { title: hover },
-    shown.map(g => h("div", {}, t("keys.quota.group", { group: groupName(g), used: fmt.pct(quota[g].used, 2) }))));
+  const blank = k.limit_total !== null ? [h("span")] : [];
+  return h("div", { class: "lines", title: hover }, blank,
+    lines.map(g => used(g) > 0 ? h("span", {}, fmt.pct(used(g), 2)) : h("span", { class: "muted" }, "—")));
 }
 
-// totalsCell shows a key's successful calls and tokens; hovering lists
-// them by model.
+// totalsCell shows a key's successful calls over their tokens; hovering
+// lists them by model.
 function totalsCell(totals) {
   if (!totals.requests) return h("span", { class: "muted" }, t("keys.totals.none"));
   const byModel = totals.models
     .map(m => t("keys.totals.model", { model: m.model, count: m.requests, input: fmt.int(m.input), output: fmt.int(m.output) }))
     .join("\n");
-  return term(t("keys.totals", { count: totals.requests, input: fmt.compact(totals.input), output: fmt.compact(totals.output) }), byModel);
+  return h("div", { class: "nowrap", title: byModel }, stack(t("keys.totals.calls", { count: totals.requests }),
+    t("keys.totals.tokens", { input: fmt.compact(totals.input), output: fmt.compact(totals.output) })));
+}
+
+// keyColumns are the Keys table's columns up to the actions, shared by the
+// admin and user pages.
+function keyColumns(groups) {
+  return [
+    { title: t("keys.col.key"), hint: t("keys.col.key.hint"), cell: keyCell },
+    { title: t("keys.col.access"), cell: accessCell },
+    { title: t("keys.col.usage"), cell: k => spendCell(k, usageGroups(k, groups)) },
+    { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), num: true, cell: k => quotaCell(k, usageGroups(k, groups)) },
+    { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
+  ];
 }
 
 // modelPicker lists model ids as checkboxes; none checked allows every
@@ -398,20 +452,12 @@ views.keys = container => {
       modelsBox.replaceChildren(newModels.node);
     }
     list.replaceChildren(table([
-      { title: t("common.name"), cell: k => k.name },
-      { title: t("keys.col.hash"), hint: t("keys.col.hash.hint"), cell: k => hashText(k.hash) },
-      { title: t("common.note"), cell: k => k.note || h("span", { class: "muted" }, "—") },
-      { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
-      { title: t("keys.col.workers"), cell: k => k.max_workers !== null ? k.max_workers : h("span", { class: "muted" }, t("keys.limit.placeholder")) },
-      { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
-      { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), cell: k => quotaCell(k, groups) },
-      { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
-      { title: t("keys.col.created"), cell: k => fmt.time(k.created_at) },
+      ...keyColumns(groups),
       { title: "", cell: k => k.revoked_at
-          ? h("span", { class: "row" }, t("keys.revoked", { time: fmt.time(k.revoked_at) }),
+          ? h("div", { class: "actions" },
             h("button", { onclick: e => restore(k, e.target) }, t("keys.restore")),
             h("button", { class: "danger", onclick: e => remove(k, e.target) }, t("keys.delete")))
-          : h("span", { class: "row" },
+          : h("div", { class: "actions" },
             h("button", { onclick: () => editKey(k) }, t("keys.edit")),
             h("button", { class: "danger", onclick: e => revoke(k, e.target) }, t("keys.revoke"))) },
     ], data.keys, k => k.revoked_at ? "revoked" : ""));
@@ -1443,18 +1489,7 @@ views.user = (container, initialData) => {
   container.append(h("h1", {}, t("calls.title")), keyCard);
 
   function renderKey(data) {
-    const groups = data.groups;
-    keyCard.replaceChildren(table([
-      { title: t("common.name"), cell: k => k.name },
-      { title: t("keys.col.hash"), hint: t("keys.col.hash.hint"), cell: k => hashText(k.hash) },
-      { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
-      { title: t("keys.col.workers"), cell: k => k.max_workers !== null ? k.max_workers : h("span", { class: "muted" }, t("keys.limit.placeholder")) },
-      { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
-      { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), cell: k => quotaCell(k, groups) },
-      { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
-      { title: t("keys.col.created"), cell: k => stack(fmt.time(k.created_at),
-          k.revoked_at ? h("span", { class: "bad" }, t("keys.revoked", { time: fmt.time(k.revoked_at) })) : null) },
-    ], [data.key], k => k.revoked_at ? "revoked" : ""));
+    keyCard.replaceChildren(table(keyColumns(data.groups), [data.key], k => k.revoked_at ? "revoked" : ""));
   }
 
   renderKey(initialData);

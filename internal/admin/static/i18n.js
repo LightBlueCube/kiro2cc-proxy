@@ -105,6 +105,7 @@ const fmt = {
   pct: (v, digits = 1) => v === null || v === undefined ? "—"
     : numberFormat({ style: "percent", minimumFractionDigits: digits, maximumFractionDigits: digits }).format(v),
   time: s => s ? new Date(s).toLocaleString(locale) : "—",
+  date: s => s ? new Date(s).toLocaleDateString(locale) : "—",
   clock: s => s ? new Date(s).toLocaleTimeString(locale) : "—",
   ms: ms => ms === null || ms === undefined ? "—"
     : ms >= 10000 ? t("duration.s", { n: fixed(ms / 1000, 0) })

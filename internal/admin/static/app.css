@@ -68,6 +68,12 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 tr.revoked td { color: var(--muted); }
 tr.revoked td:not(:last-child) { text-decoration: line-through; }
 .table-wrap { overflow-x: auto; }
+/* A key's per-group lines; the spend and quota cells share the row height
+   so a group's numbers line up. */
+.lines { display: grid; grid-auto-rows: 22px; align-items: center; column-gap: 10px; white-space: nowrap; }
+.lines.spend { grid-template-columns: max-content 80px max-content; }
+.actions { display: flex; gap: 8px; }
+.nowrap { white-space: nowrap; }
 details.fold { margin-top: 16px; }
 details.fold > summary { cursor: pointer; font-weight: 600; }
 
