@@ -17,10 +17,10 @@ import (
 // The gateway serves one model per base slug and maps the request's
 // reasoning effort onto the tiers that exist.
 var (
-	effortOrder = []string{"low", "medium", "high"}
-	tierPattern = regexp.MustCompile(`^(.+)-(high|medium|low)$`)
+	effortOrder = []string{"low", "medium", "high", "xhigh", "max"}
+	tierPattern = regexp.MustCompile(`^(.+)-(max|xhigh|high|medium|low)$`)
 	// Display names carry the tier: "Gemini 3.8 Flash (High)".
-	tierNameSuffix = regexp.MustCompile(`\s+\((?i:high|medium|low)\)$`)
+	tierNameSuffix = regexp.MustCompile(`\s+\((?i:max|xhigh|high|medium|low)\)$`)
 	effortCapable  = []*regexp.Regexp{regexp.MustCompile(`^gemini-`), regexp.MustCompile(`^claude-`), regexp.MustCompile(`^gpt-oss-`)}
 )
 
@@ -293,7 +293,11 @@ func (g *Gateway) hasCandidate(r *run) bool {
 func pickEffort(requested string, efforts []string) string {
 	wanted := "medium"
 	switch requested {
-	case "high", "xhigh", "max":
+	case "max":
+		wanted = "max"
+	case "xhigh":
+		wanted = "xhigh"
+	case "high":
 		wanted = "high"
 	case "minimal", "low", "none":
 		wanted = "low"
