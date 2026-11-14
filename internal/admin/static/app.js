@@ -1273,6 +1273,7 @@ views.calls = container => {
   // quotaCell is a request's attributed quota share, or why it has none.
   function quotaCell(r) {
     if (r.quota_used !== null) return t("calls.quota_share", { pct: fmt.pct(r.quota_used, 3) });
+    if (r.quota_skip === "failed") return term(t("calls.quota_failed"), lookup("quota_skip", r.quota_skip));
     if (r.quota_skip) return term(t("calls.quota_skipped"), lookup("quota_skip", r.quota_skip) || r.quota_skip);
     return term(t("calls.quota_pending"), t("calls.quota_pending.hint"));
   }

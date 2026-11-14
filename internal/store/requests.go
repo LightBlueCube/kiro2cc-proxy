@@ -52,6 +52,9 @@ const (
 	// SkipNoBucket: the account's plan has no weekly bucket for the
 	// request's quota group.
 	SkipNoBucket QuotaSkip = "no_bucket"
+	// SkipFailed: the request waited past pendingMaxAge without showing
+	// a measurable quota drop.
+	SkipFailed QuotaSkip = "failed"
 )
 
 // StatusOK is the Status of a request that succeeded.
@@ -363,6 +366,18 @@ func (s *Store) HasUnsettledQuota(ctx context.Context, account string) (bool, er
 func (s *Store) SkipQuota(ctx context.Context, account, group string, through time.Time, reason QuotaSkip) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE requests SET quota_skip = ? WHERE `+unsettled, reason, account, group, through.UnixMilli())
 	return err
+}
+
+// ExpirePendingQuota marks unsettled requests across all accounts that
+// ended by before with reason, returning the number of rows updated.
+func (s *Store) ExpirePendingQuota(ctx context.Context, before time.Time, reason QuotaSkip) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE requests SET quota_skip = ? WHERE quota_used IS NULL AND quota_skip = '' AND input + output > 0 AND at + duration_ms <= ?`,
+		reason, before.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // KeySpend is a key's list-price spend in one quota group since the key

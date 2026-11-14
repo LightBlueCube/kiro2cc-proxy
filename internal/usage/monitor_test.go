@@ -193,3 +193,46 @@ func TestKeepForQuota(t *testing.T) {
 		t.Fatal("kept with nothing waiting")
 	}
 }
+
+func TestExpirePendingQuota(t *testing.T) {
+	e := newMonitorEnv(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
+	if err := e.st.AddRequest(ctx, store.Request{
+		At: now.Add(-pendingMaxAge - time.Minute), Account: "a", Status: store.StatusOK, QuotaGroup: "gemini", Input: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.AddRequest(ctx, store.Request{
+		At: now.Add(-5 * time.Minute), Account: "a", Status: store.StatusOK, QuotaGroup: "gemini", Input: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run expires stale pending requests right on startup without starting agy.
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.monitor.Run(runCtx)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rows, err := e.st.Requests(ctx, store.RequestFilter{}, 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 2 && rows[1].QuotaSkip == store.SkipFailed {
+			if rows[0].QuotaSkip != "" {
+				t.Fatalf("recent request expired too: %+v", rows[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stale request not expired: %+v", rows)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
