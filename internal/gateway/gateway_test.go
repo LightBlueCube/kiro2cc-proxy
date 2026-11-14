@@ -1333,6 +1333,102 @@ func TestRetriedToolResultsRewindPastCancelledInput(t *testing.T) {
 	}
 }
 
+// waitRun waits until acct0 holds turns active turns, and has a running
+// one (making model calls) or not. It returns when the oldest began.
+func (h *harness) waitRun(turns int, running bool) time.Time {
+	h.t.Helper()
+	account := h.p.Account("acct0")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		since, ok := account.OldestRun()
+		if account.Turns() == turns && ok == running {
+			return since
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("turns = %d, running = %v; want %d, %v", account.Turns(), ok, turns, running)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// cancelTurns cancels every session's turn.
+func (h *harness) cancelTurns() {
+	h.t.Helper()
+	for _, s := range h.gw.Sessions() {
+		if s.Turn == nil {
+			continue
+		}
+		if err := h.gw.CancelTurn(s.Account, s.ID); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+}
+
+// A turn runs while it makes model calls: not while it waits for tool
+// results, though it holds its slot.
+func TestParkedTurnIsNotRunning(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+	parkFor := func(name string) result {
+		t.Helper()
+		parked := h.complete(ctx, name, conv.Request{Model: model, Messages: []conv.Message{user(`@tool read {}`)}, Tools: tools})
+		if parked.err != nil || len(parked.calls) != 1 {
+			t.Fatalf("parked = %+v", parked)
+		}
+		return parked
+	}
+	resume := func(name string, parked result, toolResult string) result {
+		t.Helper()
+		return h.complete(ctx, name, conv.Request{Model: model, Tools: tools, Messages: []conv.Message{
+			user(`@tool read {}`),
+			{Role: conv.RoleAssistant, ToolCalls: parked.calls},
+			{Role: conv.RoleTool, ToolCallID: parked.calls[0].ID, Text: toolResult},
+		}})
+	}
+
+	// A turn runs from the start of its prompt.
+	started := time.Now()
+	running := make(chan result)
+	go func() {
+		running <- h.complete(ctx, "dave", conv.Request{Model: model, Messages: []conv.Message{user("@hang")}})
+	}()
+	if since := h.waitRun(1, true); since.Before(started) {
+		t.Fatalf("turn runs since %v, before its request at %v", since, started)
+	}
+	h.cancelTurns()
+	<-running
+	h.waitRun(0, false)
+
+	// The tool results resume it; its end frees the slot.
+	parked := parkFor("alice")
+	h.waitRun(1, false)
+	if second := resume("alice", parked, "done"); second.err != nil {
+		t.Fatalf("second = %+v", second)
+	}
+	h.waitRun(0, false)
+
+	// A resumed turn runs from the resume, not from its first start.
+	parked = parkFor("bob")
+	h.waitRun(1, false)
+	resumed := time.Now()
+	hung := make(chan result)
+	go func() { hung <- resume("bob", parked, "@hang") }()
+	if since := h.waitRun(1, true); since.Before(resumed) {
+		t.Fatalf("resumed turn runs since %v, before the resume at %v", since, resumed)
+	}
+	h.cancelTurns()
+	<-hung
+	h.waitRun(0, false)
+
+	// A turn that ends while parked is not running afterwards either.
+	parkFor("carol")
+	h.waitRun(1, false)
+	h.cancelTurns()
+	h.waitRun(0, false)
+}
+
 // turnIs reports whether the only session's turn is in state.
 func (h *harness) turnIs(state TurnState) bool {
 	sessions := h.gw.Sessions()

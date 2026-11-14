@@ -87,6 +87,7 @@ func (g *Gateway) tryContinue(snap snapshot, r *run) *activeTurn {
 	}
 	group := at.parked
 	at.parked = nil
+	at.account.BeginRun(at, time.Now())
 	at.parkTimer.Stop()
 	at.consuming = true
 	g.mu.Unlock()
@@ -381,6 +382,7 @@ func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, slug, ti
 	g.mu.Lock()
 	at.account, at.choice, at.slug, at.tier, at.consuming, at.baseSteps, at.started = account, r.choice(), slug, tier, true, baseSteps, time.Now()
 	at.usageSteps = baseSteps
+	account.BeginRun(at, at.started)
 	at.turn = at.sess.proc.RunTurn(agy.TurnSpec{SessionID: at.sess.id, Model: slug, Prompt: prompt})
 	at.sess.lastUsed = time.Now()
 	g.mu.Unlock()

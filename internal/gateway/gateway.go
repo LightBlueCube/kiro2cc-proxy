@@ -618,6 +618,7 @@ func (g *Gateway) park(at *activeTurn, group *callGroup) {
 	defer g.mu.Unlock()
 	at.consuming = false
 	at.parked, at.parkedAt = group, time.Now()
+	at.account.EndRun(at)
 	at.parkTimer = time.AfterFunc(parkTTL, func() {
 		g.mu.Lock()
 		expired := at.parked == group && !at.finished
@@ -737,6 +738,7 @@ func (g *Gateway) watch(at *activeTurn) {
 	if at.parkTimer != nil {
 		at.parkTimer.Stop()
 	}
+	at.account.EndRun(at)
 	for _, group := range at.groups {
 		group.settle(bridge.Result{}, errTurnEnded)
 	}

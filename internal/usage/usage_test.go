@@ -48,17 +48,17 @@ func TestRecordAndAttribute(t *testing.T) {
 	var settled []string
 	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Cached: 0, Output: 1}}, func(account string) { settled = append(settled, account) }, log)
 
-	t0 := time.Now().Add(-2 * time.Hour)
+	t0 := time.Now().Add(-2 * time.Hour).Truncate(time.Millisecond) // stored times keep milliseconds
 	attributor := NewAttributor(st, log)
-	sample := func(at time.Time, remaining float64, busy bool) {
+	sample := func(at time.Time, remaining float64, oldestRun time.Time) {
 		t.Helper()
 		if err := st.AddQuotaSamples(ctx, []store.QuotaSample{{Account: "a", At: at, Bucket: "gemini-weekly", Group: "Gemini",
 			Window: "weekly", Remaining: remaining, ResetAt: t0.Add(7 * 24 * time.Hour)}}); err != nil {
 			t.Fatal(err)
 		}
-		attributor.Attribute(ctx, "a", at, busy)
+		attributor.Attribute(ctx, "a", at, oldestRun)
 	}
-	sample(t0, 0.9, false)
+	sample(t0, 0.9, time.Time{})
 	// Two requests, the second costing three times the first.
 	for i, tokens := range []int64{1000, 3000} {
 		rec.Record(gateway.Record{
@@ -72,7 +72,7 @@ func TestRecordAndAttribute(t *testing.T) {
 	if !slices.Equal(settled, []string{"a", "a"}) {
 		t.Fatalf("settle requests = %v", settled)
 	}
-	sample(t0.Add(2*time.Minute+SettleTime), 0.86, false)
+	sample(t0.Add(2*time.Minute+SettleTime), 0.86, time.Time{})
 
 	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, 10)
 	if err != nil || len(rows) != 3 {
@@ -94,18 +94,19 @@ func TestRecordAndAttribute(t *testing.T) {
 	record := func(at time.Duration, key string) {
 		rec.Record(gateway.Record{At: t0.Add(at), KeyHash: key, Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
 	}
-	// A sample during a running turn carries its drop to the next idle one.
+	// A sample while a turn that began before its cutoff runs carries its
+	// drop to the next sample without one.
 	record(10*time.Minute, "k")
-	sample(t0.Add(10*time.Minute+SettleTime), 0.85, true)
-	sample(t0.Add(15*time.Minute+SettleTime), 0.84, false)
+	sample(t0.Add(10*time.Minute+SettleTime), 0.85, t0.Add(10*time.Minute)) // began at the cutoff
+	sample(t0.Add(15*time.Minute+SettleTime), 0.84, time.Time{})
 	// A sample before the quota caught up with a request waits.
 	record(30*time.Minute, "k")
-	sample(t0.Add(31*time.Minute), 0.835, false) // part of the use shows
-	sample(t0.Add(30*time.Minute+SettleTime), 0.83, false)
+	sample(t0.Add(31*time.Minute), 0.835, time.Time{}) // part of the use shows
+	sample(t0.Add(30*time.Minute+SettleTime), 0.83, time.Time{})
 	// A drop with no request is use outside agyrelay.
-	sample(t0.Add(45*time.Minute), 0.80, false)
+	sample(t0.Add(45*time.Minute), 0.80, time.Time{})
 	record(46*time.Minute, "k2")
-	sample(t0.Add(46*time.Minute+SettleTime), 0.79, false)
+	sample(t0.Add(46*time.Minute+SettleTime), 0.79, time.Time{})
 	// Not sampled yet.
 	record(60*time.Minute, "k")
 
@@ -176,7 +177,7 @@ func TestStaleQuotaSamples(t *testing.T) {
 			Window: "weekly", Remaining: remaining, ResetAt: resetAt}}); err != nil {
 			t.Fatal(err)
 		}
-		attributor.Attribute(ctx, "a", t0.Add(at), false)
+		attributor.Attribute(ctx, "a", t0.Add(at), time.Time{})
 	}
 	record := func(at time.Duration) {
 		rec.Record(gateway.Record{At: t0.Add(at), KeyHash: "k", Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
@@ -203,6 +204,69 @@ func TestStaleQuotaSamples(t *testing.T) {
 	}
 }
 
+// Under continuous traffic, with a turn always running, each sample settles
+// the requests that ended SettleTime before it, so the use is attributed
+// while the traffic goes on.
+func TestSettlesUnderContinuousTraffic(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	rec := NewRecorder(st, []Price{{Model: "m", Input: 1, Output: 1}}, nil, log)
+	attributor := NewAttributor(st, log)
+
+	const (
+		requests = 40
+		lag      = SettleTime // the quota shows a request's use this long after it ended
+		perUse   = 0.01
+	)
+	t0 := time.Now().Add(-2 * time.Hour)
+	week := t0.Add(7 * 24 * time.Hour)
+	remaining := func(at time.Duration) float64 {
+		shown := max(0, int((at-lag)/time.Minute)) // one request ended each minute from the first
+		return 0.9 - perUse*float64(min(shown, requests))
+	}
+	sample := func(at time.Duration, oldestRun time.Time) {
+		t.Helper()
+		if err := st.AddQuotaSamples(ctx, []store.QuotaSample{{Account: "a", At: t0.Add(at), Bucket: "gemini-weekly", Group: "Gemini",
+			Window: "weekly", Remaining: remaining(at), ResetAt: week}}); err != nil {
+			t.Fatal(err)
+		}
+		attributor.Attribute(ctx, "a", t0.Add(at), oldestRun)
+	}
+
+	sample(0, time.Time{})
+	for minute := 1; minute <= requests+10; minute++ {
+		at := time.Duration(minute) * time.Minute
+		if minute <= requests {
+			rec.Record(gateway.Record{At: t0.Add(at), KeyHash: "k", Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
+		}
+		// A turn that began a minute ago is always running.
+		sample(at, t0.Add(at-time.Minute))
+	}
+
+	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, requests+10)
+	if err != nil || len(rows) != requests {
+		t.Fatalf("rows = %d, %v", len(rows), err)
+	}
+	total := 0.0
+	for _, row := range rows {
+		if row.QuotaUsed == nil {
+			t.Fatalf("request at %v is not settled", row.At.Sub(t0))
+		}
+		if math.Abs(*row.QuotaUsed-perUse) > 1e-9 {
+			t.Fatalf("request at %v used %v, want %v", row.At.Sub(t0), *row.QuotaUsed, perUse)
+		}
+		total += *row.QuotaUsed
+	}
+	if want := 0.9 - remaining(time.Duration(requests+10)*time.Minute); math.Abs(total-want) > 1e-9 {
+		t.Fatalf("attributed %v of a %v drop", total, want)
+	}
+}
+
 // A request stored after a sample passed its start is settled by a later
 // sample; requests that cannot be settled get a reason instead.
 func TestLateRecordsAndSkips(t *testing.T) {
@@ -225,7 +289,7 @@ func TestLateRecordsAndSkips(t *testing.T) {
 		if err := st.AddQuotaSamples(ctx, append(samples, more...)); err != nil {
 			t.Fatal(err)
 		}
-		attributor.Attribute(ctx, "a", t0.Add(at), false)
+		attributor.Attribute(ctx, "a", t0.Add(at), time.Time{})
 	}
 	record := func(at time.Duration, group string) {
 		rec.Record(gateway.Record{At: t0.Add(at), Duration: 30 * time.Second, KeyHash: "k", Account: "a", Model: "m", QuotaGroup: group,
