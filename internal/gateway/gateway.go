@@ -365,6 +365,22 @@ func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, modelID, g
 	return nil
 }
 
+// Spent returns the key's total spend in USD across all quota groups.
+func (g *Gateway) Spent(ctx context.Context, keyHash string) (float64, error) {
+	if g.budget == nil {
+		return 0, nil
+	}
+	spent, err := g.budget.Spent(ctx, keyHash)
+	if err != nil {
+		return 0, err
+	}
+	total := 0.0
+	for _, cost := range spent {
+		total += cost
+	}
+	return total, nil
+}
+
 // usd formats dollars with cents, and sub-dollar amounts to 1/100 cent.
 func usd(v float64) string {
 	if v >= 1 {

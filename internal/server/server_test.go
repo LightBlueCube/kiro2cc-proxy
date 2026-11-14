@@ -127,6 +127,27 @@ func TestRootAbortsWithoutResponse(t *testing.T) {
 	}
 }
 
+func TestBillingEndpoints(t *testing.T) {
+	r := newRelay(t)
+	for _, path := range []string{
+		"/v1/dashboard/billing/subscription",
+		"/dashboard/billing/subscription",
+		"/v1/dashboard/billing/usage",
+		"/dashboard/billing/usage",
+	} {
+		req, _ := http.NewRequest(http.MethodGet, r.url+path, nil)
+		req.Header.Set("Authorization", "Bearer "+testKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d", path, resp.StatusCode)
+		}
+	}
+}
+
 // The client returns the output items verbatim plus its tool result; the
 // relay must recognize its own transcript and continue the parked turn.
 func TestResponsesToolRoundTripContinuesTurn(t *testing.T) {
