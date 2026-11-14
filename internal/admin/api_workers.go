@@ -125,9 +125,13 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 				pv.Error = err.Error()
 			}
 			for _, wk := range info.Workers {
+				sessions := wk.Sessions
+				if sessions == nil {
+					sessions = []string{}
+				}
 				pv.Workers = append(pv.Workers, workerView{Number: wk.Number, PID: wk.PID, RSSBytes: wk.Resources.RSSBytes,
-					CPUSeconds: wk.Resources.CPUSeconds, Sessions: wk.Sessions})
-				for _, id := range wk.Sessions {
+					CPUSeconds: wk.Resources.CPUSeconds, Sessions: sessions})
+				for _, id := range sessions {
 					workerOf[id] = wk.Number
 				}
 			}

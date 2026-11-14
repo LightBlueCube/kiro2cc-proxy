@@ -88,3 +88,16 @@ func TestPruneLogs(t *testing.T) {
 		t.Error("old logs stayed")
 	}
 }
+
+func TestLiveWorkersUnassignedSessions(t *testing.T) {
+	pid := os.Getpid()
+	_, group, err := readResources(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := fmt.Sprintf("I1114 10:04:17.812704 11 front.go:1064] front: started worker 1 (pid %d)\n", pid)
+	workers := liveWorkers(front, group)
+	if len(workers) != 1 || workers[0].Sessions == nil || len(workers[0].Sessions) != 0 {
+		t.Fatalf("workers = %#v, want non-nil empty Sessions slice", workers)
+	}
+}

@@ -87,7 +87,11 @@ func liveWorkers(front string, frontPID int) []Worker {
 		if err != nil || group != frontPID {
 			continue // exited, or the pid now belongs to someone else
 		}
-		workers = append(workers, Worker{Number: n, PID: pid, Sessions: sessionsOf[n], Resources: res})
+		sessions := sessionsOf[n]
+		if sessions == nil {
+			sessions = []string{}
+		}
+		workers = append(workers, Worker{Number: n, PID: pid, Sessions: sessions, Resources: res})
 	}
 	return workers
 }
