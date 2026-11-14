@@ -996,6 +996,53 @@ func TestModelsRouteToAccountsOfferingThem(t *testing.T) {
 	}
 }
 
+func TestXHighAndMaxEffortTiers(t *testing.T) {
+	entries := entriesFromACP([]agy.ModelInfo{
+		{ModelID: "gemini-4-hydrogen-low", Name: "Gemini 4 Hydrogen (Low)"},
+		{ModelID: "gemini-4-hydrogen-medium", Name: "Gemini 4 Hydrogen (Medium)"},
+		{ModelID: "gemini-4-hydrogen-high", Name: "Gemini 4 Hydrogen (High)"},
+		{ModelID: "gemini-4-hydrogen-xhigh", Name: "Gemini 4 Hydrogen (XHigh)"},
+		{ModelID: "claude-opus-5-5-high", Name: "Claude Opus 5.5 (High)"},
+		{ModelID: "claude-opus-5-5-max", Name: "Claude Opus 5.5 (Max)"},
+	})
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v", entries)
+	}
+	if entries[0].id != "gemini-4-hydrogen" || entries[0].name != "Gemini 4 Hydrogen" ||
+		!slices.Equal(entries[0].efforts, []string{"low", "medium", "high", "xhigh"}) {
+		t.Fatalf("hydrogen = %+v", entries[0])
+	}
+	if entries[1].id != "claude-opus-5-5" || entries[1].name != "Claude Opus 5.5" ||
+		!slices.Equal(entries[1].efforts, []string{"high", "max"}) {
+		t.Fatalf("opus = %+v", entries[1])
+	}
+
+	cases := []struct {
+		model, effort string
+		wantSlug      string
+		wantTier      string
+	}{
+		{"gemini-4-hydrogen", "high", "gemini-4-hydrogen-high", "high"},
+		{"gemini-4-hydrogen", "xhigh", "gemini-4-hydrogen-xhigh", "xhigh"},
+		{"gemini-4-hydrogen", "max", "gemini-4-hydrogen-xhigh", "xhigh"},
+		{"gemini-4-hydrogen-xhigh", "", "gemini-4-hydrogen-xhigh", "xhigh"},
+		{"claude-opus-5-5", "xhigh", "claude-opus-5-5-max", "max"},
+		{"claude-opus-5-5", "max", "claude-opus-5-5-max", "max"},
+		{"claude-opus-5-5-max", "", "claude-opus-5-5-max", "max"},
+	}
+	for _, tc := range cases {
+		choice, ok := lookupModel(entries, tc.model, tc.effort)
+		if !ok {
+			t.Fatalf("lookup(%q, %q) failed", tc.model, tc.effort)
+		}
+		slug, tier, ok := choice.slugIn(entries)
+		if !ok || slug != tc.wantSlug || tier != tc.wantTier {
+			t.Fatalf("slugIn(%q, %q) = (%q, %q, %v), want (%q, %q, true)",
+				tc.model, tc.effort, slug, tier, ok, tc.wantSlug, tc.wantTier)
+		}
+	}
+}
+
 // Accounts without a catalog are refreshed before the request is routed,
 // once for concurrent requests; one whose refresh fails is not refreshed
 // again right away and is tried as before.
