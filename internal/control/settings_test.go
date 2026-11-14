@@ -78,3 +78,51 @@ func TestLoadSettingsContextWindows(t *testing.T) {
 		t.Fatal("a zero window passed")
 	}
 }
+
+func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "agyrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	// Fresh DB: LoadSettings initializes the settings row with defaults.
+	s, err := LoadSettings(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]any
+	found, err := st.Setting(ctx, settingsKey, &stored)
+	if err != nil || !found {
+		t.Fatalf("fresh DB settings persisted = %v, %v", found, err)
+	}
+	if _, ok := stored["max_workers"]; !ok {
+		t.Fatalf("stored settings missing max_workers: %+v", stored)
+	}
+
+	// Partial/older stored settings missing keys and having empty required
+	// strings get backfilled and written back to SQLite on startup.
+	if err := st.SetSetting(ctx, settingsKey, map[string]any{
+		"allow_direct":       true,
+		"session_idle_close": "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err = LoadSettings(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.AllowDirect || s.SessionIdleClose != DefaultSettings().SessionIdleClose || s.TurnsPerAccount != DefaultSettings().TurnsPerAccount {
+		t.Fatalf("loaded settings = %+v", s)
+	}
+	stored = nil
+	if _, err := st.Setting(ctx, settingsKey, &stored); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "fallback_proxy", "allow_direct"} {
+		if _, ok := stored[key]; !ok {
+			t.Errorf("persisted settings still missing key %q: %+v", key, stored)
+		}
+	}
+}

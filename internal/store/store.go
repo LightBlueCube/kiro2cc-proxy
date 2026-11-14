@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -23,86 +24,86 @@ var migrations = []string{
 	// successful requests and tokens by model.
 	`CREATE TABLE settings (
 		name  TEXT PRIMARY KEY,
-		value TEXT NOT NULL
+		value TEXT NOT NULL DEFAULT ''
 	);
 	CREATE TABLE accounts (
 		name       TEXT PRIMARY KEY,
-		env        TEXT NOT NULL,
-		proxy      TEXT NOT NULL,
-		paused     INTEGER NOT NULL,
+		env        TEXT NOT NULL DEFAULT '[]',
+		proxy      TEXT NOT NULL DEFAULT '',
+		paused     INTEGER NOT NULL DEFAULT 0,
 		priority   INTEGER NOT NULL DEFAULT 0,
 		models     TEXT NOT NULL DEFAULT '[]',
-		created_at INTEGER NOT NULL
+		created_at INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE TABLE api_keys (
 		hash        TEXT PRIMARY KEY,
 		name        TEXT NOT NULL UNIQUE,
-		note        TEXT NOT NULL,
-		models      TEXT NOT NULL,
+		note        TEXT NOT NULL DEFAULT '',
+		models      TEXT NOT NULL DEFAULT '[]',
 		max_workers INTEGER,
 		limit_total REAL,
-		limits      TEXT NOT NULL,
-		created_at  INTEGER NOT NULL,
+		limits      TEXT NOT NULL DEFAULT '{}',
+		created_at  INTEGER NOT NULL DEFAULT 0,
 		revoked_at  INTEGER
 	);
 	CREATE TABLE admin_sessions (
 		token_hash BLOB PRIMARY KEY,
 		public_id  TEXT NOT NULL UNIQUE,
-		csrf       TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		seen_at    INTEGER NOT NULL,
-		expires_at INTEGER NOT NULL,
-		ip         TEXT NOT NULL,
-		user_agent TEXT NOT NULL
+		csrf       TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL DEFAULT 0,
+		seen_at    INTEGER NOT NULL DEFAULT 0,
+		expires_at INTEGER NOT NULL DEFAULT 0,
+		ip         TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT ''
 	);
 	CREATE TABLE audit (
 		id     INTEGER PRIMARY KEY,
-		at     INTEGER NOT NULL,
-		ip     TEXT NOT NULL,
-		action TEXT NOT NULL,
-		detail TEXT NOT NULL
+		at     INTEGER NOT NULL DEFAULT 0,
+		ip     TEXT NOT NULL DEFAULT '',
+		action TEXT NOT NULL DEFAULT '',
+		detail TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX audit_at ON audit (at);
 	CREATE TABLE quota_samples (
 		account   TEXT NOT NULL,
 		at        INTEGER NOT NULL,
 		bucket    TEXT NOT NULL,
-		grp       TEXT NOT NULL,
-		win       TEXT NOT NULL,
-		remaining REAL NOT NULL,
-		reset_at  INTEGER NOT NULL,
+		grp       TEXT NOT NULL DEFAULT '',
+		win       TEXT NOT NULL DEFAULT '',
+		remaining REAL NOT NULL DEFAULT 0,
+		reset_at  INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (account, bucket, at)
 	);
 	CREATE TABLE quota_cursors (
 		account TEXT NOT NULL,
 		bucket  TEXT NOT NULL,
-		at      INTEGER NOT NULL,
+		at      INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (account, bucket)
 	);
 	CREATE TABLE requests (
 		id            INTEGER PRIMARY KEY,
-		at            INTEGER NOT NULL,
-		key_hash      TEXT NOT NULL,
-		key_name      TEXT NOT NULL,
-		account       TEXT NOT NULL,
-		model         TEXT NOT NULL,
-		slug          TEXT NOT NULL,
-		effort        TEXT NOT NULL,
-		api           TEXT NOT NULL,
-		stream        INTEGER NOT NULL,
-		mode          TEXT NOT NULL,
-		replay_reason TEXT NOT NULL,
-		status        TEXT NOT NULL,
-		error         TEXT NOT NULL,
-		finish        TEXT NOT NULL,
-		duration_ms   INTEGER NOT NULL,
+		at            INTEGER NOT NULL DEFAULT 0,
+		key_hash      TEXT NOT NULL DEFAULT '',
+		key_name      TEXT NOT NULL DEFAULT '',
+		account       TEXT NOT NULL DEFAULT '',
+		model         TEXT NOT NULL DEFAULT '',
+		slug          TEXT NOT NULL DEFAULT '',
+		effort        TEXT NOT NULL DEFAULT '',
+		api           TEXT NOT NULL DEFAULT '',
+		stream        INTEGER NOT NULL DEFAULT 0,
+		mode          TEXT NOT NULL DEFAULT '',
+		replay_reason TEXT NOT NULL DEFAULT '',
+		status        TEXT NOT NULL DEFAULT '',
+		error         TEXT NOT NULL DEFAULT '',
+		finish        TEXT NOT NULL DEFAULT '',
+		duration_ms   INTEGER NOT NULL DEFAULT 0,
 		ttft_ms       INTEGER,
-		input         INTEGER NOT NULL,
-		cached        INTEGER NOT NULL,
-		output        INTEGER NOT NULL,
-		reasoning     INTEGER NOT NULL,
+		input         INTEGER NOT NULL DEFAULT 0,
+		cached        INTEGER NOT NULL DEFAULT 0,
+		output        INTEGER NOT NULL DEFAULT 0,
+		reasoning     INTEGER NOT NULL DEFAULT 0,
 		cost_usd      REAL,
-		quota_group   TEXT NOT NULL,
+		quota_group   TEXT NOT NULL DEFAULT '',
 		quota_used    REAL,
 		quota_skip    TEXT NOT NULL DEFAULT ''
 	);
@@ -112,15 +113,15 @@ var migrations = []string{
 	CREATE TABLE key_usage (
 		key_hash TEXT NOT NULL,
 		grp      TEXT NOT NULL,
-		cost_usd REAL NOT NULL,
+		cost_usd REAL NOT NULL DEFAULT 0,
 		PRIMARY KEY (key_hash, grp)
 	);
 	CREATE TABLE key_totals (
 		key_hash TEXT NOT NULL,
 		model    TEXT NOT NULL,
-		requests INTEGER NOT NULL,
-		input    INTEGER NOT NULL,
-		output   INTEGER NOT NULL,
+		requests INTEGER NOT NULL DEFAULT 0,
+		input    INTEGER NOT NULL DEFAULT 0,
+		output   INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (key_hash, model)
 	);`,
 }
@@ -163,24 +164,150 @@ func (s *Store) migrate() error {
 	if version > len(migrations) {
 		return fmt.Errorf("schema version %d is newer than this agyrelay (%d)", version, len(migrations))
 	}
-	for v := version; v < len(migrations); v++ {
-		tx, err := s.db.Begin()
-		if err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for i, m := range migrations {
+		if err := applySchema(tx, m); err != nil {
+			return fmt.Errorf("migration %d: %w", i+1, err)
+		}
+	}
+	for _, initSQL := range []string{
+		`UPDATE accounts SET env = '[]' WHERE env = ''`,
+		`UPDATE accounts SET models = '[]' WHERE models = ''`,
+		`UPDATE api_keys SET models = '[]' WHERE models = ''`,
+		`UPDATE api_keys SET limits = '{}' WHERE limits = ''`,
+	} {
+		if _, err := tx.Exec(initSQL); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(migrations[v]); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %d: %w", v+1, err)
-		}
-		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v+1)); err != nil {
-			tx.Rollback()
+	}
+	if version < len(migrations) {
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations))); err != nil {
 			return err
 		}
-		if err := tx.Commit(); err != nil {
+	}
+	return tx.Commit()
+}
+
+// applySchema creates missing tables, adds missing columns with their
+// defaults, and creates missing indexes so existing databases pick up new
+// state columns and tables on startup.
+func applySchema(tx *sql.Tx, schema string) error {
+	var indexes []string
+	for _, raw := range strings.Split(schema, ";") {
+		stmt := strings.TrimSpace(raw)
+		if stmt == "" {
+			continue
+		}
+		if strings.HasPrefix(stmt, "CREATE TABLE ") {
+			if err := applyTable(tx, stmt); err != nil {
+				return err
+			}
+			continue
+		}
+		if rest, ok := strings.CutPrefix(stmt, "CREATE INDEX "); ok {
+			indexes = append(indexes, "CREATE INDEX IF NOT EXISTS "+strings.TrimSpace(rest))
+			continue
+		}
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	for _, idx := range indexes {
+		if _, err := tx.Exec(idx); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func applyTable(tx *sql.Tx, stmt string) error {
+	rest := strings.TrimSpace(strings.TrimPrefix(stmt, "CREATE TABLE "))
+	if _, err := tx.Exec("CREATE TABLE IF NOT EXISTS " + rest); err != nil {
+		return err
+	}
+	head, body, ok := strings.Cut(rest, "(")
+	if !ok {
+		return nil
+	}
+	table := strings.TrimSpace(head)
+	body = strings.TrimSuffix(strings.TrimSpace(body), ")")
+	have, err := tableColumns(tx, table)
+	if err != nil {
+		return err
+	}
+	for _, clause := range splitClauses(body) {
+		fields := strings.Fields(clause)
+		if len(fields) == 0 || isTableConstraint(fields[0]) || have[fields[0]] {
+			continue
+		}
+		if _, err := tx.Exec("ALTER TABLE " + table + " ADD COLUMN " + clause); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, fields[0], err)
+		}
+	}
+	return nil
+}
+
+func tableColumns(tx *sql.Tx, table string) (map[string]bool, error) {
+	rows, err := tx.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
+func splitClauses(body string) []string {
+	var out []string
+	depth := 0
+	inQuote := false
+	start := 0
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '\'':
+			inQuote = !inQuote
+		case '(':
+			if !inQuote {
+				depth++
+			}
+		case ')':
+			if !inQuote {
+				depth--
+			}
+		case ',':
+			if !inQuote && depth == 0 {
+				if c := strings.TrimSpace(body[start:i]); c != "" {
+					out = append(out, c)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if c := strings.TrimSpace(body[start:]); c != "" {
+		out = append(out, c)
+	}
+	return out
+}
+
+func isTableConstraint(word string) bool {
+	switch strings.ToUpper(word) {
+	case "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT":
+		return true
+	default:
+		return false
+	}
 }
 
 // Setting decodes the named setting into v; it reports false when unset.

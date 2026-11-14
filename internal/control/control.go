@@ -4,6 +4,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -117,8 +118,8 @@ func (s Settings) SessionIdleCloseDuration() time.Duration {
 	return idle
 }
 
-// LoadSettings reads the stored settings over the defaults. The process
-// uses them to build the pool and gateway before New.
+// LoadSettings reads the stored settings over the defaults and persists
+// any missing keys so new settings are initialized in the database on startup.
 func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
 	s := DefaultSettings()
 	var raw json.RawMessage
@@ -134,6 +135,15 @@ func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
 	if err := s.validate(); err != nil {
 		return Settings{}, fmt.Errorf("stored settings: %w", err)
 	}
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		return Settings{}, err
+	}
+	if !found || !bytes.Equal(raw, encoded) {
+		if err := st.SetSetting(ctx, settingsKey, s); err != nil {
+			return Settings{}, err
+		}
+	}
 	return s, nil
 }
 
@@ -143,6 +153,7 @@ func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
 // its index. A price row saved before cache_write existed takes its
 // model's default cache-write price.
 func decodeSettings(raw []byte, s *Settings) error {
+	defaults := *s
 	var stored struct {
 		Prices         []map[string]json.RawMessage `json:"prices"`
 		ContextWindows json.RawMessage              `json:"context_windows"`
@@ -158,6 +169,21 @@ func decodeSettings(raw []byte, s *Settings) error {
 	}
 	if err := json.Unmarshal(raw, s); err != nil {
 		return err
+	}
+	if s.TurnsPerAccount == 0 {
+		s.TurnsPerAccount = defaults.TurnsPerAccount
+	}
+	if s.SnapshotTTL == "" {
+		s.SnapshotTTL = defaults.SnapshotTTL
+	}
+	if s.SessionIdleClose == "" {
+		s.SessionIdleClose = defaults.SessionIdleClose
+	}
+	if s.LogLevel == "" {
+		s.LogLevel = defaults.LogLevel
+	}
+	if s.RetentionDays == 0 {
+		s.RetentionDays = defaults.RetentionDays
 	}
 
 	for i, row := range stored.Prices {
