@@ -102,6 +102,9 @@ func modelCallRecorder(t *testing.T, current func() *pool.Pool) http.Handler {
 			account.RecordModelCall(call.Session, nil)
 			return
 		}
+		if call.Code == http.StatusForbidden && strings.Contains(call.Message, "VALIDATION_REQUIRED") {
+			account.SetVerification(true, "https://accounts.google.com/v")
+		}
 		failure := &pool.ModelFailure{Code: call.Code, Message: call.Message}
 		if call.RetryAfter > 0 {
 			failure.Reset = time.Now().Add(call.RetryAfter)
@@ -1115,19 +1118,33 @@ func TestFallbackModelMissingFromCatalogIsUnknown(t *testing.T) {
 	}
 }
 
-func TestQuotaFailureWithoutFallbackIs429(t *testing.T) {
+func TestQuotaFailureWithoutFallback(t *testing.T) {
+	// Long cooldown (2h) with no fallback: must not return retryable 429 or
+	// hours-long Retry-After; pass upstream message as non-retryable 403.
 	h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}})
 	r := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
-	wantWait := int(agytest.QuotaRetryAfter.Seconds())
-	if r.err == nil || r.err.Kind != conv.ErrQuota || r.err.Message != agytest.QuotaError || r.err.RetryAfterSeconds != wantWait || r.text != "" {
-		t.Fatalf("result = %+v, want quota error retrying after %d s", r, wantWait)
+	if r.err == nil || r.err.Kind != conv.ErrQuota || r.err.HTTPStatus != http.StatusForbidden ||
+		r.err.Message != agytest.QuotaError || r.err.RetryAfterSeconds != 0 || r.text != "" {
+		t.Fatalf("result = %+v, want non-retryable 403 quota error", r.err)
 	}
-	// While every account offering the model is cooling down, later
+	// While every account offering the model is in long cooldown, later
 	// requests get a non-retryable ErrUnknownModel instead of 503.
 	again := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
 	if again.err == nil || again.err.Kind != conv.ErrUnknownModel ||
 		strings.Contains(again.err.Message, "acct0") || strings.Contains(again.err.Message, "cooling down") {
 		t.Fatalf("cooling down = %+v, want ErrUnknownModel without pool details", again)
+	}
+
+	// Short cooldown (15s) keeps retryable 429 with Retry-After, both on
+	// the failing call and while the cooldown lasts.
+	short := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_QUOTA=1", "FAKE_AGY_QUOTA_WAIT=15s"}})
+	r1 := short.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if r1.err == nil || r1.err.Kind != conv.ErrQuota || r1.err.HTTPStatus != 0 || r1.err.RetryAfterSeconds != 15 || r1.err.Message != agytest.QuotaError {
+		t.Fatalf("short quota = %+v, want 429 with 15s Retry-After", r1.err)
+	}
+	r2 := short.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if r2.err == nil || r2.err.Kind != conv.ErrQuota || r2.err.HTTPStatus != 0 || r2.err.RetryAfterSeconds <= 0 || r2.err.RetryAfterSeconds > 15 {
+		t.Fatalf("short cooldown follow-up = %+v, want 429 with Retry-After", r2.err)
 	}
 }
 
@@ -1426,8 +1443,8 @@ func TestRetriedToolResultsRewindPastCancelledInput(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	retry := h.complete(ctx, "alice", req(messages))
-	if r := <-cancelled; r.err == nil {
-		t.Fatalf("first attempt = %+v, want cancelled", r)
+	if r := <-cancelled; r.err == nil || r.err.Kind != conv.ErrCancelled {
+		t.Fatalf("first attempt = %+v, want ErrCancelled", r)
 	}
 	if retry.err != nil {
 		t.Fatalf("retry = %+v", retry)
@@ -1794,21 +1811,21 @@ func TestWorkerLimitsAndIdleEviction(t *testing.T) {
 	}
 
 	// Park a turn for alice: her 1 worker is now busy, so a second
-	// conversation (fresh or warm) fails with ErrKeyLimit without dropping
+	// conversation (fresh or warm) fails with ErrKeyBusy without dropping
 	// the warm snapshot, while continuing the parked turn succeeds.
 	tools := []conv.ToolSpec{readTool}
 	parked := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{user(`@tool read {}`)}})
 	if parked.err != nil || parked.finish != conv.FinishToolCalls {
 		t.Fatalf("parked = %+v", parked)
 	}
-	if blocked := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("other")}}); blocked.err == nil || blocked.err.Kind != conv.ErrKeyLimit {
-		t.Fatalf("key busy fresh = %+v, want ErrKeyLimit", blocked)
+	if blocked := h.completeAs(ctx, alice, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("other")}}); blocked.err == nil || blocked.err.Kind != conv.ErrKeyBusy {
+		t.Fatalf("key busy fresh = %+v, want ErrKeyBusy", blocked)
 	}
 	if blockedWarm := h.completeAs(ctx, alice, conv.Request{
 		Model:    "gemini-3.8-flash",
 		Messages: []conv.Message{user("c2"), {Role: conv.RoleAssistant, Text: c2.text}, user("c2-2"), {Role: conv.RoleAssistant, Text: c2Warm.text}, user("c2-3")},
-	}); blockedWarm.err == nil || blockedWarm.err.Kind != conv.ErrKeyLimit {
-		t.Fatalf("key busy warm = %+v, want ErrKeyLimit", blockedWarm)
+	}); blockedWarm.err == nil || blockedWarm.err.Kind != conv.ErrKeyBusy {
+		t.Fatalf("key busy warm = %+v, want ErrKeyBusy", blockedWarm)
 	}
 	cont := h.completeAs(ctx, alice, conv.Request{
 		Model: "gemini-3.8-flash", Tools: tools,
@@ -1926,4 +1943,143 @@ func TestDownstreamErrorsHideInternalInfo(t *testing.T) {
 		t.Fatalf("killed mid-turn = %+v", r)
 	}
 	assertClean(t, r.err.Message)
+}
+
+func TestUpstreamErrorsPassThrough(t *testing.T) {
+	ctx := context.Background()
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}
+
+	singleCases := []struct {
+		name       string
+		code       string
+		msg        string
+		wantKind   conv.ErrorKind
+		wantStatus int
+		wantMsg    string
+	}{
+		{
+			name:     "400 invalid argument",
+			code:     "400",
+			msg:      "INVALID_ARGUMENT (code 400): unsupported image",
+			wantKind: conv.ErrInvalidRequest,
+			wantMsg:  "INVALID_ARGUMENT (code 400): unsupported image",
+		},
+		{
+			name:       "413 payload too large",
+			code:       "413",
+			msg:        "HTTP 413 Request Entity Too Large",
+			wantKind:   conv.ErrContextLength,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantMsg:    "HTTP 413 Request Entity Too Large",
+		},
+		{
+			name:       "422 unprocessable entity",
+			code:       "422",
+			msg:        "HTTP 422: bad schema",
+			wantKind:   conv.ErrInvalidRequest,
+			wantStatus: http.StatusUnprocessableEntity,
+			wantMsg:    "HTTP 422: bad schema",
+		},
+		{
+			name:     "403 permission denied",
+			code:     "403",
+			msg:      "PERMISSION_DENIED (code 403): caller lacks entitlement",
+			wantKind: conv.ErrForbidden,
+			wantMsg:  "PERMISSION_DENIED (code 403): caller lacks entitlement",
+		},
+		{
+			name:     "403 validation required hides verify",
+			code:     "403",
+			msg:      "PERMISSION_DENIED (code 403): VALIDATION_REQUIRED verify account",
+			wantKind: conv.ErrUnknownModel,
+		},
+		{
+			name:     "404 mapped to non-retryable model_not_found",
+			code:     "404",
+			msg:      "NOT_FOUND (code 404): model missing",
+			wantKind: conv.ErrUnknownModel,
+			wantMsg:  "NOT_FOUND (code 404): model missing",
+		},
+		{
+			name:     "401 upstream hidden behind model unavailable",
+			code:     "401",
+			msg:      "UNAUTHENTICATED (code 401): bad token",
+			wantKind: conv.ErrUnknownModel,
+		},
+		{
+			name:     "503 service unavailable maps to overloaded",
+			code:     "503",
+			msg:      "UNAVAILABLE (code 503): backend down",
+			wantKind: conv.ErrOverloaded,
+			wantMsg:  "UNAVAILABLE (code 503): backend down",
+		},
+		{
+			name:       "500 internal server error passes status",
+			code:       "500",
+			msg:        "INTERNAL (code 500): server boom",
+			wantKind:   conv.ErrUpstream,
+			wantStatus: http.StatusInternalServerError,
+			wantMsg:    "INTERNAL (code 500): server boom",
+		},
+		{
+			name:     "429 capacity without reset is overloaded",
+			code:     "429",
+			msg:      agytest.CapacityError,
+			wantKind: conv.ErrOverloaded,
+			wantMsg:  agytest.CapacityError,
+		},
+	}
+	for _, tc := range singleCases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=" + tc.code, "FAKE_AGY_FAIL_MSG=" + tc.msg}})
+			r := h.complete(ctx, "alice", req)
+			if r.err == nil || r.err.Kind != tc.wantKind || r.err.HTTPStatus != tc.wantStatus {
+				t.Fatalf("got err = %+v, want kind=%v status=%d", r.err, tc.wantKind, tc.wantStatus)
+			}
+			if tc.wantMsg != "" && r.err.Message != tc.wantMsg {
+				t.Fatalf("message = %q, want %q", r.err.Message, tc.wantMsg)
+			}
+			if strings.Contains(strings.ToLower(r.err.Message), "verify") {
+				t.Fatalf("message leaked verify: %q", r.err.Message)
+			}
+		})
+	}
+
+	// Retryable / account-scoped failures fall back to a healthy second account.
+	for _, tc := range []struct {
+		name string
+		code string
+		msg  string
+	}{
+		{"401", "401", "UNAUTHENTICATED (code 401): bad token"},
+		{"403-permission", "403", "PERMISSION_DENIED (code 403): caller lacks entitlement"},
+		{"403-validation", "403", "PERMISSION_DENIED (code 403): VALIDATION_REQUIRED"},
+		{"404", "404", "NOT_FOUND (code 404): model missing"},
+		{"429-capacity", "429", agytest.CapacityError},
+		{"503", "503", "UNAVAILABLE (code 503): backend down"},
+	} {
+		t.Run("fallback/"+tc.name, func(t *testing.T) {
+			h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=" + tc.code, "FAKE_AGY_FAIL_MSG=" + tc.msg}})
+			user := userPreferring(t, h.p, "acct0")
+			r := h.complete(ctx, user, req)
+			if r.err != nil || r.text != "reply to: hi" {
+				t.Fatalf("fallback on %s = %+v, want reply", tc.name, r)
+			}
+		})
+	}
+}
+
+func TestAuthErrorDisablingLastAccountIsNonRetryable(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	tokenDir := filepath.Join(h.p.Account("acct0").GeminiDir(), "antigravity-cli")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tokenDir, "antigravity-oauth-token"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if r.err == nil || r.err.Kind != conv.ErrUnknownModel {
+		t.Fatalf("err = %+v, want ErrUnknownModel (400 non-retryable)", r.err)
+	}
 }

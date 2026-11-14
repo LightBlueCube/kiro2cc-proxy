@@ -110,8 +110,10 @@ const (
 	ErrForbidden
 	ErrUnknownModel
 	ErrQuota
-	// ErrKeyLimit means the API key used up its own quota limit.
+	// ErrKeyLimit means the API key used up its own spending limit.
 	ErrKeyLimit
+	// ErrKeyBusy means the API key reached its concurrent request limit.
+	ErrKeyBusy
 	ErrOverloaded
 	ErrUnavailable
 	// ErrCancelled means the client disconnected or the turn was cancelled.
@@ -124,6 +126,8 @@ type Error struct {
 	Message string
 	// RetryAfterSeconds hints when the request may succeed (0 = unknown).
 	RetryAfterSeconds int
+	// HTTPStatus overrides Kind's default HTTP status when > 0.
+	HTTPStatus int
 }
 
 func (e *Error) Error() string { return e.Message }

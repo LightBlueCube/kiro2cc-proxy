@@ -88,6 +88,7 @@ var statusNames = map[conv.ErrorKind]string{
 	conv.ErrUnknownModel:   "unknown_model",
 	conv.ErrQuota:          "quota",
 	conv.ErrKeyLimit:       "key_limit",
+	conv.ErrKeyBusy:        "key_busy",
 	conv.ErrOverloaded:     "overloaded",
 	conv.ErrUnavailable:    "unavailable",
 	conv.ErrCancelled:      store.StatusCancelled,

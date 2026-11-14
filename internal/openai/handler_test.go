@@ -188,6 +188,87 @@ func TestEarlyErrorKeepsStatus(t *testing.T) {
 			t.Fatalf("unknown model = %d %s", rec.Code, rec.Body.String())
 		}
 	}
+
+	cases := []struct {
+		name      string
+		err       *conv.Error
+		wantCode  int
+		wantType  string
+		wantError string
+	}{
+		{
+			name:      "key spend limit is 403 non-retryable",
+			err:       &conv.Error{Kind: conv.ErrKeyLimit, Message: "spent $10"},
+			wantCode:  http.StatusForbidden,
+			wantType:  "insufficient_quota",
+			wantError: "insufficient_quota",
+		},
+		{
+			name:      "key worker limit is 429 retryable",
+			err:       &conv.Error{Kind: conv.ErrKeyBusy, Message: "concurrent limit"},
+			wantCode:  http.StatusTooManyRequests,
+			wantType:  "rate_limit_exceeded",
+			wantError: "rate_limit_exceeded",
+		},
+		{
+			name:      "long quota exhaustion is 403 insufficient_quota",
+			err:       &conv.Error{Kind: conv.ErrQuota, HTTPStatus: http.StatusForbidden, Message: "Individual quota reached"},
+			wantCode:  http.StatusForbidden,
+			wantType:  "insufficient_quota",
+			wantError: "insufficient_quota",
+		},
+		{
+			name:      "cancelled request is 499 non-retryable",
+			err:       &conv.Error{Kind: conv.ErrCancelled, Message: "cancelled"},
+			wantCode:  statusClientClosed,
+			wantType:  "request_cancelled",
+			wantError: "request_cancelled",
+		},
+		{
+			name:      "upstream 422 passes status through",
+			err:       &conv.Error{Kind: conv.ErrInvalidRequest, HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable"},
+			wantCode:  http.StatusUnprocessableEntity,
+			wantType:  "invalid_request_error",
+			wantError: "invalid_request_error",
+		},
+		{
+			name:      "upstream 413 passes status through",
+			err:       &conv.Error{Kind: conv.ErrContextLength, HTTPStatus: http.StatusRequestEntityTooLarge, Message: "too large"},
+			wantCode:  http.StatusRequestEntityTooLarge,
+			wantType:  "invalid_request_error",
+			wantError: "context_length_exceeded",
+		},
+		{
+			name:      "upstream 503 passes status through",
+			err:       &conv.Error{Kind: conv.ErrUpstream, HTTPStatus: http.StatusServiceUnavailable, Message: "HTTP 503 Service Unavailable"},
+			wantCode:  http.StatusServiceUnavailable,
+			wantType:  "upstream_error",
+			wantError: "upstream_error",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewHandler(&stubBackend{events: []conv.Event{{Err: tc.err}}})
+			for _, serve := range []func(http.ResponseWriter, *http.Request, conv.Caller){handler.Chat, handler.Responses} {
+				rec := post(t, serve, `{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}],"input":"x"}`)
+				if rec.Code != tc.wantCode || rec.Header().Get("Retry-After") != "" {
+					t.Fatalf("status=%d retry-after=%q body=%s", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+				}
+				var body struct {
+					Error struct {
+						Type string `json:"type"`
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				if body.Error.Type != tc.wantType || body.Error.Code != tc.wantError {
+					t.Fatalf("error body = %+v, want type=%q code=%q", body.Error, tc.wantType, tc.wantError)
+				}
+			}
+		})
+	}
 }
 
 func TestResponsesDecodeGroupsAssistantItems(t *testing.T) {

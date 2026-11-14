@@ -327,3 +327,39 @@ func TestLateRecordsAndSkips(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordErrorStatuses(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rec := NewRecorder(st, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	cases := []struct {
+		kind conv.ErrorKind
+		want string
+	}{
+		{conv.ErrKeyLimit, "key_limit"},
+		{conv.ErrKeyBusy, "key_busy"},
+		{conv.ErrCancelled, "cancelled"},
+		{conv.ErrQuota, "quota"},
+	}
+	for i, tc := range cases {
+		rec.Record(gateway.Record{
+			At: t0.Add(time.Duration(i) * time.Second), KeyHash: "k", KeyName: "alice", Model: "m", QuotaGroup: "gemini",
+			Err: &conv.Error{Kind: tc.kind, HTTPStatus: 403, Message: tc.want},
+		})
+	}
+	rows, err := st.Requests(ctx, store.RequestFilter{}, 0, 10)
+	if err != nil || len(rows) != len(cases) {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	for i, tc := range cases {
+		row := rows[len(cases)-1-i]
+		if row.Status != tc.want {
+			t.Errorf("kind %v -> status %q, want %q", tc.kind, row.Status, tc.want)
+		}
+	}
+}

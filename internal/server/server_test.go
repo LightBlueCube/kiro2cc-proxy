@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -113,8 +114,9 @@ var readTool = map[string]any{"type": "function", "name": "read", "parameters": 
 
 func TestAuthRequired(t *testing.T) {
 	r := newRelay(t)
-	if status, _ := r.post("/v1/responses", "wrong", map[string]any{"model": "gemini-3.8-flash", "input": "hi"}); status != http.StatusUnauthorized {
-		t.Fatalf("status %d", status)
+	status, raw := r.post("/v1/responses", "wrong", map[string]any{"model": "gemini-3.8-flash", "input": "hi"})
+	if status != http.StatusUnauthorized || !strings.Contains(string(raw), `"code":"invalid_api_key"`) {
+		t.Fatalf("status %d body=%s", status, raw)
 	}
 }
 
@@ -210,6 +212,61 @@ func TestChatReasoningDetailsRoundTrip(t *testing.T) {
 		t.Fatalf("status %d: %s", status, raw)
 	}
 	if n := r.prompts(); n != 2 {
-		t.Fatalf("session/prompt count = %d", n)
+		t.Fatalf("session/prompt count = %d, want 2", n)
+	}
+}
+
+type exhaustedBudget struct{}
+
+func (exhaustedBudget) Spent(context.Context, string) (map[string]float64, error) {
+	return map[string]float64{"gemini": 1.0}, nil
+}
+func (exhaustedBudget) Priced(string) bool { return true }
+
+func TestKeySpendLimitIsNonRetryable403(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b, err := bridge.Start(logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := pool.New(pool.Config{
+		Bin:             os.Args[0],
+		Accounts:        []pool.AccountConfig{{Name: "main", Home: filepath.Join(dir, "home"), Env: []string{agytest.EnvRun + "=1"}}},
+		TurnsPerAccount: 4,
+		Log:             logger,
+	})
+	if err != nil {
+		b.Close()
+		t.Fatal(err)
+	}
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: exhaustedBudget{}, Log: logger})
+	if err != nil {
+		p.Close()
+		b.Close()
+		t.Fatal(err)
+	}
+	limit := 1.0
+	srv := httptest.NewServer(New(Config{
+		Keys:   staticKeys{testKey: {Name: "alice", KeyHash: "h1", LimitTotal: &limit}},
+		OpenAI: openai.NewHandler(gw),
+	}))
+	t.Cleanup(func() {
+		srv.Close()
+		gw.Close()
+		p.Close()
+		b.Close()
+	})
+
+	r := &relay{t: t, url: srv.URL}
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
+		status, raw := r.post(path, testKey, map[string]any{
+			"model":    "gemini-3.8-flash",
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			"input":    "hi",
+		})
+		if status != http.StatusForbidden || !strings.Contains(string(raw), `"code":"insufficient_quota"`) {
+			t.Fatalf("%s status=%d body=%s, want 403 insufficient_quota", path, status, raw)
+		}
 	}
 }

@@ -362,45 +362,53 @@ func streamChat(w http.ResponseWriter, events <-chan conv.Event, meta chatMeta, 
 
 const statusClientClosed = 499
 
-func statusFor(kind conv.ErrorKind) (int, string) {
-	switch kind {
+func errorInfo(err *conv.Error) (status int, errType, code string) {
+	switch err.Kind {
 	case conv.ErrInvalidRequest:
-		return http.StatusBadRequest, "invalid_request_error"
+		status, errType, code = http.StatusBadRequest, "invalid_request_error", "invalid_request_error"
 	case conv.ErrContextLength:
 		// OpenAI's code; clients compact the conversation on it.
-		return http.StatusBadRequest, "context_length_exceeded"
+		status, errType, code = http.StatusBadRequest, "invalid_request_error", "context_length_exceeded"
 	case conv.ErrUnauthorized:
-		return http.StatusUnauthorized, "invalid_api_key"
+		status, errType, code = http.StatusUnauthorized, "invalid_api_key", "invalid_api_key"
 	case conv.ErrForbidden:
-		return http.StatusForbidden, "permission_denied"
+		status, errType, code = http.StatusForbidden, "permission_denied", "permission_denied"
 	case conv.ErrUnknownModel:
 		// 400 (not 404): clients such as OpenCode treat OpenAI 404s as
 		// retryable, while a missing or exhausted model cannot be retried.
-		return http.StatusBadRequest, "model_not_found"
+		status, errType, code = http.StatusBadRequest, "invalid_request_error", "model_not_found"
 	case conv.ErrQuota:
-		return http.StatusTooManyRequests, "rate_limit_exceeded"
+		status, errType, code = http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded"
+		if err.HTTPStatus > 0 && err.HTTPStatus != http.StatusTooManyRequests {
+			return err.HTTPStatus, "insufficient_quota", "insufficient_quota"
+		}
 	case conv.ErrKeyLimit:
-		return http.StatusTooManyRequests, "insufficient_quota"
-	case conv.ErrOverloaded, conv.ErrUnavailable:
-		return http.StatusServiceUnavailable, "service_unavailable"
+		// 403 (not 429): spending limits do not reset automatically, so
+		// clients must not retry.
+		status, errType, code = http.StatusForbidden, "insufficient_quota", "insufficient_quota"
+	case conv.ErrKeyBusy:
+		status, errType, code = http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded"
 	case conv.ErrCancelled:
-		return statusClientClosed, "request_cancelled"
+		status, errType, code = statusClientClosed, "request_cancelled", "request_cancelled"
+	case conv.ErrOverloaded, conv.ErrUnavailable:
+		status, errType, code = http.StatusServiceUnavailable, "service_unavailable", "service_unavailable"
+	default:
+		status, errType, code = http.StatusBadGateway, "upstream_error", "upstream_error"
 	}
-	return http.StatusBadGateway, "upstream_error"
+	if err.HTTPStatus > 0 {
+		status = err.HTTPStatus
+	}
+	return status, errType, code
 }
 
 func errorBody(err *conv.Error) map[string]any {
-	_, code := statusFor(err.Kind)
-	errType := code
-	if err.Kind == conv.ErrContextLength || err.Kind == conv.ErrUnknownModel {
-		errType = "invalid_request_error" // as OpenAI types it
-	}
+	_, errType, code := errorInfo(err)
 	return map[string]any{"error": map[string]any{"message": err.Message, "type": errType, "code": code}}
 }
 
 // WriteError writes err as an OpenAI error response.
 func WriteError(w http.ResponseWriter, err *conv.Error) {
-	status, _ := statusFor(err.Kind)
+	status, _, _ := errorInfo(err)
 	if err.RetryAfterSeconds > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(err.RetryAfterSeconds))
 	}

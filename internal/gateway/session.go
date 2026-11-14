@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -276,10 +277,18 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", r.req.Model)}}
 			}
 			g.log.Warn("no account available for request", "model", r.req.Model, "err", err, "lacking", lacking, "last_err", lastErr)
-			if lastErr == nil && !g.hasCandidate(r) {
-				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}}
+			if g.hasAvailableAccount(r) {
+				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnavailable, Message: "service temporarily unavailable"}}
 			}
-			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnavailable, Message: "service temporarily unavailable"}}
+			if wait := g.minShortCooldown(r); wait > 0 {
+				secs := int(math.Ceil(wait.Seconds()))
+				return nil, &attemptFailure{err: &conv.Error{
+					Kind:              conv.ErrQuota,
+					Message:           fmt.Sprintf("rate limit exceeded; retry in %d s", secs),
+					RetryAfterSeconds: secs,
+				}}
+			}
+			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}}
 		}
 		skip := func() {
 			account.Release()
@@ -422,7 +431,7 @@ func (g *Gateway) releaseClaim(at *activeTurn) {
 func (g *Gateway) tryAcquireBusyLocked(r *run) *conv.Error {
 	if r.maxWorkers != nil && g.busyByKey[r.user] >= *r.maxWorkers {
 		return &conv.Error{
-			Kind:    conv.ErrKeyLimit,
+			Kind:    conv.ErrKeyBusy,
 			Message: fmt.Sprintf("this API key reached its limit of %d concurrent requests", *r.maxWorkers),
 		}
 	}
