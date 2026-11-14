@@ -46,10 +46,14 @@ type requestView struct {
 }
 
 // queryFilter reads key (a key hash), model, account, and since/until
-// (Unix ms).
+// (Unix ms). On /user/api/ routes, the key filter is pinned to the
+// authenticated key.
 func queryFilter(r *http.Request) (store.RequestFilter, bool) {
 	q := r.URL.Query()
 	f := store.RequestFilter{KeyHash: q.Get("key"), Model: q.Get("model"), Account: q.Get("account")}
+	if k, ok := currentUserKey(r); ok {
+		f.KeyHash = k.Hash
+	}
 	for name, dst := range map[string]*time.Time{"since": &f.Since, "until": &f.Until} {
 		raw := q.Get(name)
 		if raw == "" {
@@ -167,17 +171,22 @@ func (h *Handler) filterValues(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "since is Unix milliseconds")
 		return
 	}
-	keys, err := h.store.RequestKeys(r.Context(), f.Since)
-	if err != nil {
-		h.internalError(w, "list filter values", err)
-		return
-	}
-	if keys == nil {
-		keys = []store.RequestKey{}
+	keys := []store.RequestKey{}
+	if _, isUser := currentUserKey(r); !isUser {
+		var err error
+		keys, err = h.store.RequestKeys(r.Context(), f.Since)
+		if err != nil {
+			h.internalError(w, "list filter values", err)
+			return
+		}
+		if keys == nil {
+			keys = []store.RequestKey{}
+		}
 	}
 	out := map[string]any{"key": keys}
+	distinctFilter := store.RequestFilter{KeyHash: f.KeyHash, Since: f.Since}
 	for _, by := range []store.SummaryBy{store.ByModel, store.ByAccount} {
-		values, err := h.store.Distinct(r.Context(), by, f.Since)
+		values, err := h.store.Distinct(r.Context(), by, distinctFilter)
 		if err != nil {
 			h.internalError(w, "list filter values", err)
 			return

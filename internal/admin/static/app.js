@@ -2,7 +2,10 @@
 
 // ---- helpers ---------------------------------------------------------
 
+const isUserPage = location.pathname.startsWith("/user");
 let csrf = "";
+let userToken = "";
+let signedIn = false;
 
 class APIError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -11,15 +14,17 @@ class APIError extends Error {
 async function api(method, path, body) {
   const headers = { "Accept": "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (method !== "GET") headers["X-CSRF-Token"] = csrf;
-  const resp = await fetch("/admin/api/" + path, {
+  if (isUserPage) headers["Authorization"] = "Bearer " + userToken;
+  else if (method !== "GET") headers["X-CSRF-Token"] = csrf;
+  const base = isUserPage ? "/user/api/" : "/admin/api/";
+  const resp = await fetch(base + path, {
     method, headers, credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await resp.json().catch(() => ({}));
-  if (resp.status === 401 && path !== "login") {
+  if (resp.status === 401 && path !== "login" && (!isUserPage || signedIn)) {
     showLogin();
-    throw new APIError(401, "signed out");
+    throw new APIError(401, data.error || "signed out");
   }
   if (!resp.ok) throw new APIError(resp.status, data.error || resp.statusText);
   return data;
@@ -103,6 +108,7 @@ let cleanup = null;
 
 function showLogin() {
   stopView();
+  signedIn = false;
   document.getElementById("app").hidden = true;
   document.getElementById("login").hidden = false;
   document.getElementById("login-password").focus();
@@ -114,6 +120,7 @@ function stopView() {
 }
 
 function route() {
+  if (isUserPage) return;
   stopView();
   const name = (location.hash || "#accounts").slice(1);
   const view = views[name] ? name : "accounts";
@@ -131,9 +138,20 @@ async function start() {
     if (err.status !== 401) toast(err.message, true);
     return;
   }
+  signedIn = true;
   document.getElementById("login").hidden = true;
   document.getElementById("app").hidden = false;
   route();
+}
+
+function startUser(keyData) {
+  stopView();
+  signedIn = true;
+  document.getElementById("login").hidden = true;
+  document.getElementById("app").hidden = false;
+  const container = document.getElementById("view");
+  container.replaceChildren();
+  cleanup = views.user(container, keyData) || null;
 }
 
 // boot loads the UI text before anything is shown; without it the page
@@ -146,6 +164,12 @@ async function boot() {
     return;
   }
   i18n.apply(document);
+  if (isUserPage) {
+    document.getElementById("login-label").textContent = t("user.key");
+    document.getElementById("tabs").replaceChildren();
+    showLogin();
+    return;
+  }
   start();
 }
 
@@ -155,6 +179,13 @@ document.getElementById("login-form").addEventListener("submit", async event => 
   const error = document.getElementById("login-error");
   error.textContent = "";
   try {
+    if (isUserPage) {
+      userToken = input.value.trim();
+      const data = await api("GET", "key");
+      input.value = "";
+      startUser(data);
+      return;
+    }
     const data = await api("POST", "login", { password: input.value });
     csrf = data.csrf;
     input.value = "";
@@ -165,6 +196,11 @@ document.getElementById("login-form").addEventListener("submit", async event => 
 });
 
 document.getElementById("logout").addEventListener("click", () => guarded(async () => {
+  if (isUserPage) {
+    userToken = "";
+    showLogin();
+    return;
+  }
   await api("POST", "logout");
   csrf = "";
   showLogin();
@@ -1198,14 +1234,16 @@ function stackedBars(days, series, seriesName, valueOf, label) {
   return svg;
 }
 
-views.calls = container => {
+// usagePanel renders the usage filters, totals, per-day chart, per-key
+// breakdown, and request history. On /user, userMode hides the key selector.
+function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
   const state = { range: "7d", key: "", model: "", account: "", metric: "cost" };
   const filters = h("div", { class: "row" });
   const totals = h("div", { class: "card" });
   const chart = h("div", { class: "card" });
   const byKey = h("div", { class: "card" });
   const list = h("div", { class: "card" });
-  container.append(h("h1", {}, t("calls.title")), h("div", { class: "card" }, filters), totals, chart, byKey, list);
+  container.append(h("div", { class: "card" }, filters), totals, chart, byKey, list);
 
   const ranges = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 };
   const since = () => Date.now() - ranges[state.range] * 86400e3;
@@ -1225,13 +1263,13 @@ views.calls = container => {
     filters.replaceChildren(
       h("label", {}, t("calls.range"), h("select", { onchange: e => { state.range = e.target.value; reload(); } },
         Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
-      h("label", {}, t("common.key"), select("key", values.key.map(k => [k.hash, keyText(k.name, k.hash)]), t("calls.all_keys"))),
+      userMode ? null : h("label", {}, t("common.key"), select("key", values.key.map(k => [k.hash, keyText(k.name, k.hash)]), t("calls.all_keys"))),
       h("label", {}, t("common.model"), select("model", plain(values.model), t("calls.all_models"))),
       h("label", {}, t("common.account"), select("account", plain(values.account), t("calls.all_accounts"))),
       h("label", {}, t("calls.chart"), h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
         metrics.map(([v, label]) => h("option", { value: v, selected: v === state.metric }, label)))),
       h("span", { class: "grow" }),
-      h("button", { onclick: e => guarded(reload, e.target) }, t("common.refresh")));
+      h("button", { onclick: e => guarded(async () => { if (onRefresh) await onRefresh(); await reload(); }, e.target) }, t("common.refresh")));
   }
 
   const stat = (label, value, hint) => h("div", { title: hint || "" }, h("div", { class: "muted" }, label), h("div", { style: "font-size:18px;font-weight:600" }, value));
@@ -1369,6 +1407,33 @@ views.calls = container => {
   }
 
   guarded(async () => { await renderFilters(); await reload(); });
+}
+
+views.calls = container => {
+  container.append(h("h1", {}, t("calls.title")));
+  usagePanel(container);
+};
+
+views.user = (container, initialData) => {
+  const keyCard = h("div", { class: "card" });
+  container.append(h("h1", {}, t("calls.title")), keyCard);
+
+  function renderKey(data) {
+    const groups = data.groups;
+    keyCard.replaceChildren(table([
+      { title: t("common.name"), cell: k => k.name },
+      { title: t("keys.col.hash"), hint: t("keys.col.hash.hint"), cell: k => hashText(k.hash) },
+      { title: t("keys.col.models"), cell: k => k.models.length ? k.models.join(", ") : h("span", { class: "muted" }, t("keys.models.all")) },
+      { title: t("keys.col.workers"), cell: k => k.max_workers !== null ? k.max_workers : h("span", { class: "muted" }, t("keys.limit.placeholder")) },
+      { title: t("keys.col.usage"), cell: k => spendCell(k, groups) },
+      { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
+      { title: t("keys.col.created"), cell: k => stack(fmt.time(k.created_at),
+          k.revoked_at ? h("span", { class: "bad" }, t("keys.revoked", { time: fmt.time(k.revoked_at) })) : null) },
+    ], [data.key], k => k.revoked_at ? "revoked" : ""));
+  }
+
+  renderKey(initialData);
+  usagePanel(container, { userMode: true, onRefresh: async () => renderKey(await api("GET", "key")) });
 };
 
 // ---- logs ------------------------------------------------------------

@@ -57,9 +57,12 @@ func New(cfg Config) *Server {
 			s.openai.Models(w, r, caller)
 		}
 	})
+	s.mux.HandleFunc("/{$}", func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	})
 	if cfg.Admin != nil {
 		s.mux.Handle("/admin/", cfg.Admin)
-		s.mux.Handle("GET /{$}", http.RedirectHandler("/admin/", http.StatusFound))
+		s.mux.Handle("/user/", cfg.Admin)
 	}
 	return s
 }

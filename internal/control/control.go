@@ -559,6 +559,15 @@ func keyHash(token string) string {
 
 func (c *Control) Keys(ctx context.Context) ([]store.Key, error) { return c.cfg.Store.Keys(ctx) }
 
+// LookupKey resolves a plaintext API key (active or revoked) to its stored
+// record, or store.ErrNotFound.
+func (c *Control) LookupKey(ctx context.Context, token string) (store.Key, error) {
+	if token == "" {
+		return store.Key{}, store.ErrNotFound
+	}
+	return c.cfg.Store.Key(ctx, keyHash(token))
+}
+
 // Models is the gateway's model catalog.
 func (c *Control) Models() []conv.ModelInfo { return c.cfg.Gateway.Models() }
 

@@ -269,14 +269,20 @@ func (s *Store) RequestKeys(ctx context.Context, since time.Time) ([]RequestKey,
 	return out, rows.Err()
 }
 
-// Distinct lists the values of a request column (model, account) seen
-// since the given time, for filter menus.
-func (s *Store) Distinct(ctx context.Context, by SummaryBy, since time.Time) ([]string, error) {
+// Distinct lists the values of a request column (model, account) in
+// matching requests, for filter menus.
+func (s *Store) Distinct(ctx context.Context, by SummaryBy, f RequestFilter) ([]string, error) {
 	column := map[SummaryBy]string{ByModel: "model", ByAccount: "account"}[by]
 	if column == "" {
 		return nil, fmt.Errorf("unknown column %q", by)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT `+column+` FROM requests WHERE at >= ? AND `+column+` != '' ORDER BY 1`, since.UnixMilli())
+	where, args := f.where()
+	if where == "" {
+		where = " WHERE " + column + " != ''"
+	} else {
+		where += " AND " + column + " != ''"
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT `+column+` FROM requests`+where+` ORDER BY 1`, args...)
 	if err != nil {
 		return nil, err
 	}

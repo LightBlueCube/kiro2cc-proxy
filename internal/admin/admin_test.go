@@ -873,3 +873,87 @@ func TestLogsAndUsageNeedSession(t *testing.T) {
 		t.Fatalf("bad grouping = %d", r.status)
 	}
 }
+
+func TestUserKeyUsageAndMetadata(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	adminClient := e.client("203.0.113.1")
+	adminClient.login(testPassword)
+
+	r := adminClient.do("POST", "/admin/api/keys", map[string]any{
+		"name": "alice", "note": "secret-admin-note", "models": []string{"gemini-3.8-flash"},
+		"max_workers": 3, "limit_total": 15.0,
+	}, nil)
+	aliceToken, _ := r.body["key"].(string)
+	aliceSum := sha256.Sum256([]byte(aliceToken))
+	aliceHash := hex.EncodeToString(aliceSum[:])
+
+	r = adminClient.do("POST", "/admin/api/keys", map[string]any{"name": "bob", "note": "bob-note"}, nil)
+	bobToken, _ := r.body["key"].(string)
+	bobSum := sha256.Sum256([]byte(bobToken))
+	bobHash := hex.EncodeToString(bobSum[:])
+
+	ctx := context.Background()
+	costA, costB := 1.25, 2.5
+	for _, req := range []store.Request{
+		{At: time.Now(), KeyHash: aliceHash, KeyName: "alice", Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Cached: 40, Output: 10, CostUSD: &costA},
+		{At: time.Now(), KeyHash: bobHash, KeyName: "bob", Account: "other", QuotaGroup: "gemini", Model: "claude-opus-5-5", Status: store.StatusOK, Input: 500, Output: 50, CostUSD: &costB},
+	} {
+		if err := e.st.AddRequest(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	user := e.client("203.0.113.9")
+	if page := user.do("GET", "/user/", nil, nil); page.status != http.StatusOK || !strings.Contains(page.raw, "app.js") {
+		t.Fatalf("GET /user/ = %d", page.status)
+	}
+	if r := user.do("GET", "/user/api/key", nil, nil); r.status != http.StatusUnauthorized {
+		t.Fatalf("missing key = %d %s", r.status, r.raw)
+	}
+	if r := user.do("GET", "/user/api/key", nil, map[string]string{"Authorization": "Bearer sk-wrong"}); r.status != http.StatusUnauthorized {
+		t.Fatalf("wrong key = %d %s", r.status, r.raw)
+	}
+
+	auth := map[string]string{"Authorization": "Bearer " + aliceToken}
+	r = user.do("GET", "/user/api/key", nil, auth)
+	if r.status != http.StatusOK || strings.Contains(r.raw, "secret-admin-note") {
+		t.Fatalf("GET /user/api/key = %d %s", r.status, r.raw)
+	}
+	var kv userKeyView
+	if err := json.Unmarshal([]byte(r.raw), &kv); err != nil {
+		t.Fatal(err)
+	}
+	if kv.Key.Name != "alice" || kv.Key.Hash != aliceHash || kv.Key.Note != "" || kv.Key.MaxWorkers == nil || *kv.Key.MaxWorkers != 3 ||
+		kv.Key.LimitTotal == nil || *kv.Key.LimitTotal != 15.0 || kv.Key.Spent["gemini"] != 1.25 || kv.Key.Totals.Requests != 1 || kv.Key.RevokedAt != nil {
+		t.Fatalf("user key view = %+v", kv)
+	}
+
+	// Attempting to pass ?key=<bobHash> on /user/api/* is ignored and stays pinned to alice.
+	r = user.do("GET", "/user/api/requests?key="+bobHash+"&limit=10", nil, auth)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `"key":"alice"`) || strings.Contains(r.raw, `"bob"`) {
+		t.Fatalf("user requests = %d %s", r.status, r.raw)
+	}
+	r = user.do("GET", "/user/api/usage?by=key&key="+bobHash, nil, auth)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, aliceHash) || strings.Contains(r.raw, bobHash) {
+		t.Fatalf("user usage = %d %s", r.status, r.raw)
+	}
+	r = user.do("GET", "/user/api/usage/filters?since=0", nil, auth)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `"key":[]`) || !strings.Contains(r.raw, `"gemini-3.8-flash"`) || strings.Contains(r.raw, `"claude-opus-5-5"`) || strings.Contains(r.raw, `"other"`) {
+		t.Fatalf("user filters = %d %s", r.status, r.raw)
+	}
+
+	// Revoked keys can still view their metadata and usage history on /user.
+	if r := adminClient.do("POST", "/admin/api/keys/"+aliceHash+"/revoke", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("revoke = %d %s", r.status, r.raw)
+	}
+	r = user.do("GET", "/user/api/key", nil, auth)
+	if err := json.Unmarshal([]byte(r.raw), &kv); r.status != http.StatusOK || err != nil || kv.Key.RevokedAt == nil {
+		t.Fatalf("revoked key on /user/api/key = %d %s", r.status, r.raw)
+	}
+	if r := user.do("GET", "/user/api/requests?limit=10", nil, auth); r.status != http.StatusOK || !strings.Contains(r.raw, `"key":"alice"`) {
+		t.Fatalf("revoked key on /user/api/requests = %d %s", r.status, r.raw)
+	}
+}
