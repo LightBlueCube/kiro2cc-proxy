@@ -403,6 +403,26 @@ func (a *Account) Available(group string) error {
 	return a.unavailableLocked(group)
 }
 
+// CooldownRemaining returns how much longer group is cooling down when
+// cooldown is the only reason the account cannot serve group (0 otherwise).
+func (a *Account) CooldownRemaining(group string) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.paused || a.disabled != nil || a.blocked != nil || a.verify {
+		return 0
+	}
+	until, ok := a.cooldown[group]
+	if !ok {
+		return 0
+	}
+	rem := time.Until(until)
+	if rem <= 0 {
+		delete(a.cooldown, group)
+		return 0
+	}
+	return rem
+}
+
 func (a *Account) unavailableLocked(group string) error {
 	if a.paused {
 		return errors.New("paused by the admin")

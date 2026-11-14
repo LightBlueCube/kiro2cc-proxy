@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -109,7 +110,11 @@ func callError(resp *http.Response) *CallError {
 	if json.Unmarshal(raw, &body) != nil || body.Error.Message == "" {
 		return result
 	}
-	result.Message = fmt.Sprintf("%s (code %d): %s", body.Error.Status, resp.StatusCode, body.Error.Message)
+	if body.Error.Status != "" {
+		result.Message = fmt.Sprintf("%s (code %d): %s", body.Error.Status, resp.StatusCode, body.Error.Message)
+	} else {
+		result.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, body.Error.Message)
+	}
 	for _, d := range body.Error.Details {
 		if d.Type != retryInfoType {
 			continue
@@ -117,6 +122,11 @@ func callError(resp *http.Response) *CallError {
 		// An unreadable delay names no wait.
 		if delay, err := time.ParseDuration(d.RetryDelay); err == nil {
 			result.RetryAfter = delay
+		}
+	}
+	if result.RetryAfter == 0 {
+		if secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && secs > 0 {
+			result.RetryAfter = time.Duration(secs) * time.Second
 		}
 	}
 	return result

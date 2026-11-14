@@ -52,6 +52,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -594,8 +595,25 @@ func (f *fake) prompt(msg rpcMessage) {
 // input, and the line agy replies with; nil when the call succeeds.
 func scriptedFailure(input string) (*ModelCall, string) {
 	if os.Getenv("FAKE_AGY_QUOTA") != "" {
+		wait := QuotaRetryAfter
+		if raw := os.Getenv("FAKE_AGY_QUOTA_WAIT"); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil {
+				wait = d
+			}
+		}
 		// An error with a user message: agy shows that message.
-		return &ModelCall{Code: http.StatusTooManyRequests, Message: QuotaError, RetryAfter: QuotaRetryAfter}, "⚠ " + QuotaUserError
+		return &ModelCall{Code: http.StatusTooManyRequests, Message: QuotaError, RetryAfter: wait}, "⚠ " + QuotaUserError
+	}
+	if rawCode := os.Getenv("FAKE_AGY_FAIL_CODE"); rawCode != "" {
+		code, err := strconv.Atoi(rawCode)
+		if err == nil && code > 0 {
+			var wait time.Duration
+			if rawWait := os.Getenv("FAKE_AGY_FAIL_RETRY_AFTER"); rawWait != "" {
+				wait, _ = time.ParseDuration(rawWait)
+			}
+			msg := os.Getenv("FAKE_AGY_FAIL_MSG")
+			return &ModelCall{Code: code, Message: msg, RetryAfter: wait}, msg
+		}
 	}
 	if input == "@overflow" {
 		return &ModelCall{Code: http.StatusBadRequest, Message: OverflowError}, "⚠ Agent execution terminated due to error."

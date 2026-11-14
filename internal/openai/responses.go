@@ -182,7 +182,7 @@ func (b *responseBuilder) response(status string, failure *conv.Error) map[strin
 		body["incomplete_details"] = map[string]string{"reason": "max_output_tokens"}
 	}
 	if failure != nil {
-		_, code := statusFor(failure.Kind)
+		_, _, code := errorInfo(failure)
 		body["error"] = map[string]string{"code": code, "message": failure.Message}
 	}
 	if b.usage != nil {

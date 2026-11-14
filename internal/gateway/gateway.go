@@ -29,9 +29,10 @@ import (
 
 const (
 	// parkTTL cancels a turn whose client never returns its tool results.
-	parkTTL         = 30 * time.Minute
-	maxAttempts     = 3
-	janitorInterval = 30 * time.Second
+	parkTTL               = 30 * time.Minute
+	maxAttempts           = 3
+	janitorInterval       = 30 * time.Second
+	maxRetryableQuotaWait = time.Minute
 )
 
 type Config struct {
@@ -327,11 +328,28 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		}
 		r.exclude[failure.account] = true
 		if !failure.retry || w.emitted || attempt >= attempts || ctx.Err() != nil || !g.hasCandidate(r) {
-			return failure.err
+			return g.finalizeFailure(r, failure)
 		}
 		g.log.Warn("retrying on another account", "account", failure.account, "err", failure.err.Message)
 		r.reuse = false
 	}
+}
+
+func (g *Gateway) finalizeFailure(r *run, failure *attemptFailure) *conv.Error {
+	if failure.quotaWait > maxRetryableQuotaWait {
+		if g.hasAvailableAccount(r) {
+			return &conv.Error{Kind: conv.ErrUnavailable, Message: "service temporarily unavailable"}
+		}
+		return &conv.Error{
+			Kind:       conv.ErrQuota,
+			HTTPStatus: http.StatusForbidden,
+			Message:    failure.err.Message,
+		}
+	}
+	if failure.err.Kind == conv.ErrUpstream && failure.err.HTTPStatus == 0 && !g.hasAvailableAccount(r) && g.minShortCooldown(r) == 0 {
+		return &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}
+	}
+	return failure.err
 }
 
 // checkLimit refuses a key that spent its limit: the total, or the quota
@@ -458,9 +476,10 @@ func (r *run) choice() string { return r.req.Model + "\x00" + r.req.Effort }
 // attemptFailure ends one attempt. retry means nothing reached the client
 // and another account may succeed.
 type attemptFailure struct {
-	err     *conv.Error
-	account string
-	retry   bool
+	err       *conv.Error
+	account   string
+	retry     bool
+	quotaWait time.Duration
 }
 
 // response writes one HTTP response's events and notes what it sent.
@@ -819,20 +838,53 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 	switch {
 	case failure.Code == http.StatusBadRequest && contextOverflow.MatchString(failure.Message):
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrContextLength, Message: failure.Message}, account: account}
+	case failure.Code == http.StatusRequestEntityTooLarge:
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrContextLength, Message: failure.Message, HTTPStatus: failure.Code}, account: account}
 	case failure.Code == http.StatusBadRequest:
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message}, account: account}
+	case failure.Code == http.StatusUnauthorized:
+		// Upstream account token failed: try another account; never pass 401
+		// downstream where it means the caller's API key is invalid.
+		return &attemptFailure{
+			err:     &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)},
+			account: account,
+			retry:   true,
+		}
+	case failure.Code == http.StatusForbidden:
+		if at.account.Available(r.group) != nil {
+			// VALIDATION_REQUIRED (or similar) removed this account; avoid
+			// leaking account-verification details to callers.
+			return &attemptFailure{
+				err:     &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)},
+				account: account,
+				retry:   true,
+			}
+		}
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrForbidden, Message: failure.Message}, account: account, retry: true}
+	case failure.Code == http.StatusNotFound:
+		// Map 404 to 400 model_not_found so clients like OpenCode do not retry
+		// it, after trying any other account that offers the model.
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: failure.Message}, account: account, retry: true}
 	case failure.Code == http.StatusTooManyRequests:
 		wait := time.Until(failure.Reset)
 		if wait <= 0 {
 			return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account, retry: true}
 		}
 		at.account.Cool(r.group, failure.Reset)
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}, account: account, retry: true}
+		return &attemptFailure{
+			err:       &conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))},
+			account:   account,
+			retry:     true,
+			quotaWait: wait,
+		}
 	case failure.Code == http.StatusServiceUnavailable || failure.Code == statusSiteOverloaded:
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account, retry: true}
+	case failure.Code == http.StatusRequestTimeout || failure.Code == http.StatusConflict || failure.Code >= http.StatusInternalServerError:
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message, HTTPStatus: failure.Code}, account: account, retry: true}
+	case failure.Code >= http.StatusBadRequest && failure.Code < http.StatusInternalServerError:
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message, HTTPStatus: failure.Code}, account: account}
 	}
-	retry := at.account.Available(r.group) != nil || failure.Code == http.StatusUnauthorized || failure.Code == http.StatusForbidden
-	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, account: account, retry: retry}
+	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, account: account}
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if

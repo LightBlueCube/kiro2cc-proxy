@@ -83,12 +83,23 @@ func TestWatchModelCallReportsGooglesError(t *testing.T) {
 	ok.Request = r
 	ap.watchModelCall(ok)
 
+	noStatus := response("", http.StatusBadRequest, []byte(`{"error": {"code": 400, "message": "Invalid image"}}`), "")
+	noStatus.Request = r
+	ap.watchModelCall(noStatus)
+
+	hdrQuota := response("", http.StatusTooManyRequests, []byte(`{"error": {"code": 429, "message": "Slow down", "status": "RESOURCE_EXHAUSTED"}}`), "")
+	hdrQuota.Header.Set("Retry-After", "12")
+	hdrQuota.Request = r
+	ap.watchModelCall(hdrQuota)
+
 	want := []reportedCall{
 		{"S1", &CallError{Code: 429, RetryAfter: 502219791447777 * time.Nanosecond,
 			Message: "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 139h30m19s."}},
 		{"S1", &CallError{Code: 429, Message: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 0s."}},
 		{"S1", &CallError{Code: 503, Message: "HTTP 503 Service Unavailable"}},
 		{"S1", nil},
+		{"S1", &CallError{Code: 400, Message: "HTTP 400: Invalid image"}},
+		{"S1", &CallError{Code: 429, RetryAfter: 12 * time.Second, Message: "RESOURCE_EXHAUSTED (code 429): Slow down"}},
 	}
 	if len(reports) != len(want) {
 		t.Fatalf("reports = %+v", reports)

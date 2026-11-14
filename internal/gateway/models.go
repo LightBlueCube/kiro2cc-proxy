@@ -288,6 +288,34 @@ func (g *Gateway) hasCandidate(r *run) bool {
 	return false
 }
 
+// hasAvailableAccount reports whether any account in the pool offers the
+// model and is available for its quota group.
+func (g *Gateway) hasAvailableAccount(r *run) bool {
+	for _, account := range g.pool.Accounts() {
+		if _, _, ok := slugOn(account, r); ok && account.Available(r.group) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// minShortCooldown returns the shortest remaining cooldown within
+// maxRetryableQuotaWait across accounts offering the model whose only
+// blocker is that cooldown, or 0.
+func (g *Gateway) minShortCooldown(r *run) time.Duration {
+	var shortest time.Duration
+	for _, account := range g.pool.Accounts() {
+		if _, _, ok := slugOn(account, r); !ok {
+			continue
+		}
+		rem := account.CooldownRemaining(r.group)
+		if rem > 0 && rem <= maxRetryableQuotaWait && (shortest == 0 || rem < shortest) {
+			shortest = rem
+		}
+	}
+	return shortest
+}
+
 // pickEffort maps a requested effort onto the available tiers: the wanted
 // tier, else the next higher, else the next lower.
 func pickEffort(requested string, efforts []string) string {
