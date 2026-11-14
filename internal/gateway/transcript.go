@@ -198,21 +198,24 @@ func nonEmpty(values []string) []string {
 	return out
 }
 
-// renderHistory renders every message. Nothing is dropped: the patched agy
-// keeps a whole USER_INPUT (6 MB arrived intact), and a conversation over
-// the model's window fails with context_length_exceeded, on which clients
-// compact, instead of silently losing its oldest part.
-func renderHistory(messages []conv.Message) string {
+// renderHistory renders every message and returns the images they carry,
+// numbered in the text from 1 in the order returned. Nothing is dropped:
+// the patched agy keeps a whole USER_INPUT (6 MB arrived intact), and a
+// conversation over the model's window fails with context_length_exceeded,
+// on which clients compact, instead of silently losing its oldest part.
+func renderHistory(messages []conv.Message) (string, []conv.Image) {
 	rendered := make([]string, 0, len(messages))
+	var images []conv.Image
 	for _, m := range messages {
-		if text := renderMessage(m, -1); text != "" {
+		if text := renderMessage(m, len(images)); text != "" {
 			rendered = append(rendered, text)
 		}
+		images = append(images, m.Images...)
 	}
 	if len(rendered) == 0 {
-		return ""
+		return "", nil
 	}
-	return "<history>\n" + strings.Join(rendered, "\n\n") + "\n</history>"
+	return "<history>\n" + strings.Join(rendered, "\n\n") + "\n</history>", images
 }
 
 // newestInput is where the newest user input begins in body: its last
@@ -226,23 +229,24 @@ func newestInput(body []conv.Message) int {
 }
 
 // freshPrompt is the whole input for a new session: history, then the
-// newest user input verbatim with its images. The leading system messages
-// travel in agy's system prompt (sessionSpec).
+// newest user input verbatim. The images come with it, the history's first
+// and then the newest input's. The leading system messages travel in agy's
+// system prompt (sessionSpec).
 func freshPrompt(t *transcript) []agy.ContentBlock {
 	body := t.body
 	inputStart := newestInput(body)
+	history, images := renderHistory(body[:inputStart])
 	live := continuationPrompt
-	var images []conv.Image
 	if inputStart < len(body) {
 		input := body[inputStart]
-		images = input.Images
+		images = append(images, input.Images...)
 		live = input.Text
 		if strings.TrimSpace(live) == "" {
 			live = imageOnlyPrompt
 		}
 	}
 	var sections []string
-	if history := renderHistory(body[:inputStart]); history != "" {
+	if history != "" {
 		sections = append(sections, history)
 	}
 	sections = append(sections, live)
