@@ -291,11 +291,11 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 			}
 			return nil
 		}
-		if !failure.retry || w.emitted || attempt >= attempts || ctx.Err() != nil {
+		r.exclude[failure.account] = true
+		if !failure.retry || w.emitted || attempt >= attempts || ctx.Err() != nil || !g.hasCandidate(r) {
 			return failure.err
 		}
 		g.log.Warn("retrying on another account", "account", failure.account, "err", failure.err.Message)
-		r.exclude[failure.account] = true
 		r.reuse = false
 	}
 }

@@ -712,8 +712,31 @@ views.accounts = container => {
     return h("div", { class: "card" }, h("p", { class: "bad" }, t("accounts.verify")), h("p", {}, link));
   }
 
+  const modelQuotaGroup = id => id.startsWith("claude-") || id.startsWith("gpt-oss-") ? "claude-gpt"
+    : id.startsWith("gemini-4-argon") ? "argon" : "gemini";
+  const bucketQuotaGroup = id => id.startsWith("3p-") ? "claude-gpt"
+    : id.startsWith("gemini-argon-") ? "argon"
+    : id.startsWith("gemini-") ? "gemini" : "";
+
+  function quotaExhausted(a, m) {
+    const group = modelQuotaGroup(m.id);
+    if (a.cooldowns && a.cooldowns[group]) return true;
+    const buckets = (a.quota || []).flatMap(g => g.buckets).filter(b => bucketQuotaGroup(b.id) === group);
+    if (buckets.length) return buckets.some(b => b.remaining <= 0);
+    const qi = m.upstream && m.upstream.quotaInfo;
+    return Boolean(qi && !(qi.remainingFraction > 0));
+  }
+
+  function allPoolsExhausted(a) {
+    if (a.quota && a.quota.length) {
+      return a.quota.every(g => g.buckets.some(b => b.remaining <= 0 || Boolean(a.cooldowns && a.cooldowns[bucketQuotaGroup(b.id)])));
+    }
+    if (a.models && a.models.length) return a.models.every(m => quotaExhausted(a, m));
+    return ["gemini", "claude-gpt"].every(g => a.cooldowns && a.cooldowns[g]);
+  }
+
   function status(a) {
-    if (Object.keys(a.cooldowns).length) return accountBadge(a, h("span", { class: "badge warn" }, t("account.cooling_down")));
+    if (allPoolsExhausted(a)) return accountBadge(a, h("span", { class: "badge warn" }, t("account.cooling_down")));
     if (!a.user) return accountBadge(a, h("span", { class: "badge muted" }, t("account.not_checked")));
     return accountBadge(a, h("span", { class: "badge ok" }, t("account.ready")));
   }
@@ -802,21 +825,6 @@ views.accounts = container => {
     const hover = accounts.map(a => joined(a.name, outOfRotation(a))).join("\n");
     if (!ready.length) return h("span", { class: "muted", title: hover }, t("accounts.models.none_ready"));
     return h("span", { title: hover }, ready[0].name, ready.length > 1 ? ` (+${ready.length - 1})` : "");
-  }
-
-  const modelQuotaGroup = id => id.startsWith("claude-") || id.startsWith("gpt-oss-") ? "claude-gpt"
-    : id.startsWith("gemini-4-argon") ? "argon" : "gemini";
-  const bucketQuotaGroup = id => id.startsWith("3p-") ? "claude-gpt"
-    : id.startsWith("gemini-argon-") ? "argon"
-    : id.startsWith("gemini-") ? "gemini" : "";
-
-  function quotaExhausted(a, m) {
-    const group = modelQuotaGroup(m.id);
-    if (a.cooldowns && a.cooldowns[group]) return true;
-    const buckets = (a.quota || []).flatMap(g => g.buckets).filter(b => bucketQuotaGroup(b.id) === group);
-    if (buckets.length) return buckets.some(b => b.remaining <= 0);
-    const qi = m.upstream && m.upstream.quotaInfo;
-    return Boolean(qi && !(qi.remainingFraction > 0));
   }
 
   // modelGroups gathers the models accounts reported into available,

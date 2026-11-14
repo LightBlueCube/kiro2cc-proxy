@@ -1044,6 +1044,12 @@ func TestQuotaFailureWithoutFallbackIs429(t *testing.T) {
 	if r.err == nil || r.err.Kind != conv.ErrQuota || r.err.Message != agytest.QuotaError || r.err.RetryAfterSeconds != wantWait || r.text != "" {
 		t.Fatalf("result = %+v, want quota error retrying after %d s", r, wantWait)
 	}
+	// While every account offering the model is cooling down, later
+	// requests get a non-retryable ErrUnknownModel instead of 503.
+	again := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if again.err == nil || again.err.Kind != conv.ErrUnknownModel || !strings.Contains(again.err.Message, "cooling down") {
+		t.Fatalf("cooling down = %+v, want ErrUnknownModel", again)
+	}
 }
 
 func TestModelOverflowIsContextLengthError(t *testing.T) {
@@ -1512,5 +1518,14 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	}
 	if r := h.complete(ctx, alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("no")}}); r.err == nil || r.err.Kind != conv.ErrUnknownModel {
 		t.Fatalf("disallowed on all accounts = %+v, want ErrUnknownModel", r)
+	}
+
+	// Only acct1 allows claude-opus-5-5, and its claude-gpt quota is cooling
+	// down: no account can serve the model, so the error is ErrUnknownModel.
+	acct1.SetRouting(5, nil)
+	acct1.Cool("claude-gpt", time.Now().Add(time.Hour))
+	r := h.complete(ctx, alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("no")}})
+	if r.err == nil || r.err.Kind != conv.ErrUnknownModel || !strings.Contains(r.err.Message, "cooling down") || !strings.Contains(r.err.Message, "not offered by acct0") {
+		t.Fatalf("exhausted on only offering account = %+v, want ErrUnknownModel", r)
 	}
 }

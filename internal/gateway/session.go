@@ -264,6 +264,9 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			if lastErr != nil {
 				message += "; last error: " + lastErr.Error()
 			}
+			if lastErr == nil && !g.hasCandidate(r) {
+				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: message}}
+			}
 			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnavailable, Message: message}}
 		}
 		skip := func() {

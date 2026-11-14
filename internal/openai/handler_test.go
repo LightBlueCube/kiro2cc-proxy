@@ -178,6 +178,14 @@ func TestEarlyErrorKeepsStatus(t *testing.T) {
 			t.Fatalf("status %d headers %v", rec.Code, rec.Header())
 		}
 	}
+
+	unknown := NewHandler(&stubBackend{events: []conv.Event{{Err: &conv.Error{Kind: conv.ErrUnknownModel, Message: "no model"}}}})
+	for _, serve := range []func(http.ResponseWriter, *http.Request, conv.Caller){unknown.Chat, unknown.Responses} {
+		rec := post(t, serve, `{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}],"input":"x"}`)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) || !strings.Contains(rec.Body.String(), `"code":"model_not_found"`) {
+			t.Fatalf("unknown model = %d %s", rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func TestResponsesDecodeGroupsAssistantItems(t *testing.T) {

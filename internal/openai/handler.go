@@ -326,7 +326,9 @@ func statusFor(kind conv.ErrorKind) (int, string) {
 	case conv.ErrForbidden:
 		return http.StatusForbidden, "permission_denied"
 	case conv.ErrUnknownModel:
-		return http.StatusNotFound, "model_not_found"
+		// 400 (not 404): clients such as OpenCode treat OpenAI 404s as
+		// retryable, while a missing or exhausted model cannot be retried.
+		return http.StatusBadRequest, "model_not_found"
 	case conv.ErrQuota:
 		return http.StatusTooManyRequests, "rate_limit_exceeded"
 	case conv.ErrKeyLimit:
@@ -340,7 +342,7 @@ func statusFor(kind conv.ErrorKind) (int, string) {
 func errorBody(err *conv.Error) map[string]any {
 	_, code := statusFor(err.Kind)
 	errType := code
-	if err.Kind == conv.ErrContextLength {
+	if err.Kind == conv.ErrContextLength || err.Kind == conv.ErrUnknownModel {
 		errType = "invalid_request_error" // as OpenAI types it
 	}
 	return map[string]any{"error": map[string]any{"message": err.Message, "type": errType, "code": code}}

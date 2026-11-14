@@ -208,6 +208,9 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 	var samples []store.QuotaSample
 	for _, g := range groups {
 		for _, b := range g.Buckets {
+			if group := BucketGroup(b.ID); group != "" && b.Remaining <= 0 && b.ResetAt.After(q.At) {
+				account.Cool(group, b.ResetAt)
+			}
 			samples = append(samples, store.QuotaSample{Account: name, At: q.At, Bucket: b.ID, Group: g.Name, Window: b.Window, Remaining: b.Remaining, ResetAt: b.ResetAt})
 		}
 	}

@@ -274,6 +274,20 @@ func slugOn(account *pool.Account, r *run) (slug, tier string, ok bool) {
 	return r.model.slugIn(entriesFromACP(models))
 }
 
+// hasCandidate reports whether any account not in r.exclude offers the
+// model and is available for its quota group.
+func (g *Gateway) hasCandidate(r *run) bool {
+	for _, account := range g.pool.Accounts() {
+		if r.exclude[account.Name()] {
+			continue
+		}
+		if _, _, ok := slugOn(account, r); ok && account.Available(r.group) == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // pickEffort maps a requested effort onto the available tiers: the wanted
 // tier, else the next higher, else the next lower.
 func pickEffort(requested string, efforts []string) string {
