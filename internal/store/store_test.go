@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -226,5 +227,91 @@ func TestExpirePendingQuota(t *testing.T) {
 		if rows[i].QuotaSkip != want {
 			t.Fatalf("row %d quota_skip = %q, want %q", i, rows[i].QuotaSkip, want)
 		}
+	}
+}
+
+func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an older schema already at user_version = 1, missing newer
+	// columns (accounts.priority, accounts.models, api_keys.max_workers,
+	// api_keys.limit_total, api_keys.limits, requests.effort,
+	// requests.quota_skip) and missing tables (key_totals, quota_cursors).
+	_, err = rawDB.Exec(`
+		PRAGMA user_version = 1;
+		CREATE TABLE accounts (
+			name       TEXT PRIMARY KEY,
+			env        TEXT NOT NULL,
+			proxy      TEXT NOT NULL,
+			paused     INTEGER NOT NULL,
+			created_at INTEGER NOT NULL
+		);
+		INSERT INTO accounts (name, env, proxy, paused, created_at) VALUES ('main', '', '', 0, 1000);
+		CREATE TABLE api_keys (
+			hash       TEXT PRIMARY KEY,
+			name       TEXT NOT NULL UNIQUE,
+			note       TEXT NOT NULL,
+			models     TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER
+		);
+		INSERT INTO api_keys (hash, name, note, models, created_at) VALUES ('h1', 'alice', '', '', 1000);
+		CREATE TABLE requests (
+			id            INTEGER PRIMARY KEY,
+			at            INTEGER NOT NULL,
+			key_hash      TEXT NOT NULL,
+			key_name      TEXT NOT NULL,
+			account       TEXT NOT NULL,
+			model         TEXT NOT NULL,
+			slug          TEXT NOT NULL,
+			api           TEXT NOT NULL,
+			stream        INTEGER NOT NULL,
+			mode          TEXT NOT NULL,
+			replay_reason TEXT NOT NULL,
+			status        TEXT NOT NULL,
+			error         TEXT NOT NULL,
+			finish        TEXT NOT NULL,
+			duration_ms   INTEGER NOT NULL,
+			ttft_ms       INTEGER,
+			input         INTEGER NOT NULL,
+			cached        INTEGER NOT NULL,
+			output        INTEGER NOT NULL,
+			reasoning     INTEGER NOT NULL,
+			cost_usd      REAL,
+			quota_group   TEXT NOT NULL,
+			quota_used    REAL
+		);
+		INSERT INTO requests (at, key_hash, key_name, account, model, slug, api, stream, mode, replay_reason, status, error, finish, duration_ms, input, cached, output, reasoning, quota_group)
+			VALUES (1000, 'h1', 'alice', 'main', 'm', 'm', 'chat', 0, 'fresh', '', 'ok', '', 'stop', 100, 10, 0, 5, 0, 'gemini');
+	`)
+	rawDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	accounts, err := st.Accounts(ctx)
+	if err != nil || len(accounts) != 1 || accounts[0].Priority != 0 || len(accounts[0].Models) != 0 || len(accounts[0].Env) != 0 {
+		t.Fatalf("accounts after upgrade = %+v, %v", accounts, err)
+	}
+	keys, err := st.Keys(ctx)
+	if err != nil || len(keys) != 1 || keys[0].MaxWorkers != nil || keys[0].LimitTotal != nil || len(keys[0].Limits) != 0 || len(keys[0].Models) != 0 {
+		t.Fatalf("keys after upgrade = %+v, %v", keys, err)
+	}
+	reqs, err := st.Requests(ctx, RequestFilter{}, 0, 10)
+	if err != nil || len(reqs) != 1 || reqs[0].Effort != "" || reqs[0].QuotaSkip != "" {
+		t.Fatalf("requests after upgrade = %+v, %v", reqs, err)
+	}
+	if totals, err := st.KeyTotals(ctx); err != nil || len(totals) != 0 {
+		t.Fatalf("key_totals after upgrade = %+v, %v", totals, err)
 	}
 }
