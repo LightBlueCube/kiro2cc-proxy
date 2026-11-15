@@ -135,4 +135,10 @@ var DefaultSignatures = []Signature{
 	{Name: "Warp", Phrases: []string{
 		"an AI agent running within Warp",
 	}},
+	{Name: "CodeBuddy", Phrases: []string{
+		"You are CodeBuddy Code.",
+		"/help: Get help with using CodeBuddy Code",
+		"users should report the issue at https://cnb.cool/codebuddy/codebuddy-code",
+		"You are CodeBuddy, a highly skilled software engineer",
+	}},
 }
