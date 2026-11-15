@@ -178,8 +178,19 @@ func withLanguageServer(procs []*agy.Proc) (*agy.Proc, error) {
 }
 
 // Refresh samples the account now, starting agy and its language server
-// when needed.
+// when needed. An account whose sign-in agy refuses leaves rotation, as
+// when a request meets that, until it signs in again.
 func (m *Monitor) Refresh(ctx context.Context, account *pool.Account) (AccountQuota, error) {
+	q, err := m.TryRefresh(ctx, account)
+	if agy.IsAuthError(err) {
+		account.Disable(err)
+	}
+	return q, err
+}
+
+// TryRefresh is Refresh that leaves a refused sign-in to the caller, for
+// trying a sign-in the account may not keep.
+func (m *Monitor) TryRefresh(ctx context.Context, account *pool.Account) (AccountQuota, error) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	proc, err := account.Proc(ctx, m.cfg.Profile)

@@ -53,7 +53,7 @@ func (c *Control) ImportSignIn(ctx context.Context, name, pasted string) (Import
 	// old one no longer holds.
 	account.Restart()
 	c.cfg.CloudCode.ClearVerification(name)
-	q, err := c.cfg.Monitor.Refresh(ctx, account)
+	q, err := c.cfg.Monitor.TryRefresh(ctx, account)
 	switch {
 	case err != nil && account.Status().Verify:
 		account.SignedIn()

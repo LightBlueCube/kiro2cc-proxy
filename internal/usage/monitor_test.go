@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"agyrelay/internal/agy"
 	"agyrelay/internal/agy/agytest"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/pool"
@@ -109,6 +110,45 @@ func TestSettleSoon(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if n := quotaReads(); n != 2 {
 		t.Fatalf("after Forget: quota reads = %d, want 2", n)
+	}
+}
+
+// A refresh that agy answers with "Authentication required" takes the
+// account out of rotation, as a request's does, until it signs in again.
+func TestRefreshDisablesAccountThatNeedsSignIn(t *testing.T) {
+	e := newMonitorEnv(t)
+	ctx := context.Background()
+	account := e.p.Account("a")
+	tokenDir := filepath.Join(account.GeminiDir(), "antigravity-cli")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(tokenDir, "antigravity-oauth-token")
+	if err := os.WriteFile(tokenFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := e.monitor.Refresh(ctx, account)
+	if !agy.IsAuthError(err) {
+		t.Fatalf("Refresh error = %v, want a sign-in error", err)
+	}
+	if got := account.Status().Disabled; got == "" {
+		t.Fatal("account stays in rotation after its refresh needed a sign-in")
+	}
+	if err := account.Available("gemini"); err == nil {
+		t.Fatal("a disabled account is available")
+	}
+
+	signedIn := `{"token": {"refresh_token": "` + agytest.RefreshToken + `"}, "auth_method": "consumer"}`
+	if err := os.WriteFile(tokenFile, []byte(signedIn), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account.SignedIn()
+	if _, err := e.monitor.Refresh(ctx, account); err != nil {
+		t.Fatalf("Refresh after signing in: %v", err)
+	}
+	if got := account.Status().Disabled; got != "" {
+		t.Fatalf("account still disabled after signing in: %q", got)
 	}
 }
 

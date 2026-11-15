@@ -46,6 +46,7 @@ type env struct {
 	url string
 	st  *store.Store
 	ctl *control.Control
+	p   *pool.Pool
 	// accounts holds the account HOME directories.
 	accounts string
 }
@@ -106,7 +107,7 @@ func newEnv(t *testing.T) *env {
 		b.Close()
 		st.Close()
 	})
-	return &env{t: t, url: srv.URL, st: st, ctl: ctl, accounts: filepath.Join(dir, "accounts")}
+	return &env{t: t, url: srv.URL, st: st, ctl: ctl, p: p, accounts: filepath.Join(dir, "accounts")}
 }
 
 type client struct {
@@ -713,6 +714,9 @@ func TestImportSignIn(t *testing.T) {
 	}
 	if restored, _ := os.ReadFile(tokenFile); string(restored) != string(installed) {
 		t.Fatalf("sign-in after a rejected import = %s, want %s", restored, installed)
+	}
+	if got := e.p.Account("main").Status().Disabled; got != "" {
+		t.Fatalf("a rejected import disabled the account whose sign-in it restored: %q", got)
 	}
 
 	entries, err := e.st.AuditLog(context.Background(), 0, 100)
