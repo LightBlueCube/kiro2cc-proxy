@@ -916,8 +916,9 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if
-// shorter), drops sessions agy no longer holds, and now and then deletes
-// agy's files of sessions nobody can continue.
+// shorter), kills agy processes that held no session for as long, drops
+// sessions agy no longer holds, and now and then deletes agy's files of
+// sessions nobody can continue.
 func (g *Gateway) janitor() {
 	ticker := time.NewTicker(janitorInterval)
 	defer ticker.Stop()
@@ -982,6 +983,12 @@ func (g *Gateway) sweep() {
 			continue
 		}
 		g.log.Debug("idle session closed", "account", claim.sess.account.Name(), "session", claim.sess.id)
+	}
+
+	// After the closes, so a process whose last session just closed gets a
+	// full idle period.
+	for _, account := range g.pool.Accounts() {
+		account.RetireIdleProcs(limit)
 	}
 }
 

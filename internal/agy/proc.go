@@ -140,6 +140,9 @@ type Proc struct {
 	listeners  map[string]func(json.RawMessage)
 	suppressed map[string]bool
 	live       map[string]bool
+	// lastActive is when the process was last handed to a caller, or last
+	// opened or closed a session; RetireIfIdle measures idleness from it.
+	lastActive time.Time
 }
 
 // StartProc spawns agy and completes the initialize handshake.
@@ -198,6 +201,7 @@ func StartProc(ctx context.Context, cfg ProcConfig) (*Proc, error) {
 		return nil, fmt.Errorf("run %s: %w", cfg.Bin, err)
 	}
 	p.started = time.Now()
+	p.lastActive = p.started
 	go p.wait(stdout)
 
 	if err := p.initialize(ctx); err != nil {
@@ -432,7 +436,29 @@ func (p *Proc) subscribe(sessionID string, fn func(json.RawMessage)) func() {
 func (p *Proc) markLive(sessionID string) {
 	p.mu.Lock()
 	p.live[sessionID] = true
+	p.lastActive = time.Now()
 	p.mu.Unlock()
+}
+
+// Touch records that a caller is about to use the process, so RetireIfIdle
+// leaves it be for another idle period.
+func (p *Proc) Touch() {
+	p.mu.Lock()
+	p.lastActive = time.Now()
+	p.mu.Unlock()
+}
+
+// RetireIfIdle kills the process when it holds no session and has had no
+// caller, session opening or session closing for idle. It reports whether
+// it killed the process.
+func (p *Proc) RetireIfIdle(idle time.Duration) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.Alive() || len(p.live) > 0 || time.Since(p.lastActive) <= idle {
+		return false
+	}
+	p.Kill()
+	return true
 }
 
 func (p *Proc) setSuppressed(sessionID string, on bool) {

@@ -322,6 +322,59 @@ func TestInspectAndCloseSession(t *testing.T) {
 	}
 }
 
+// The janitor kills an account's agy process once it has held no session
+// for the idle-close period; the next request starts a new one.
+func TestIdleProcIsRetired(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	account := h.p.Accounts()[0]
+	const idle = 50 * time.Millisecond
+
+	messages := []conv.Message{user("hello")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first)
+	}
+	front := account.LiveProcs()[0]
+
+	// An open session keeps its process, however long it sat idle.
+	h.gw.SetIdleClose(idle)
+	h.gw.keepForQuota = func(context.Context, *pool.Account, time.Time) bool { return true }
+	time.Sleep(2 * idle)
+	h.gw.sweep()
+	if len(h.gw.Sessions()) != 1 || len(account.LiveProcs()) != 1 {
+		t.Fatalf("with an open session: sessions %+v, procs %d", h.gw.Sessions(), len(account.LiveProcs()))
+	}
+
+	// Closing the last session starts the process's own idle period.
+	h.gw.keepForQuota = nil
+	h.gw.sweep()
+	if len(h.gw.Sessions()) != 0 || len(account.LiveProcs()) != 1 {
+		t.Fatalf("right after the last close: sessions %+v, procs %d", h.gw.Sessions(), len(account.LiveProcs()))
+	}
+
+	time.Sleep(2 * idle)
+	h.gw.sweep()
+	if n := len(account.LiveProcs()); n != 0 {
+		t.Fatalf("idle process kept: %d procs", n)
+	}
+	select {
+	case <-front.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("retired process still running")
+	}
+
+	// The conversation goes on in a new process.
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if second.err != nil || second.text != "reply to: again" {
+		t.Fatalf("after retiring the process = %+v", second)
+	}
+	if procs := account.LiveProcs(); len(procs) != 1 || procs[0] == front {
+		t.Fatalf("procs after the next request = %v, old %p", procs, front)
+	}
+}
+
 // The janitor asks KeepForQuota before it closes an account's last open
 // session, and keeps the session while the answer is yes.
 func TestLastSessionWaitsForQuota(t *testing.T) {

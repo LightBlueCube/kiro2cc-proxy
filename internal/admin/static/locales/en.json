@@ -94,7 +94,7 @@
   "settings.max_workers": "Max workers (0 = unlimited)",
   "settings.ttl": "Idle session reuse (snapshot TTL)",
   "settings.idle_close": "Close idle sessions after",
-  "settings.idle_close.hint": "An idle session is closed in agy after this, and its worker process (~250 MiB) exits. The conversation's next request reopens it from disk in a few seconds.",
+  "settings.idle_close.hint": "An idle session is closed in agy after this, and its worker process (~250 MiB) exits. The conversation's next request reopens it from disk in a few seconds. An agy front process that then holds no session exits after the same time.",
   "settings.log_level": "Log level",
   "settings.retention": "Keep call records (days)",
   "settings.outbound": "Outbound traffic",

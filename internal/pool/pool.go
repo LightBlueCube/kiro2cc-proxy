@@ -678,6 +678,27 @@ func (a *Account) killProcs() []*agy.Proc {
 	return killed
 }
 
+// RetireIdleProcs kills the account's agy processes that hold no session
+// and have been idle for idle, and forgets them; the next Proc starts a
+// new one. It returns how many it killed.
+//
+// Proc hands out a process under the same lock, so a caller that just got
+// one is not retired before it opens its session.
+func (a *Account) RetireIdleProcs(idle time.Duration) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	retired := 0
+	for name, slot := range a.procs {
+		if slot.proc == nil || !slot.proc.RetireIfIdle(idle) {
+			continue
+		}
+		delete(a.procs, name)
+		retired++
+		a.pool.log.Info("idle agy process retired", "account", a.name, "agent", name, "pid", slot.proc.PID())
+	}
+	return retired
+}
+
 // Proc returns the live process for profile, starting it when needed.
 // Concurrent callers share one start.
 func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, error) {
@@ -705,6 +726,7 @@ func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, err
 			continue
 		}
 		if slot != nil && slot.proc != nil && slot.proc.Alive() {
+			slot.proc.Touch()
 			a.mu.Unlock()
 			return slot.proc, nil
 		}

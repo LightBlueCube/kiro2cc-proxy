@@ -138,6 +138,7 @@ func (p *Proc) CloseSession(ctx context.Context, sessionID string) error {
 	}
 	p.mu.Lock()
 	delete(p.live, sessionID)
+	p.lastActive = time.Now()
 	p.mu.Unlock()
 	return nil
 }
