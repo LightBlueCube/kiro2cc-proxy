@@ -381,12 +381,13 @@ func (g *Gateway) checkSystemPrompt(t *transcript) *conv.Error {
 	if detector == nil {
 		return nil
 	}
-	name, found := detector.Detect(t.system)
-	if !found {
+	matches := detector.Detect(t.system)
+	if len(matches) == 0 {
 		return nil
 	}
 	return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf(
-		"request rejected: your system prompt matched '%s'. replace it with your own", name)}
+		"request rejected: your system prompt matched '%s'. replace it with your own\n\n%s",
+		strings.Join(sysprompt.Harnesses(matches), "', '"), sysprompt.Excerpts(t.system, matches))}
 }
 
 // checkLimit refuses a key that spent its limit: the total, or the quota

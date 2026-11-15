@@ -889,6 +889,9 @@ func TestRefuseHarnessPrompt(t *testing.T) {
 	if refused.err == nil || refused.err.Kind != conv.ErrForbidden || !strings.Contains(refused.err.Message, "OpenCode") {
 		t.Fatalf("err = %+v, want a refusal naming OpenCode", refused.err)
 	}
+	if want := "\n\nmatched text (marked with >> <<):\n\n>>You are opencode,<< an interactive CLI tool"; !strings.Contains(refused.err.Message, want) || strings.Contains(refused.err.Message, "be brief") {
+		t.Fatalf("message = %q, want the matched paragraph %q alone", refused.err.Message, want)
+	}
 	if res := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: own}); res.err != nil {
 		t.Fatalf("own prompt: %v", res.err)
 	}
