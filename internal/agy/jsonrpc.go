@@ -191,12 +191,25 @@ func (c *rpcConn) answer(msg rpcMessage) {
 // Call sends a request and decodes its result into out (when non-nil).
 // Cancelling ctx abandons the wait; agy may still act on the request.
 func (c *rpcConn) Call(ctx context.Context, method string, params, out any) error {
+	_, err := c.call(ctx, method, params, out, nil)
+	return err
+}
+
+// CallLate is Call for a request whose effect outlives the caller. When ctx
+// ends before the answer it returns abandoned, and late runs on its own
+// goroutine once the request is resolved: answered, with the result of a
+// success; not answered, for an error answer or a closed connection.
+func (c *rpcConn) CallLate(ctx context.Context, method string, params, out any, late func(result json.RawMessage, answered bool)) (abandoned bool, err error) {
+	return c.call(ctx, method, params, out, late)
+}
+
+func (c *rpcConn) call(ctx context.Context, method string, params, out any, late func(json.RawMessage, bool)) (abandoned bool, err error) {
 	ch := make(chan rpcResult, 1)
 	c.mu.Lock()
 	if c.closed {
 		reason := c.reason
 		c.mu.Unlock()
-		return fmt.Errorf("%s: connection closed: %w", method, reason)
+		return false, fmt.Errorf("%s: connection closed: %w", method, reason)
 	}
 	c.nextID++
 	id := c.nextID
@@ -207,28 +220,36 @@ func (c *rpcConn) Call(ctx context.Context, method string, params, out any) erro
 	rawParams, err := json.Marshal(params)
 	if err != nil {
 		c.forget(id)
-		return fmt.Errorf("%s: encode params: %w", method, err)
+		return false, fmt.Errorf("%s: encode params: %w", method, err)
 	}
 	if err := c.write(rpcMessage{JSONRPC: "2.0", ID: rawID, Method: method, Params: rawParams}); err != nil {
 		c.forget(id)
-		return fmt.Errorf("%s: %w", method, err)
+		return false, fmt.Errorf("%s: %w", method, err)
 	}
 
 	select {
 	case <-ctx.Done():
-		c.forget(id)
-		return fmt.Errorf("%s: %w", method, ctx.Err())
+		if late == nil {
+			c.forget(id)
+			return false, fmt.Errorf("%s: %w", method, ctx.Err())
+		}
+		// The pending entry stays: dispatch or close fills ch.
+		go func() {
+			res := <-ch
+			late(res.result, res.err == nil)
+		}()
+		return true, fmt.Errorf("%s: %w", method, ctx.Err())
 	case res := <-ch:
 		if res.err != nil {
-			return res.err
+			return false, res.err
 		}
 		if out == nil || len(res.result) == 0 {
-			return nil
+			return false, nil
 		}
 		if err := json.Unmarshal(res.result, out); err != nil {
-			return fmt.Errorf("%s: decode result: %w", method, err)
+			return false, fmt.Errorf("%s: decode result: %w", method, err)
 		}
-		return nil
+		return false, nil
 	}
 }
 

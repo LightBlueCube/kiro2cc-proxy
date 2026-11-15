@@ -40,6 +40,9 @@
 //	                Models
 //	FAKE_AGY_IGNORE_CLOSE
 //	                never answer session/close
+//	FAKE_AGY_OPEN_DELAY
+//	                a duration, e.g. 300ms: session/new, resume and load
+//	                take that long, as agy does while it starts a worker
 package agytest
 
 import (
@@ -195,6 +198,9 @@ type fake struct {
 	outMu sync.Mutex
 	out   *bufio.Writer
 
+	// openDelay is FAKE_AGY_OPEN_DELAY.
+	openDelay time.Duration
+
 	mu       sync.Mutex
 	sessions map[string]*fakeSession
 	nextID   int
@@ -231,6 +237,14 @@ func Main() {
 	if slices.Contains(os.Args, "--login") {
 		login()
 		return
+	}
+	if raw := os.Getenv("FAKE_AGY_OPEN_DELAY"); raw != "" {
+		delay, err := time.ParseDuration(raw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fake agy:", err)
+			os.Exit(1)
+		}
+		f.openDelay = delay
 	}
 	// The fake is its own only worker (agy acp --process-per-session).
 	f.appendLog("acp-front", fmt.Sprintf("front: started worker 1 (pid %d)", os.Getpid()))
@@ -314,6 +328,7 @@ func (f *fake) handle(msg rpcMessage) {
 		}
 		var p sessionParams
 		json.Unmarshal(msg.Params, &p)
+		time.Sleep(f.openDelay)
 		f.mu.Lock()
 		f.nextID++
 		id := fmt.Sprintf("fake-%d-%d", os.Getpid(), f.nextID)
@@ -324,6 +339,7 @@ func (f *fake) handle(msg rpcMessage) {
 	case "session/resume", "session/load":
 		var p sessionParams
 		json.Unmarshal(msg.Params, &p)
+		time.Sleep(f.openDelay)
 		raw, err := os.ReadFile(f.store(p.SessionID))
 		if err != nil {
 			f.fail(msg.ID, -32602, "unknown session")

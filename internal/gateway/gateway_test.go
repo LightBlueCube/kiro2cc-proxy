@@ -264,6 +264,20 @@ func (h *harness) requests(method string) []acpRequest {
 	return out
 }
 
+// waitRequests waits until n requests with the method are logged, and
+// returns them; fewer after a few seconds.
+func (h *harness) waitRequests(method string, n int) []acpRequest {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := h.requests(method)
+		if len(got) >= n || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 var readTool = conv.ToolSpec{Name: "read", Description: "Read a file", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)}
 
 func user(text string) conv.Message { return conv.Message{Role: conv.RoleUser, Text: text} }
@@ -402,6 +416,86 @@ func TestUnansweredCloseDoesNotPinTheProc(t *testing.T) {
 	h.gw.sweep()
 	if n := len(account.LiveProcs()); n != 0 {
 		t.Fatalf("process kept for a session the gateway forgot: %d procs", n)
+	}
+}
+
+// Opening a session takes agy a worker start. A client that leaves
+// meanwhile never learns the id agy gives, so the session is closed when
+// agy answers.
+const (
+	slowOpen  = "FAKE_AGY_OPEN_DELAY=400ms"
+	impatient = 100 * time.Millisecond
+)
+
+func TestAbandonedNewSessionIsClosed(t *testing.T) {
+	h := newHarness(t, 1, map[int][]string{0: {slowOpen}})
+	ctx, cancel := context.WithTimeout(context.Background(), impatient)
+	defer cancel()
+	if res := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello")}}); res.text != "" {
+		t.Fatalf("result = %+v, want the client gone before any reply", res)
+	}
+
+	closes := h.waitRequests("session/close", 1)
+	if len(h.requests("session/new")) != 1 || len(closes) != 1 || !strings.HasPrefix(closes[0].Params.SessionID, "fake-") {
+		t.Fatalf("new %d, closes %+v", len(h.requests("session/new")), closes)
+	}
+	if sessions := h.gw.Sessions(); len(sessions) != 0 {
+		t.Fatalf("sessions = %+v", sessions)
+	}
+}
+
+func TestAbandonedReopenIsClosed(t *testing.T) {
+	h := newHarness(t, 1, map[int][]string{0: {slowOpen}})
+	bg := context.Background()
+	messages := []conv.Message{user("hello")}
+	first := h.complete(bg, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first)
+	}
+	id := h.gw.Sessions()[0].ID
+	if err := h.gw.CloseSession(bg, "acct0", id); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(bg, impatient)
+	defer cancel()
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
+	if second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages}); second.text != "" {
+		t.Fatalf("second = %+v, want the client gone before any reply", second)
+	}
+
+	closes := h.waitRequests("session/close", 2)
+	if len(h.requests("session/resume")) != 1 || len(closes) != 2 || closes[1].Params.SessionID != id {
+		t.Fatalf("resumes %d, closes %+v, want the second close for %s", len(h.requests("session/resume")), closes, id)
+	}
+}
+
+// A retry reopens the session while the abandoned reopen is still pending;
+// the abandoned one answers first, and must not close what the retry opens.
+func TestAbandonedReopenDoesNotCloseALaterReopen(t *testing.T) {
+	h := newHarness(t, 1, map[int][]string{0: {slowOpen}})
+	bg := context.Background()
+	messages := []conv.Message{user("hello")}
+	first := h.complete(bg, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first)
+	}
+	if err := h.gw.CloseSession(bg, "acct0", h.gw.Sessions()[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("again"))
+	ctx, cancel := context.WithTimeout(bg, impatient)
+	defer cancel()
+	if abandoned := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages}); abandoned.text != "" {
+		t.Fatalf("abandoned = %+v, want the client gone before any reply", abandoned)
+	}
+	retry := h.complete(bg, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if retry.err != nil || retry.text != "reply to: again" {
+		t.Fatalf("retry = %+v", retry)
+	}
+	if n := len(h.requests("session/close")); n != 1 {
+		t.Fatalf("closes = %d, want the one from CloseSession only", n)
 	}
 }
 

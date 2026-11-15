@@ -140,6 +140,10 @@ type Proc struct {
 	listeners  map[string]func(json.RawMessage)
 	suppressed map[string]bool
 	live       map[string]bool
+	// reopening counts the session/resume and session/load requests in
+	// flight per session id, abandoned ones included until agy resolves
+	// them.
+	reopening map[string]int
 	// lastActive is when the process was last handed to a caller, or last
 	// opened or closed a session; RetireIfIdle measures idleness from it.
 	lastActive time.Time
@@ -188,6 +192,7 @@ func StartProc(ctx context.Context, cfg ProcConfig) (*Proc, error) {
 		listeners:  map[string]func(json.RawMessage){},
 		suppressed: map[string]bool{},
 		live:       map[string]bool{},
+		reopening:  map[string]int{},
 	}
 	p.stderr.limit = stderrTailBytes
 	cmd.Stderr = &p.stderr
@@ -318,7 +323,7 @@ func (p *Proc) NewSession(ctx context.Context, spec SessionSpec) (string, []Mode
 			AvailableModels []ModelInfo `json:"availableModels"`
 		} `json:"models"`
 	}
-	if err := p.call(ctx, "session/new", sessionParams("", spec), &result); err != nil {
+	if _, err := p.callLate(ctx, "session/new", sessionParams("", spec), &result, p.closeAbandonedNew); err != nil {
 		return "", nil, err
 	}
 	if result.SessionID == "" {
@@ -344,19 +349,77 @@ func (p *Proc) ReopenSession(ctx context.Context, sessionID string, spec Session
 	defer cancel()
 	params := sessionParams(sessionID, spec)
 	if p.canResume {
-		if err := p.call(ctx, "session/resume", params, nil); err != nil {
-			return err
-		}
-		p.markLive(sessionID)
-		return nil
+		return p.reopen(ctx, "session/resume", sessionID, params)
 	}
 	p.setSuppressed(sessionID, true)
 	defer p.setSuppressed(sessionID, false)
-	if err := p.call(ctx, "session/load", params, nil); err != nil {
-		return err
+	return p.reopen(ctx, "session/load", sessionID, params)
+}
+
+// reopen sends a session/resume or session/load and marks the session live
+// when agy answers.
+//
+// If ctx ends first, agy may still open the session, and nobody is left to
+// use or close it; closeAbandonedReopen then closes it.
+func (p *Proc) reopen(ctx context.Context, method, sessionID string, params any) error {
+	p.mu.Lock()
+	p.reopening[sessionID]++
+	p.mu.Unlock()
+	abandoned, err := p.callLate(ctx, method, params, nil, func(_ json.RawMessage, answered bool) {
+		p.closeAbandonedReopen(sessionID, answered)
+	})
+	if abandoned {
+		return err // closeAbandonedReopen ends the count
 	}
-	p.markLive(sessionID)
-	return nil
+	if err == nil {
+		p.markLive(sessionID)
+	}
+	p.endReopen(sessionID)
+	return err
+}
+
+func (p *Proc) endReopen(sessionID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reopening[sessionID]--; p.reopening[sessionID] == 0 {
+		delete(p.reopening, sessionID)
+	}
+}
+
+// closeAbandonedReopen is the end of an abandoned session/resume or
+// session/load. A session another reopen has opened, or still is opening,
+// is that request's now: closing it would pull it from under that caller.
+func (p *Proc) closeAbandonedReopen(sessionID string, answered bool) {
+	p.endReopen(sessionID)
+	p.mu.Lock()
+	taken := p.live[sessionID] || p.reopening[sessionID] > 0
+	p.mu.Unlock()
+	if answered && !taken {
+		p.closeAbandoned(sessionID)
+	}
+}
+
+// closeAbandonedNew is the end of an abandoned session/new: the session id
+// is in the answer alone, so nobody else knows it.
+func (p *Proc) closeAbandonedNew(result json.RawMessage, answered bool) {
+	if !answered {
+		return
+	}
+	var created struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(result, &created); err != nil || created.SessionID == "" {
+		p.log.Warn("abandoned session/new answered without a session id", "err", err)
+		return
+	}
+	p.closeAbandoned(created.SessionID)
+}
+
+func (p *Proc) closeAbandoned(sessionID string) {
+	p.log.Info("closing a session its requester gave up on", "session", sessionID)
+	if err := p.CloseSession(context.Background(), sessionID); err != nil {
+		p.log.Warn("closing an abandoned session failed", "session", sessionID, "err", err)
+	}
 }
 
 func sessionParams(sessionID string, spec SessionSpec) map[string]any {
@@ -412,7 +475,16 @@ func (p *Proc) cancel(sessionID string) {
 }
 
 func (p *Proc) call(ctx context.Context, method string, params, out any) error {
-	err := p.rpc.Call(ctx, method, params, out)
+	return authError(method, p.rpc.Call(ctx, method, params, out))
+}
+
+// callLate is call through rpcConn.CallLate.
+func (p *Proc) callLate(ctx context.Context, method string, params, out any, late func(json.RawMessage, bool)) (abandoned bool, err error) {
+	abandoned, err = p.rpc.CallLate(ctx, method, params, out, late)
+	return abandoned, authError(method, err)
+}
+
+func authError(method string, err error) error {
 	var rpcErr *RPCError
 	if errors.As(err, &rpcErr) && rpcErr.Code == codeAuthRequired {
 		return fmt.Errorf("%w (%s: %s)", ErrAuthRequired, method, rpcErr.Message)
