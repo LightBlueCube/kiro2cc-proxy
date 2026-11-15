@@ -38,6 +38,8 @@
 //	FAKE_AGY_QUOTA  fail every prompt's model call: weekly quota (QuotaError)
 //	FAKE_AGY_MODELS report these comma-separated model ids instead of
 //	                Models
+//	FAKE_AGY_IGNORE_CLOSE
+//	                never answer session/close
 package agytest
 
 import (
@@ -332,6 +334,9 @@ func (f *fake) handle(msg rpcMessage) {
 		f.open(p.SessionID, p, steps)
 		f.reply(msg.ID, map[string]any{})
 	case "session/close":
+		if os.Getenv("FAKE_AGY_IGNORE_CLOSE") != "" {
+			return
+		}
 		var p sessionParams
 		json.Unmarshal(msg.Params, &p)
 		f.mu.Lock()

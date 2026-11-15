@@ -375,6 +375,36 @@ func TestIdleProcIsRetired(t *testing.T) {
 	}
 }
 
+// A session/close that agy never answers still frees the process: the
+// gateway forgets the session either way, and a process that kept it as
+// open would never count as idle.
+func TestUnansweredCloseDoesNotPinTheProc(t *testing.T) {
+	h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_IGNORE_CLOSE=1"}})
+	ctx := context.Background()
+	account := h.p.Accounts()[0]
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello")}})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first)
+	}
+
+	closeCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if err := h.gw.CloseSession(closeCtx, "acct0", h.gw.Sessions()[0].ID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("close = %v, want a deadline error", err)
+	}
+	if sessions := h.gw.Sessions(); len(sessions) != 0 {
+		t.Fatalf("sessions after the failed close = %+v", sessions)
+	}
+
+	const idle = 50 * time.Millisecond
+	h.gw.SetIdleClose(idle)
+	time.Sleep(2 * idle)
+	h.gw.sweep()
+	if n := len(account.LiveProcs()); n != 0 {
+		t.Fatalf("process kept for a session the gateway forgot: %d procs", n)
+	}
+}
+
 // The janitor asks KeepForQuota before it closes an account's last open
 // session, and keeps the session while the answer is yes.
 func TestLastSessionWaitsForQuota(t *testing.T) {

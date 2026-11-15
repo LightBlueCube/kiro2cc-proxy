@@ -130,15 +130,18 @@ func readResources(pid int) (Resources, int, error) {
 
 // CloseSession ends the session in this process, and its worker exits.
 // The conversation stays on disk, so ReopenSession can bring it back.
+//
+// The process stops counting the session as open even when the close
+// fails: callers forget the session either way, and one left on the books
+// would keep the process from ever going idle. A worker that outlives a
+// failed close exits with the process, once that goes idle.
 func (p *Proc) CloseSession(ctx context.Context, sessionID string) error {
 	ctx, cancel := context.WithTimeout(ctx, sessionOpTimeout)
 	defer cancel()
-	if err := p.call(ctx, "session/close", map[string]string{"sessionId": sessionID}, nil); err != nil {
-		return err
-	}
+	err := p.call(ctx, "session/close", map[string]string{"sessionId": sessionID}, nil)
 	p.mu.Lock()
 	delete(p.live, sessionID)
 	p.lastActive = time.Now()
 	p.mu.Unlock()
-	return nil
+	return err
 }
