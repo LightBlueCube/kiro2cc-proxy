@@ -26,14 +26,14 @@ func TestDetectReformatted(t *testing.T) {
 }
 
 // TestDetectWords checks that a name which is no common word is searched as
-// a substring, as upstream does, and the short ones pi and omp as whole words.
+// a substring, as upstream does, and the names listed as Words as whole words.
 func TestDetectWords(t *testing.T) {
 	for _, system := range []string{
 		"",
 		"You are a helpful assistant.",
 		"The REST API returns JSON; sign in as root in the room, then compile it.",
-		"Run the sample, optimized: decline, move the cursor, crush it, mongoose, Traefik, 3 kilobytes.",
-		"Cline, Amp, Zed and Roo are names; so are Cursor, Crush and Goose.",
+		"Run the sample, optimized: decline, mongoose, Traefik, 3 kilobytes, &amp; zeds.",
+		"Amp, Cursor, Crush, Goose, Augment and Kilo are common words: move the cursor, crush it.",
 	} {
 		if matches := defaults.Detect(system); len(matches) > 0 {
 			t.Errorf("Detect(%q) = %+v, want none", system, matches)
@@ -48,6 +48,8 @@ func TestDetectWords(t *testing.T) {
 		{"inside pi.", "pi"},
 		{"Run omp now", "oh-my-pi"},
 		{"Kilo Code and the Claude Code CLI", "Kilo Code"},
+		{"Ask Cline, Roo or Zed.", "Cline"},
+		{"Use Trae, not Traefik.", "Trae"},
 	} {
 		matches := defaults.Detect(tc.system)
 		if len(matches) == 0 || matches[0].Harness != tc.want {
@@ -137,6 +139,18 @@ func TestEditedSignatures(t *testing.T) {
 		t.Fatalf("Detect = %+v, want none: the edited list replaces the defaults", matches)
 	}
 
+	wordsOnly := []Signature{{Name: "Short", Words: []string{"Ab"}}}
+	if err := ValidateSignatures(wordsOnly); err != nil {
+		t.Fatalf("a signature of words alone: %v", err)
+	}
+	words := NewDetector(wordsOnly)
+	if matches := words.Detect("cab, abs, xab"); len(matches) > 0 {
+		t.Fatalf("Detect = %+v, want none: a word is not found inside another", matches)
+	}
+	if matches := words.Detect("cab, (AB)"); len(matches) != 1 || matches[0].Phrase != "Ab" {
+		t.Fatalf("Detect = %+v, want the word Ab once", matches)
+	}
+
 	if err := ValidateSignatures(DefaultSignatures); err != nil {
 		t.Fatalf("defaults: %v", err)
 	}
@@ -145,6 +159,7 @@ func TestEditedSignatures(t *testing.T) {
 		{{Name: "A", Phrases: []string{"x"}}, {Name: "A", Phrases: []string{"y"}}},
 		{{Name: "A"}},
 		{{Name: "A", Phrases: []string{"x", "** `_` **"}}},
+		{{Name: "A", Phrases: []string{"x"}, Words: []string{"` _"}}},
 	} {
 		if err := ValidateSignatures(bad); err == nil {
 			t.Errorf("ValidateSignatures(%+v) passed", bad)

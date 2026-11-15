@@ -6,9 +6,9 @@
 // A signature names a harness and lists phrases from its prompts: its
 // identity line ("You are opencode, ..."), or just its name, which is all
 // a crude keyword filter upstream needs. A prompt containing any phrase is
-// that harness's. Like upstream's, matching is by substring, except for a
-// phrase of at most shortPhrase characters, which matches whole words only:
-// "pi" is not found in "api".
+// that harness's. Like upstream's, matching is by substring. A name that
+// would sit inside other words ("pi" in "api") is listed as a word instead,
+// and matches only as a whole word.
 package sysprompt
 
 import (
@@ -23,12 +23,16 @@ import (
 
 // Signature recognizes one harness's default prompts.
 type Signature struct {
-	Name    string   `json:"name"`
-	Phrases []string `json:"phrases"`
+	Name string `json:"name"`
+	// Phrases are searched as substrings.
+	Phrases []string `json:"phrases,omitempty"`
+	// Words are searched as whole words: not touching a Latin letter or
+	// digit on either side.
+	Words []string `json:"words,omitempty"`
 }
 
 // ValidateSignatures checks an edited list: every signature has a unique
-// name and phrases that keep some text once normalized.
+// name and phrases and words that keep some text once normalized.
 func ValidateSignatures(signatures []Signature) error {
 	seen := map[string]bool{}
 	for _, s := range signatures {
@@ -39,12 +43,12 @@ func ValidateSignatures(signatures []Signature) error {
 			return fmt.Errorf("%s has two harness signatures", s.Name)
 		}
 		seen[s.Name] = true
-		if len(s.Phrases) == 0 {
-			return fmt.Errorf("the harness signature of %s needs a phrase", s.Name)
+		if len(s.Phrases) == 0 && len(s.Words) == 0 {
+			return fmt.Errorf("the harness signature of %s needs a phrase or a word", s.Name)
 		}
-		for _, phrase := range s.Phrases {
-			if normalize(phrase) == "" {
-				return fmt.Errorf("the harness signature of %s has an empty phrase", s.Name)
+		for _, text := range slices.Concat(s.Phrases, s.Words) {
+			if normalize(text) == "" {
+				return fmt.Errorf("the harness signature of %s has an empty phrase or word", s.Name)
 			}
 		}
 	}
@@ -65,11 +69,6 @@ type Detector struct {
 	phrases []phrase
 }
 
-// shortPhrase is the longest phrase, in characters, that is too likely to sit
-// inside another word ("pi" in "api", "omp" in "compile") to be searched as
-// a substring.
-const shortPhrase = 3
-
 type phrase struct {
 	harness    string
 	written    string
@@ -81,11 +80,10 @@ func NewDetector(signatures []Signature) *Detector {
 	d := &Detector{}
 	for _, s := range signatures {
 		for _, written := range s.Phrases {
-			normalized := normalize(written)
-			d.phrases = append(d.phrases, phrase{
-				harness: s.Name, written: written, normalized: normalized,
-				wholeWord: utf8.RuneCountInString(normalized) <= shortPhrase,
-			})
+			d.phrases = append(d.phrases, phrase{harness: s.Name, written: written, normalized: normalize(written)})
+		}
+		for _, written := range s.Words {
+			d.phrases = append(d.phrases, phrase{harness: s.Name, written: written, normalized: normalize(written), wholeWord: true})
 		}
 	}
 	return d
