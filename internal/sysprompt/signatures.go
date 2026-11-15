@@ -4,10 +4,10 @@ package sysprompt
 // prompts. Upstream refuses by substring (measured: "You are opencode" and
 // "You are Claude Code" in any case and spacing, "You are opencodes" too),
 // so a name is listed bare as a phrase when it is no common word and no
-// part of one. Zed, Roo, Cline, Trae, pi and omp are found inside other
-// words (optimized, root, decline, Traefik, api, compile), so they are
-// Words. Amp (HTML's &amp;), Cursor, Crush, Goose and Augment are common
-// words themselves, and Kilo is one (a kilo of); they are not listed bare.
+// part of one. OpenCode, Zed, Roo, Cline, Trae, pi and omp appear inside
+// other words or in paths (optimized, root, decline, Traefik, api, compile,
+// /opencode/, opencode.json), so they are Words. Amp, Cursor, Crush, Goose,
+// Augment and Kilo are common words themselves; they are not listed bare.
 var DefaultSignatures = []Signature{
 	{Name: "OpenCode", Phrases: []string{
 		"You are opencode",

@@ -26,7 +26,8 @@ func TestDetectReformatted(t *testing.T) {
 }
 
 // TestDetectWords checks that a name which is no common word is searched as
-// a substring, as upstream does, and the names listed as Words as whole words.
+// a substring, as upstream does, and the names listed as Words only when they
+// touch no other word character or ASCII punctuation.
 func TestDetectWords(t *testing.T) {
 	for _, system := range []string{
 		"",
@@ -34,6 +35,8 @@ func TestDetectWords(t *testing.T) {
 		"The REST API returns JSON; sign in as root in the room, then compile it.",
 		"Run the sample, optimized: decline, mongoose, Traefik, 3 kilobytes, &amp; zeds.",
 		"Amp, Cursor, Crush, Goose, Augment and Kilo are common words: move the cursor, crush it.",
+		"See ~/.config/opencode/agent, /work/opencode/out, opencode.json and tools.opencode.list.",
+		"You are xopencode",
 	} {
 		if matches := defaults.Detect(system); len(matches) > 0 {
 			t.Errorf("Detect(%q) = %+v, want none", system, matches)
@@ -42,14 +45,13 @@ func TestDetectWords(t *testing.T) {
 
 	for _, tc := range []struct{ system, want string }{
 		{"用opencode写代码", "OpenCode"},
-		{"See ~/.config/opencode/agent and opencode.json.", "OpenCode"},
+		{"- opencode (8 tools) // Tools for managing OpenCode itself", "OpenCode"},
 		{"You are opencodes", "OpenCode"},
-		{"You are xopencode", "OpenCode"},
-		{"inside pi.", "pi"},
+		{"inside pi now", "pi"},
 		{"Run omp now", "oh-my-pi"},
 		{"Kilo Code and the Claude Code CLI", "Kilo Code"},
-		{"Ask Cline, Roo or Zed.", "Cline"},
-		{"Use Trae, not Traefik.", "Trae"},
+		{"Ask Cline or Roo or Zed now", "Cline"},
+		{"Use Trae rather than Traefik", "Trae"},
 	} {
 		matches := defaults.Detect(tc.system)
 		if len(matches) == 0 || matches[0].Harness != tc.want {
@@ -144,10 +146,10 @@ func TestEditedSignatures(t *testing.T) {
 		t.Fatalf("a signature of words alone: %v", err)
 	}
 	words := NewDetector(wordsOnly)
-	if matches := words.Detect("cab, abs, xab"); len(matches) > 0 {
-		t.Fatalf("Detect = %+v, want none: a word is not found inside another", matches)
+	if matches := words.Detect("cab, abs, xab, /ab/, ab.json, (ab)"); len(matches) > 0 {
+		t.Fatalf("Detect = %+v, want none: a word is not found inside another or touching punctuation", matches)
 	}
-	if matches := words.Detect("cab, (AB)"); len(matches) != 1 || matches[0].Phrase != "Ab" {
+	if matches := words.Detect("cab, `AB` now"); len(matches) != 1 || matches[0].Phrase != "Ab" {
 		t.Fatalf("Detect = %+v, want the word Ab once", matches)
 	}
 

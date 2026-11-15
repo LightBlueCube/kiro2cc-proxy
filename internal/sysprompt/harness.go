@@ -7,8 +7,8 @@
 // identity line ("You are opencode, ..."), or just its name, which is all
 // a crude keyword filter upstream needs. A prompt containing any phrase is
 // that harness's. Like upstream's, matching is by substring. A name that
-// would sit inside other words ("pi" in "api") is listed as a word instead,
-// and matches only as a whole word.
+// would sit inside other words ("pi" in "api") or inside paths ("/opencode/")
+// is listed as a word instead, and matches only when it stands alone.
 package sysprompt
 
 import (
@@ -26,8 +26,8 @@ type Signature struct {
 	Name string `json:"name"`
 	// Phrases are searched as substrings.
 	Phrases []string `json:"phrases,omitempty"`
-	// Words are searched as whole words: not touching a Latin letter or
-	// digit on either side.
+	// Words are searched as whole words: not touching a Latin letter,
+	// digit, or ASCII punctuation or symbol on either side.
 	Words []string `json:"words,omitempty"`
 }
 
@@ -137,10 +137,13 @@ func standsAlone(text string, start, end int) bool {
 	return !(isWordRune(first) && isWordRune(before)) && !(isWordRune(last) && isWordRune(after))
 }
 
-// isWordRune is true for Latin letters and ASCII digits. Han and other
-// scripts do not join words, so "用opencode写" still contains opencode.
+// isWordRune is true for ASCII characters other than whitespace (letters,
+// digits, punctuation and symbols) and for Latin letters. A word must not
+// touch any of them, so neither "api" nor "/opencode/" nor "opencode.json"
+// matches. Han and other scripts do not join words, so "用opencode写" still
+// matches.
 func isWordRune(r rune) bool {
-	return '0' <= r && r <= '9' || unicode.IsLetter(r) && unicode.Is(unicode.Latin, r)
+	return '!' <= r && r <= '~' || unicode.IsLetter(r) && unicode.Is(unicode.Latin, r)
 }
 
 // foldedRunes maps typographic quotes and dashes to ASCII and drops Markdown
