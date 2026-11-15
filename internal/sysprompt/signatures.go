@@ -9,6 +9,7 @@ var DefaultSignatures = []Signature{
 		"You are opencode,",
 		"Your name is opencode",
 		"You are an AI agent running in OpenCode, a coding agent harness",
+		"You are an AI agent powered by OpenCode, a coding agent harness",
 		"users should report the issue at https://github.com/anomalyco/opencode",
 	}},
 	{Name: "Kilo Code", Phrases: []string{
@@ -136,7 +137,6 @@ var DefaultSignatures = []Signature{
 		"an AI agent running within Warp",
 	}},
 	{Name: "CodeBuddy", Phrases: []string{
-		"You are CodeBuddy Code.",
 		"/help: Get help with using CodeBuddy Code",
 		"users should report the issue at https://cnb.cool/codebuddy/codebuddy-code",
 		"You are CodeBuddy, a highly skilled software engineer",
