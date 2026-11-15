@@ -66,8 +66,9 @@ type Config struct {
 	ContextCheck   bool
 	ContextWindows []ContextWindow
 	// RefuseHarnessPrompts refuses requests whose system prompt is still a
-	// harness's default (see sysprompt.DetectHarness).
+	// harness's default, as HarnessSignatures recognize it.
 	RefuseHarnessPrompts bool
+	HarnessSignatures    []sysprompt.Signature
 	Log                  *slog.Logger
 }
 
@@ -100,8 +101,9 @@ type Gateway struct {
 	// serializes its changes.
 	limits   atomic.Pointer[contextLimits]
 	limitsMu sync.Mutex
-	// refuseHarnessPrompts is Config.RefuseHarnessPrompts, changed by the admin.
-	refuseHarnessPrompts atomic.Bool
+	// harnessPrompts recognizes harnesses' default system prompts; nil while
+	// their refusal is off.
+	harnessPrompts atomic.Pointer[sysprompt.Detector]
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
 	mu        sync.Mutex
@@ -190,7 +192,7 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	g.idleClose.Store(int64(cfg.IdleClose))
 	g.maxWorkers.Store(int64(cfg.MaxWorkers))
-	g.refuseHarnessPrompts.Store(cfg.RefuseHarnessPrompts)
+	g.SetHarnessPrompts(cfg.HarnessSignatures, cfg.RefuseHarnessPrompts)
 	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
 		return nil, err
 	}
@@ -201,9 +203,15 @@ func New(cfg Config) (*Gateway, error) {
 // SetIdleClose changes how long an idle session stays open in agy.
 func (g *Gateway) SetIdleClose(d time.Duration) { g.idleClose.Store(int64(d)) }
 
-// SetRefuseHarnessPrompts turns the refusal of harnesses' default system
-// prompts on or off.
-func (g *Gateway) SetRefuseHarnessPrompts(on bool) { g.refuseHarnessPrompts.Store(on) }
+// SetHarnessPrompts replaces the signatures of harnesses' default system
+// prompts and turns their refusal on or off.
+func (g *Gateway) SetHarnessPrompts(signatures []sysprompt.Signature, refuse bool) {
+	if !refuse {
+		g.harnessPrompts.Store(nil)
+		return
+	}
+	g.harnessPrompts.Store(sysprompt.NewDetector(signatures))
+}
 
 // SetMaxWorkers changes the global worker cap (0 = unlimited) and closes
 // idle sessions above the new global or per-account caps.
@@ -369,15 +377,16 @@ func (g *Gateway) finalizeFailure(r *run, failure *attemptFailure) *conv.Error {
 // checkSystemPrompt refuses, while that is on, a system prompt that is
 // still a harness's default: clients must send their own.
 func (g *Gateway) checkSystemPrompt(t *transcript) *conv.Error {
-	if !g.refuseHarnessPrompts.Load() {
+	detector := g.harnessPrompts.Load()
+	if detector == nil {
 		return nil
 	}
-	name, found := sysprompt.DetectHarness(t.system)
+	name, found := detector.Detect(t.system)
 	if !found {
 		return nil
 	}
 	return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf(
-		"the system prompt is %s's default prompt; replace it with your own", name)}
+		"request rejected: your system prompt matched '%s'. replace it with your own", name)}
 }
 
 // checkLimit refuses a key that spent its limit: the total, or the quota

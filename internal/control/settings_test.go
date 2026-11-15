@@ -3,11 +3,13 @@ package control
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/store"
+	"agyrelay/internal/sysprompt"
 )
 
 func TestLoadSettingsPrices(t *testing.T) {
@@ -79,6 +81,44 @@ func TestLoadSettingsContextWindows(t *testing.T) {
 	}
 }
 
+func TestLoadSettingsHarnessSignatures(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "agyrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	s, err := LoadSettings(context.Background(), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.HarnessSignatures) != len(sysprompt.DefaultSignatures) || s.RefuseHarnessPrompts {
+		t.Fatalf("refuse %v with %d signatures, want it off with the defaults", s.RefuseHarnessPrompts, len(s.HarnessSignatures))
+	}
+
+	// Stored signatures replace the defaults whole, including an empty list.
+	for _, stored := range [][]sysprompt.Signature{{{Name: "Mine", Phrases: []string{"you are mine"}}}, {}} {
+		if err := st.SetSetting(context.Background(), settingsKey, map[string]any{"harness_signatures": stored}); err != nil {
+			t.Fatal(err)
+		}
+		s, err := LoadSettings(context.Background(), st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(s.HarnessSignatures, stored) {
+			t.Fatalf("harness signatures = %+v, want %+v", s.HarnessSignatures, stored)
+		}
+	}
+
+	// A stored row does not take the phrases of the default at its index.
+	if err := st.SetSetting(context.Background(), settingsKey, map[string]any{"harness_signatures": []map[string]any{{"name": "Mine"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := LoadSettings(context.Background(), st); err == nil {
+		t.Fatalf("a stored signature without phrases loaded as %+v", s.HarnessSignatures[0])
+	}
+}
+
 func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "agyrelay.db"))
 	if err != nil {
@@ -120,7 +160,7 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if _, err := st.Setting(ctx, settingsKey, &stored); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "fallback_proxy", "allow_direct"} {
+	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct"} {
 		if _, ok := stored[key]; !ok {
 			t.Errorf("persisted settings still missing key %q: %+v", key, stored)
 		}

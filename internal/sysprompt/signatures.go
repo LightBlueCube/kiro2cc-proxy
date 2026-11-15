@@ -1,137 +1,138 @@
 package sysprompt
 
-// signatures were chosen against a corpus of the agents' captured and
-// published prompts (see TestCorpus): every phrase occurs in its agent's
-// default prompts and in no other agent's, nor in a side request.
-var signatures = compile([]signature{
-	{"OpenCode", []string{
+// DefaultSignatures were chosen against a corpus of the harnesses' captured
+// and published prompts (see TestCorpus): every phrase occurs in its
+// harness's default prompts and in no other harness's, nor in a side
+// request, so their order does not matter.
+var DefaultSignatures = []Signature{
+	{Name: "OpenCode", Phrases: []string{
 		"You are opencode,",
 		"Your name is opencode",
 		"You are an AI agent running in OpenCode, a coding agent harness",
 		"users should report the issue at https://github.com/anomalyco/opencode",
 	}},
-	{"Kilo Code", []string{
+	{Name: "Kilo Code", Phrases: []string{
 		"You are Kilo,",
 		"You are Kilo Code,",
 		"users should report the issue at https://github.com/Kilo-Org/kilocode",
 	}},
-	{"Claude Code", []string{
+	{Name: "Claude Code", Phrases: []string{
 		"Anthropic's official CLI for Claude",
 		"You are a Claude agent, built on Anthropic's Claude Agent SDK",
 		"You are running inside the Claude desktop app",
 	}},
-	{"Codex", []string{
+	{Name: "Codex", Phrases: []string{
 		"You are Codex, ",
 		"You are a coding agent running in the Codex CLI",
 		"Codex CLI is an open source project led by OpenAI",
 		"You are running as a coding agent in the Codex CLI",
 		"the primary agent in a team of agents collaborating to fulfill the user's goals",
 	}},
-	{"GitHub Copilot", []string{
+	{Name: "GitHub Copilot", Phrases: []string{
 		"Your name is GitHub Copilot",
 		"you must respond with \"GitHub Copilot\"",
 		"You are an expert AI programming assistant, working with a user in the VS Code editor",
 		"You are a highly sophisticated automated coding agent with expert-level knowledge across many different programming languages and frameworks",
 	}},
-	{"Gemini CLI", []string{
+	{Name: "Gemini CLI", Phrases: []string{
 		"You are Gemini CLI,",
 	}},
-	{"Qwen Code", []string{
+	{Name: "Qwen Code", Phrases: []string{
 		"You are Qwen Code,",
 	}},
-	{"Cline", []string{
+	{Name: "Cline", Phrases: []string{
 		"You are Cline,",
 	}},
-	{"Roo Code", []string{
+	{Name: "Roo Code", Phrases: []string{
 		"You are Roo,",
 	}},
-	{"Kimi CLI", []string{
+	{Name: "Kimi CLI", Phrases: []string{
 		"You are Kimi Code CLI,",
 	}},
-	{"Crush", []string{
+	{Name: "Crush", Phrases: []string{
 		"You are Crush,",
 	}},
-	{"Goose", []string{
+	{Name: "Goose", Phrases: []string{
 		"AI agent called goose",
 		"goose is being developed as an open-source software project",
 	}},
-	{"Aider", []string{
+	{Name: "Aider", Phrases: []string{
 		"Take requests for changes to the supplied code",
 		"Act as an expert architect engineer and provide direction to your editor engineer",
 		"Act as an expert code analyst. Answer questions about the supplied code",
 		"Respect and use existing conventions, libraries, etc that are already present in the code base",
 	}},
-	{"OpenHands", []string{
+	{Name: "OpenHands", Phrases: []string{
 		"You are OpenHands agent,",
 	}},
-	{"OpenClaw", []string{
+	{Name: "OpenClaw", Phrases: []string{
 		"You are a personal assistant running inside OpenClaw",
 	}},
-	{"Hermes Agent", []string{
+	{Name: "Hermes Agent", Phrases: []string{
 		"You are Hermes Agent,",
 		"You run on Hermes Agent",
 	}},
-	{"Grok CLI", []string{
+	{Name: "Grok CLI", Phrases: []string{
 		"You are Grok released by xAI",
 	}},
-	{"pi", []string{
+	{Name: "pi", Phrases: []string{
 		"operating inside pi, a coding agent harness",
 	}},
-	{"oh-my-pi", []string{
+	{Name: "oh-my-pi", Phrases: []string{
 		"Oh My Pi coding harness",
 		"You are omp's trusted coding assistant",
 	}},
-	{"MiMo Code", []string{
+	{Name: "MiMo Code", Phrases: []string{
 		"You are MiMoCode",
 	}},
-	{"ZCode", []string{
+	{Name: "ZCode", Phrases: []string{
 		"You are ZCode,",
 		"You are an interactive ZCode agent",
 	}},
-	{"DeepSeek Harness", []string{
+	{Name: "DeepSeek Harness", Phrases: []string{
 		"powered by DeepSeek Harness",
 	}},
-	{"Agent Zero", []string{
+	{Name: "Agent Zero", Phrases: []string{
 		"Agent Zero System Manual",
 		"agent zero autonomous json ai agent",
 	}},
-	{"OpenSquilla", []string{
+	{Name: "OpenSquilla", Phrases: []string{
 		"You are OpenSquilla,",
 	}},
-	{"Zed", []string{
+	{Name: "Zed", Phrases: []string{
 		"You are the Zed coding agent",
 	}},
-	{"Continue", []string{
+	{Name: "Continue", Phrases: []string{
 		"Always include the language and file name in the info string when you write code blocks",
 	}},
-	{"Void", []string{
+	{Name: "Void", Phrases: []string{
 		"Here is an overview of the user's file system",
 	}},
-	{"Windsurf", []string{
+	{Name: "Windsurf", Phrases: []string{
 		"You are Cascade,",
 		"designed by the Windsurf engineering team",
 	}},
-	{"Trae", []string{
+	{Name: "Trae", Phrases: []string{
 		"You are Trae AI,",
 		"You operate exclusively in Trae AI",
 	}},
-	{"Cursor", []string{
+	{Name: "Cursor", Phrases: []string{
 		"You operate in Cursor",
 		"Bias towards not asking the user for help if you can find the answer yourself",
 	}},
-	{"Kiro", []string{
+	{Name: "Kiro", Phrases: []string{
 		"You are Kiro, an AI assistant and IDE built to assist developers",
 	}},
-	{"Amp", []string{
+	{Name: "Amp", Phrases: []string{
 		"You are Amp,",
 	}},
-	{"Augment Code", []string{
+	{Name: "Augment Code", Phrases: []string{
 		"You are Augment Agent developed by Augment Code",
 	}},
-	{"Junie", []string{
+	{Name: "Junie", Phrases: []string{
 		"Your name is Junie",
 	}},
-	{"Warp", []string{
+	{Name: "Warp", Phrases: []string{
 		"an AI agent running within Warp",
 	}},
-})
+}

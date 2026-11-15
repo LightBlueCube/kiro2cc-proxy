@@ -25,6 +25,7 @@ import (
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/conv"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/sysprompt"
 	"agyrelay/internal/tokens"
 )
 
@@ -882,7 +883,8 @@ func TestRefuseHarnessPrompt(t *testing.T) {
 		t.Fatalf("refusal off: %v", res.err)
 	}
 
-	h.gw.SetRefuseHarnessPrompts(true)
+	signatures := []sysprompt.Signature{{Name: "OpenCode", Phrases: []string{"You are opencode,"}}}
+	h.gw.SetHarnessPrompts(signatures, true)
 	refused := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: harnessDefault})
 	if refused.err == nil || refused.err.Kind != conv.ErrForbidden || !strings.Contains(refused.err.Message, "OpenCode") {
 		t.Fatalf("err = %+v, want a refusal naming OpenCode", refused.err)
@@ -896,6 +898,11 @@ func TestRefuseHarnessPrompt(t *testing.T) {
 	records := h.records.all(t, 3)
 	if len(records) != 3 || records[1].Err == nil || records[1].Err.Kind != conv.ErrForbidden {
 		t.Fatalf("records = %+v, want the refusal recorded second", records)
+	}
+
+	h.gw.SetHarnessPrompts(signatures, false)
+	if res := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: harnessDefault}); res.err != nil {
+		t.Fatalf("refusal turned off again: %v", res.err)
 	}
 }
 

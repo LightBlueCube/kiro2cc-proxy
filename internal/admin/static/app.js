@@ -580,6 +580,19 @@ views.settings = container => {
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
     const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
     const refuseHarness = h("input", { type: "checkbox", checked: s.refuse_harness_prompts });
+    // The harness signatures are edited as JSON; ↺ puts back the built-in list.
+    const signaturesJSON = list => JSON.stringify(list, null, 2);
+    const signatures = h("textarea", { rows: 18, spellcheck: "false", style: "width:100%" });
+    signatures.value = signaturesJSON(s.harness_signatures);
+    const signaturesReset = h("button", { type: "button", class: "reset" }, t("settings.defaults"));
+    const syncSignatures = () => { signaturesReset.disabled = signatures.value === signaturesJSON(d.harness_signatures); };
+    signaturesReset.addEventListener("click", () => { signatures.value = signaturesJSON(d.harness_signatures); syncSignatures(); });
+    signatures.addEventListener("input", syncSignatures);
+    syncSignatures();
+    const readSignatures = () => {
+      try { return JSON.parse(signatures.value); }
+      catch (err) { throw new Error(t("settings.signatures.invalid", { error: err.message })); }
+    };
 
     const modelInput = value => h("input", { value, list: "settings-models", required: true, style: "width:260px" });
     const number = (min, step) => value => h("input", { type: "number", min, step, value, style: "width:110px" });
@@ -601,7 +614,8 @@ views.settings = container => {
         await api("PUT", "settings", {
           turns_per_account: Number(turns.value), max_workers: Number(maxWorkers.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
           retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
-          refuse_harness_prompts: refuseHarness.checked, fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
+          refuse_harness_prompts: refuseHarness.checked, harness_signatures: readSignatures(),
+          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
         });
         toast(t("common.saved"));
         await loadGeneral();
@@ -623,6 +637,11 @@ views.settings = container => {
       h("h3", {}, t("settings.system_prompts")),
       h("span", { class: "with-reset" }, h("label", { class: "check" }, refuseHarness, t("settings.refuse_harness")), resetButton(refuseHarness, d.refuse_harness_prompts)),
       h("p", { class: "muted" }, t("settings.refuse_harness.note")),
+      h("details", { class: "fold" },
+        h("summary", {}, t("settings.signatures.summary", { count: s.harness_signatures.length })),
+        h("p", { class: "muted" }, t("settings.signatures.note")),
+        signatures,
+        h("div", { class: "row", style: "margin-top:8px" }, signaturesReset)),
       h("details", { class: "fold" },
         h("summary", {}, s.context_check
           ? t("settings.windows.summary.on", { count: s.context_windows.length })

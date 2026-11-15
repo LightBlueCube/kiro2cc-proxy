@@ -166,6 +166,7 @@ func runServe(args []string) error {
 		ContextCheck:         settings.ContextCheck,
 		ContextWindows:       settings.ContextWindows,
 		RefuseHarnessPrompts: settings.RefuseHarnessPrompts,
+		HarnessSignatures:    settings.HarnessSignatures,
 		Log:                  log.With("component", "gateway"),
 	})
 	if err != nil {

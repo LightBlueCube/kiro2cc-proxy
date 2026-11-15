@@ -29,6 +29,7 @@ import (
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
+	"agyrelay/internal/sysprompt"
 	"agyrelay/internal/usage"
 )
 
@@ -59,8 +60,10 @@ type Settings struct {
 	ContextCheck   bool                    `json:"context_check"`
 	ContextWindows []gateway.ContextWindow `json:"context_windows"`
 	// RefuseHarnessPrompts refuses requests whose system prompt is still a
-	// harness's default (OpenCode's, Claude Code's, ...).
-	RefuseHarnessPrompts bool `json:"refuse_harness_prompts"`
+	// harness's default (OpenCode's, Claude Code's, ...), as
+	// HarnessSignatures recognize it.
+	RefuseHarnessPrompts bool                  `json:"refuse_harness_prompts"`
+	HarnessSignatures    []sysprompt.Signature `json:"harness_signatures"`
 	// FallbackProxy carries the traffic of accounts without their own
 	// proxy ("" = none).
 	FallbackProxy string `json:"fallback_proxy"`
@@ -72,7 +75,8 @@ type Settings struct {
 // DefaultSettings are the settings before the admin changes any.
 func DefaultSettings() Settings {
 	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90,
-		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows)}
+		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows),
+		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures)}
 }
 
 var logLevels = map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError}
@@ -102,6 +106,9 @@ func (s Settings) validate() error {
 		return errors.New("fallback_proxy must be empty or an http:// URL with a host and port, e.g. http://127.0.0.1:7890")
 	}
 	if err := gateway.ValidateContextWindows(s.ContextWindows); err != nil {
+		return err
+	}
+	if err := sysprompt.ValidateSignatures(s.HarnessSignatures); err != nil {
 		return err
 	}
 	return usage.ValidatePrices(s.Prices)
@@ -158,8 +165,9 @@ func LoadSettings(ctx context.Context, st *store.Store) (Settings, error) {
 func decodeSettings(raw []byte, s *Settings) error {
 	defaults := *s
 	var stored struct {
-		Prices         []map[string]json.RawMessage `json:"prices"`
-		ContextWindows json.RawMessage              `json:"context_windows"`
+		Prices            []map[string]json.RawMessage `json:"prices"`
+		ContextWindows    json.RawMessage              `json:"context_windows"`
+		HarnessSignatures json.RawMessage              `json:"harness_signatures"`
 	}
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		return err
@@ -169,6 +177,9 @@ func decodeSettings(raw []byte, s *Settings) error {
 	}
 	if stored.ContextWindows != nil {
 		s.ContextWindows = nil
+	}
+	if stored.HarnessSignatures != nil {
+		s.HarnessSignatures = nil
 	}
 	if err := json.Unmarshal(raw, s); err != nil {
 		return err
@@ -286,7 +297,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Gateway.SetMaxWorkers(s.MaxWorkers)
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
-	c.cfg.Gateway.SetRefuseHarnessPrompts(s.RefuseHarnessPrompts)
+	c.cfg.Gateway.SetHarnessPrompts(s.HarnessSignatures, s.RefuseHarnessPrompts)
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
 	if err := c.cfg.Gateway.SetContextWindows(s.ContextWindows, s.ContextCheck); err != nil {
