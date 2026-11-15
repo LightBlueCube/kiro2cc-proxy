@@ -6,8 +6,9 @@
 // A signature names a harness and lists phrases from its prompts: its
 // identity line ("You are opencode, ..."), or just its name, which is all
 // a crude keyword filter upstream needs. A prompt containing any phrase is
-// that harness's. A phrase matches whole words only: "pi" is not found in
-// "api", nor "roo" in "root".
+// that harness's. Like upstream's, matching is by substring, except for a
+// phrase of at most shortPhrase characters, which matches whole words only:
+// "pi" is not found in "api".
 package sysprompt
 
 import (
@@ -64,17 +65,27 @@ type Detector struct {
 	phrases []phrase
 }
 
+// shortPhrase is the longest phrase, in characters, that is too likely to sit
+// inside another word ("pi" in "api", "omp" in "compile") to be searched as
+// a substring.
+const shortPhrase = 3
+
 type phrase struct {
 	harness    string
 	written    string
 	normalized string
+	wholeWord  bool
 }
 
 func NewDetector(signatures []Signature) *Detector {
 	d := &Detector{}
 	for _, s := range signatures {
 		for _, written := range s.Phrases {
-			d.phrases = append(d.phrases, phrase{harness: s.Name, written: written, normalized: normalize(written)})
+			normalized := normalize(written)
+			d.phrases = append(d.phrases, phrase{
+				harness: s.Name, written: written, normalized: normalized,
+				wholeWord: utf8.RuneCountInString(normalized) <= shortPhrase,
+			})
 		}
 	}
 	return d
@@ -93,7 +104,7 @@ func (d *Detector) Detect(system string) []Match {
 			}
 			start := from + i
 			end := start + len(p.normalized)
-			if !standsAlone(text.text, start, end) {
+			if p.wholeWord && !standsAlone(text.text, start, end) {
 				from = start + 1
 				continue
 			}

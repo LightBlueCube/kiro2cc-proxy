@@ -1,9 +1,12 @@
 package sysprompt
 
-// DefaultSignatures were chosen against a corpus of the harnesses' captured
-// and published prompts (see TestCorpus): every phrase occurs in its
-// harness's default prompts and in no other harness's, nor in a side
-// request, so their order does not matter.
+// DefaultSignatures list each harness's name and the identity lines of its
+// prompts. Upstream refuses by substring (measured: "You are opencode" and
+// "You are Claude Code" in any case and spacing, "You are opencodes" too),
+// so a name is listed bare when it is no common word and no part of one:
+// not Amp (example), Zed (optimized), Roo (root), Cline (decline), Cursor,
+// Crush, Goose (mongoose), Trae (Traefik). pi and omp are listed anyway;
+// being short, they match whole words only.
 var DefaultSignatures = []Signature{
 	{Name: "OpenCode", Phrases: []string{
 		"OpenCode",
@@ -14,7 +17,7 @@ var DefaultSignatures = []Signature{
 		"users should report the issue at https://github.com/anomalyco/opencode",
 	}},
 	{Name: "Kilo Code", Phrases: []string{
-		"Kilo",
+		"Kilo Code",
 		"You are Kilo,",
 		"You are Kilo Code,",
 		"users should report the issue at https://github.com/Kilo-Org/kilocode",
@@ -49,11 +52,9 @@ var DefaultSignatures = []Signature{
 		"You are Qwen Code,",
 	}},
 	{Name: "Cline", Phrases: []string{
-		"Cline",
 		"You are Cline,",
 	}},
 	{Name: "Roo Code", Phrases: []string{
-		"Roo",
 		"You are Roo,",
 	}},
 	{Name: "Kimi CLI", Phrases: []string{
@@ -62,11 +63,9 @@ var DefaultSignatures = []Signature{
 		"You are Kimi Code CLI,",
 	}},
 	{Name: "Crush", Phrases: []string{
-		"Crush",
 		"You are Crush,",
 	}},
 	{Name: "Goose", Phrases: []string{
-		"Goose",
 		"AI agent called goose",
 		"goose is being developed as an open-source software project",
 	}},
@@ -128,7 +127,6 @@ var DefaultSignatures = []Signature{
 		"You are OpenSquilla,",
 	}},
 	{Name: "Zed", Phrases: []string{
-		"Zed",
 		"You are the Zed coding agent",
 	}},
 	{Name: "Continue", Phrases: []string{
@@ -142,12 +140,10 @@ var DefaultSignatures = []Signature{
 		"designed by the Windsurf engineering team",
 	}},
 	{Name: "Trae", Phrases: []string{
-		"Trae",
 		"You are Trae AI,",
 		"You operate exclusively in Trae AI",
 	}},
 	{Name: "Cursor", Phrases: []string{
-		"Cursor",
 		"You operate in Cursor",
 		"Bias towards not asking the user for help if you can find the answer yourself",
 	}},
@@ -156,11 +152,10 @@ var DefaultSignatures = []Signature{
 		"You are Kiro, an AI assistant and IDE built to assist developers",
 	}},
 	{Name: "Amp", Phrases: []string{
-		"Amp",
 		"You are Amp,",
 	}},
 	{Name: "Augment Code", Phrases: []string{
-		"Augment",
+		"Augment Code",
 		"You are Augment Agent developed by Augment Code",
 	}},
 	{Name: "Junie", Phrases: []string{

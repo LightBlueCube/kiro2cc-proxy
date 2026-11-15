@@ -25,13 +25,15 @@ func TestDetectReformatted(t *testing.T) {
 	}
 }
 
-func TestDetectWholeWords(t *testing.T) {
+// TestDetectWords checks that a name which is no common word is searched as
+// a substring, as upstream does, and the short ones pi and omp as whole words.
+func TestDetectWords(t *testing.T) {
 	for _, system := range []string{
 		"",
 		"You are a helpful assistant.",
-		"The REST API returns JSON; sign in as root in the room.",
-		"Compile the sample, then run the optimized build: 3 kilobytes.",
-		"Use opencodes2 or xcursor_theme.",
+		"The REST API returns JSON; sign in as root in the room, then compile it.",
+		"Run the sample, optimized: decline, move the cursor, crush it, mongoose, Traefik, 3 kilobytes.",
+		"Cline, Amp, Zed and Roo are names; so are Cursor, Crush and Goose.",
 	} {
 		if matches := defaults.Detect(system); len(matches) > 0 {
 			t.Errorf("Detect(%q) = %+v, want none", system, matches)
@@ -41,9 +43,11 @@ func TestDetectWholeWords(t *testing.T) {
 	for _, tc := range []struct{ system, want string }{
 		{"用opencode写代码", "OpenCode"},
 		{"See ~/.config/opencode/agent and opencode.json.", "OpenCode"},
-		{"OpenCode's docs", "OpenCode"},
+		{"You are opencodes", "OpenCode"},
+		{"You are xopencode", "OpenCode"},
 		{"inside pi.", "pi"},
-		{"Press the cursor key", "Cursor"},
+		{"Run omp now", "oh-my-pi"},
+		{"Kilo Code and the Claude Code CLI", "Kilo Code"},
 	} {
 		matches := defaults.Detect(tc.system)
 		if len(matches) == 0 || matches[0].Harness != tc.want {
