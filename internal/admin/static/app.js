@@ -96,7 +96,7 @@ const keyText = (name, hash) => name ? `${name} (${shortHash(hash)})` : shortHas
 // column aligns right; a fit column is as narrow as its content, leaving
 // spare width to the others.
 function table(columns, rows, rowClass) {
-  const cellClass = c => [c.num && "num", c.fit && "fit"].filter(Boolean).join(" ");
+  const cellClass = c => [c.num && "num", c.fit && "fit", c.actions && "actions-cell"].filter(Boolean).join(" ");
   return h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {}, h("tr", {}, columns.map(c => h("th", { class: cellClass(c) }, term(c.title, c.hint))))),
     h("tbody", {}, rows.length === 0
@@ -273,9 +273,12 @@ function limitEditor(groups, k) {
 function keyCell(k) {
   const created = t("keys.created", { date: fmt.date(k.created_at) });
   const revoked = k.revoked_at && t("keys.revoked", { date: fmt.date(k.revoked_at) });
-  return stack(k.name, hashText(k.hash), k.note,
-    h("span", { class: "nowrap", title: fmt.time(k.created_at) }, created),
-    revoked ? h("span", { class: "bad nowrap", title: fmt.time(k.revoked_at) }, revoked) : null);
+  const info = stack(k.name, hashText(k.hash), k.note,
+    h("span", { class: "nowrap", title: fmt.time(k.created_at) }, created));
+  if (!revoked) return info;
+  info.className = "key-info";
+  return h("div", {}, info,
+    h("div", { class: "sub" }, h("span", { class: "bad nowrap", title: fmt.time(k.revoked_at) }, revoked)));
 }
 
 // accessCell shows the models a key may use over its worker limit. Lines
@@ -459,7 +462,7 @@ views.keys = container => {
     }
     list.replaceChildren(table([
       ...keyColumns(groups),
-      { title: "", cell: k => k.revoked_at
+      { title: "", actions: true, cell: k => k.revoked_at
           ? h("div", { class: "actions" },
             h("button", { onclick: e => restore(k, e.target) }, t("keys.restore")),
             h("button", { class: "danger", onclick: e => remove(k, e.target) }, t("keys.delete")))
