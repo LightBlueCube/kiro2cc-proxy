@@ -27,6 +27,7 @@ import (
 	"agyrelay/internal/guard"
 	"agyrelay/internal/logbuf"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/promptflags"
 	"agyrelay/internal/store"
 	"agyrelay/internal/usage"
 )
@@ -47,6 +48,8 @@ type env struct {
 	st  *store.Store
 	ctl *control.Control
 	p   *pool.Pool
+	// flags is the risk-control flags the gateway and control share.
+	flags *promptflags.Flags
 	// accounts holds the account HOME directories.
 	accounts string
 }
@@ -73,7 +76,11 @@ func newEnv(t *testing.T) *env {
 	}
 	recorder := usage.NewRecorder(st, settings.Prices, nil, log)
 	budget := usage.NewBudget(st, recorder)
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Log: log})
+	flags, err := promptflags.New(context.Background(), st, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Flags: flags, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +97,7 @@ func newEnv(t *testing.T) *env {
 	// Fake agy makes no outbound connections; let accounts route directly.
 	settings.AllowDirect = true
 	ctl, err := control.New(context.Background(), control.Config{
-		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, CloudCode: cloudCode, AgyBin: os.Args[0], Level: new(slog.LevelVar),
+		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Flags: flags, Egress: outbound, CloudCode: cloudCode, AgyBin: os.Args[0], Level: new(slog.LevelVar),
 		AccountsDir: filepath.Join(dir, "accounts"), Settings: settings, Log: log,
 	})
 	if err != nil {
@@ -107,7 +114,7 @@ func newEnv(t *testing.T) *env {
 		b.Close()
 		st.Close()
 	})
-	return &env{t: t, url: srv.URL, st: st, ctl: ctl, p: p, accounts: filepath.Join(dir, "accounts")}
+	return &env{t: t, url: srv.URL, st: st, ctl: ctl, p: p, flags: flags, accounts: filepath.Join(dir, "accounts")}
 }
 
 type client struct {

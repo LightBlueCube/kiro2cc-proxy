@@ -90,6 +90,11 @@ type accountProxy struct {
 	transport      *http.Transport
 	onVerification VerificationFunc
 	onModelCall    ModelCallFunc
+
+	mu sync.Mutex
+	// stopped maps the sessions whose generation calls are refused to when
+	// they were stopped.
+	stopped map[string]time.Time
 }
 
 // Start listens on a loopback port and forwards to upstream.
@@ -119,7 +124,8 @@ func (s *Server) Close() error { return s.http.Close() }
 // Register routes the account's Cloud Code traffic through egressURL (its
 // egress proxy URL with credentials) and returns the endpoint its agy
 // must use. onVerification learns whether Google wants the account
-// verified; onModelCall learns how each generation call went.
+// verified; onModelCall learns how each generation call went and may stop
+// a session.
 func (s *Server) Register(name, egressURL string, onVerification VerificationFunc, onModelCall ModelCallFunc) (string, error) {
 	egress, err := url.Parse(egressURL)
 	if err != nil {
@@ -132,7 +138,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 	prefix := "/" + name
-	ap := &accountProxy{transport: transport, onVerification: onVerification, onModelCall: onModelCall}
+	ap := &accountProxy{transport: transport, onVerification: onVerification, onModelCall: onModelCall, stopped: map[string]time.Time{}}
 	ap.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Path = strings.TrimPrefix(r.In.URL.Path, prefix)
@@ -156,8 +162,8 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Error("cloud code request failed", "account", name, "path", r.URL.Path, "err", err)
-			if session := callSession(r); session != "" {
-				ap.onModelCall(session, &CallError{Code: http.StatusBadGateway, Message: "upstream request failed"})
+			if c := callOf(r); c.session != "" {
+				ap.report(c, &CallError{Code: http.StatusBadGateway, Message: "upstream request failed"})
 			}
 			http.Error(w, "agyrelay: Cloud Code upstream request failed", http.StatusBadGateway)
 		},
@@ -210,6 +216,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		r = tagged
+		if c := callOf(r); c.session != "" && ap.isStopped(c.session) {
+			s.log.Warn("generation call refused: its session was stopped", "account", name, "session", c.session)
+			http.Error(w, "agyrelay: this session was stopped by risk control", http.StatusForbidden)
+			return
+		}
 	}
 	ap.proxy.ServeHTTP(w, r)
 }

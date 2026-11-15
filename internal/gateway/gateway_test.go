@@ -44,6 +44,35 @@ type harness struct {
 	log     string
 	records *recordLog
 	budget  *fakeBudget
+	flags   *fakeFlags
+}
+
+// fakeFlags keeps the flagged system prompts in memory.
+type fakeFlags struct {
+	mu      sync.Mutex
+	until   map[string]time.Time
+	flagged []FlaggedPrompt
+	err     error
+}
+
+func (f *fakeFlags) FlaggedUntil(fingerprint string) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.until[fingerprint]
+}
+
+func (f *fakeFlags) Flag(ctx context.Context, p FlaggedPrompt) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.until[p.Fingerprint] = p.Until
+	f.flagged = append(f.flagged, p)
+	return f.err
+}
+
+func (f *fakeFlags) cancel(fingerprint string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.until, fingerprint)
 }
 
 // newHarness runs a gateway on fake agy accounts; extraEnv adds
@@ -57,7 +86,8 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	var p *pool.Pool
-	cloudCode := httptest.NewServer(modelCallRecorder(t, func() *pool.Pool { return p }))
+	var gw *Gateway
+	cloudCode := httptest.NewServer(modelCallRecorder(t, func() *pool.Pool { return p }, func() *Gateway { return gw }))
 	t.Cleanup(cloudCode.Close)
 	var configs []pool.AccountConfig
 	for i := range accounts {
@@ -75,7 +105,8 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 	}
 	records := &recordLog{}
 	budget := &fakeBudget{spent: map[string]map[string]float64{}, unpriced: map[string]bool{}}
-	gw, err := New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Log: logger})
+	flags := &fakeFlags{until: map[string]time.Time{}}
+	gw, err = New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Flags: flags, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,34 +115,63 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 		p.Close()
 		b.Close()
 	})
-	return &harness{t: t, gw: gw, p: p, log: logPath, records: records, budget: budget}
+	return &harness{t: t, gw: gw, p: p, log: logPath, records: records, budget: budget, flags: flags}
 }
 
 // modelCallRecorder stands in for the Cloud Code proxy: it records the
 // model calls the fake agy of account <name> posts to /<name>.
-func modelCallRecorder(t *testing.T, current func() *pool.Pool) http.Handler {
+func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGateway func() *Gateway) http.Handler {
+	stopped := &stoppedSessions{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name, path, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		var call agytest.ModelCall
-		account := current().Account(name)
+		account := currentPool().Account(name)
 		if "/"+path != agytest.ModelCallPath || account == nil || json.NewDecoder(r.Body).Decode(&call) != nil {
 			t.Errorf("unexpected Cloud Code request %s", r.URL.Path)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if call.Code == http.StatusOK {
-			account.RecordModelCall(call.Session, nil)
+		if stopped.has(call.Session) {
+			http.Error(w, "stopped by risk control", http.StatusForbidden)
 			return
 		}
-		if call.Code == http.StatusForbidden && strings.Contains(call.Message, "VALIDATION_REQUIRED") {
-			account.SetVerification(true, "https://accounts.google.com/v")
+		var failure *pool.ModelFailure
+		if call.Code != http.StatusOK {
+			if call.Code == http.StatusForbidden && strings.Contains(call.Message, "VALIDATION_REQUIRED") {
+				account.SetVerification(true, "https://accounts.google.com/v")
+			}
+			failure = &pool.ModelFailure{Code: call.Code, Message: call.Message}
+			if call.RetryAfter > 0 {
+				failure.Reset = time.Now().Add(call.RetryAfter)
+			}
 		}
-		failure := &pool.ModelFailure{Code: call.Code, Message: call.Message}
-		if call.RetryAfter > 0 {
-			failure.Reset = time.Now().Add(call.RetryAfter)
+		if account.RecordModelCall(call.Session, call.Model, failure) {
+			stopped.add(call.Session)
+			currentGateway().StopRiskySession(account, call.Session)
 		}
-		account.RecordModelCall(call.Session, failure)
 	})
+}
+
+// stoppedSessions is the sessions the stand-in Cloud Code proxy refuses
+// calls of, as cloudcode does once the account stops a session.
+type stoppedSessions struct {
+	mu       sync.Mutex
+	sessions map[string]bool
+}
+
+func (s *stoppedSessions) add(session string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions == nil {
+		s.sessions = map[string]bool{}
+	}
+	s.sessions[session] = true
+}
+
+func (s *stoppedSessions) has(session string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[session]
 }
 
 // fakeBudget reports set spend by key and group, prices every model but
@@ -1390,7 +1450,7 @@ func TestEarlierTurnFailureIsForgotten(t *testing.T) {
 		t.Fatal(first.err)
 	}
 	session := h.requests("session/prompt")[0].Params.SessionID
-	h.p.Account("acct0").RecordModelCall(session, &pool.ModelFailure{Code: http.StatusInternalServerError, Message: "stale"})
+	h.p.Account("acct0").RecordModelCall(session, agytest.UpstreamModel, &pool.ModelFailure{Code: http.StatusInternalServerError, Message: "stale"})
 	messages := []conv.Message{user("a"), {Role: conv.RoleAssistant, Text: first.text}, user("b")}
 	r := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
 	if r.err != nil || r.text != "reply to: b" {
@@ -1411,7 +1471,7 @@ func TestClosedSessionForgetsItsFailure(t *testing.T) {
 	}
 	account := h.p.Account("acct0")
 	session := h.requests("session/prompt")[0].Params.SessionID
-	account.RecordModelCall(session, &pool.ModelFailure{Code: http.StatusBadGateway, Message: "Cloud Code request failed: context canceled"})
+	account.RecordModelCall(session, agytest.UpstreamModel, &pool.ModelFailure{Code: http.StatusBadGateway, Message: "Cloud Code request failed: context canceled"})
 
 	h.gw.SetIdleClose(time.Millisecond)
 	time.Sleep(5 * time.Millisecond)

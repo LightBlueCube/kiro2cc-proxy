@@ -356,6 +356,7 @@ func TestRecordErrorStatuses(t *testing.T) {
 		{conv.ErrKeyBusy, "key_busy"},
 		{conv.ErrCancelled, "cancelled"},
 		{conv.ErrQuota, "quota"},
+		{conv.ErrRiskControl, "risk_control"},
 	}
 	for i, tc := range cases {
 		rec.Record(gateway.Record{

@@ -119,6 +119,10 @@ const (
 	// ErrCancelled means the client disconnected or the turn was cancelled.
 	ErrCancelled
 	ErrUpstream
+	// ErrRiskControl means Google's risk control refused the request, or
+	// its system prompt was refused before. Retrying it, here or on
+	// another account, only spreads the refusal.
+	ErrRiskControl
 )
 
 type Error struct {

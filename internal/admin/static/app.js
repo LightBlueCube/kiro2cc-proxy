@@ -567,8 +567,38 @@ views.settings = container => {
   const general = h("div", { class: "card" });
   const password = h("div", { class: "card" });
   const sessions = h("div", { class: "card" });
+  const flagged = h("div", { class: "card" });
   const audit = h("div", { class: "card" });
-  container.append(h("h1", {}, t("settings.title")), general, password, sessions, audit);
+  container.append(h("h1", {}, t("settings.title")), general, flagged, password, sessions, audit);
+
+  // flaggedPromptCell shows a flagged prompt's fingerprint; View loads its
+  // text on demand.
+  function flaggedPromptCell(p) {
+    const text = h("pre", { class: "prompt-text", hidden: true });
+    const toggle = h("button", { type: "button", onclick: e => guarded(async () => {
+      if (!text.textContent) text.textContent = (await api("GET", `flagged-prompts/${p.fingerprint}/text`)).text;
+      text.hidden = !text.hidden;
+      e.target.textContent = text.hidden ? t("flagged.view") : t("flagged.hide");
+    }, e.target) }, t("flagged.view"));
+    return h("div", {}, h("span", { class: "mono", title: p.fingerprint }, shortHash(p.fingerprint)), " ", toggle, text);
+  }
+
+  async function loadFlagged() {
+    const { prompts } = await api("GET", "flagged-prompts");
+    const cancel = (p, button) => guarded(async () => {
+      await api("POST", `flagged-prompts/${p.fingerprint}/cancel`);
+      toast(t("flagged.cancelled"));
+      await loadFlagged();
+    }, button);
+    flagged.replaceChildren(h("h2", {}, t("flagged.title")), h("p", { class: "muted" }, t("flagged.note")), table([
+      { title: t("flagged.prompt"), cell: flaggedPromptCell },
+      { title: t("flagged.last"), cell: p => fmt.time(p.last_at) },
+      { title: t("flagged.until"), cell: p => p.active ? fmt.time(p.until) : h("span", { class: "muted" }, t("flagged.ended")) },
+      { title: t("flagged.hits"), num: true, cell: p => String(p.hits) },
+      { title: t("flagged.by"), cell: p => stack(keyName(p.key_name, p.key_hash), joined(p.account, p.model)) },
+      { title: "", actions: true, cell: p => p.active ? h("button", { class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null },
+    ], prompts));
+  }
 
   async function loadGeneral() {
     const [s, catalog] = await Promise.all([api("GET", "settings"), api("GET", "models")]);
@@ -708,6 +738,7 @@ views.settings = container => {
 
   renderPassword();
   guarded(loadGeneral);
+  guarded(loadFlagged);
   guarded(loadSessions);
   guarded(loadAudit);
 };

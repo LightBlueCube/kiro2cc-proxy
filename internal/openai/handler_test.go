@@ -204,6 +204,13 @@ func TestEarlyErrorKeepsStatus(t *testing.T) {
 			wantError: "insufficient_quota",
 		},
 		{
+			name:      "risk control is 403 non-retryable",
+			err:       &conv.Error{Kind: conv.ErrRiskControl, Message: "system prompt refused"},
+			wantCode:  http.StatusForbidden,
+			wantType:  "permission_denied",
+			wantError: "risk_control",
+		},
+		{
 			name:      "key worker limit is 429 retryable",
 			err:       &conv.Error{Kind: conv.ErrKeyBusy, Message: "concurrent limit"},
 			wantCode:  http.StatusTooManyRequests,

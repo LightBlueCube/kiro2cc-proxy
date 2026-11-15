@@ -124,6 +124,9 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/keys/{hash}/revoke", h.authed(h.revokeKey))
 	h.mux.HandleFunc("POST /admin/api/keys/{hash}/restore", h.authed(h.restoreKey))
 	h.mux.HandleFunc("DELETE /admin/api/keys/{hash}", h.authed(h.deleteKey))
+	h.mux.HandleFunc("GET /admin/api/flagged-prompts", h.authed(h.listFlaggedPrompts))
+	h.mux.HandleFunc("GET /admin/api/flagged-prompts/{fingerprint}/text", h.authed(h.flaggedPromptText))
+	h.mux.HandleFunc("POST /admin/api/flagged-prompts/{fingerprint}/cancel", h.authed(h.cancelFlaggedPrompt))
 	h.mux.HandleFunc("GET /admin/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})

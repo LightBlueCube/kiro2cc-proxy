@@ -31,6 +31,7 @@ import (
 	"agyrelay/internal/logbuf"
 	"agyrelay/internal/openai"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/promptflags"
 	"agyrelay/internal/server"
 	"agyrelay/internal/store"
 	"agyrelay/internal/usage"
@@ -138,6 +139,10 @@ func runServe(args []string) error {
 	go monitor.Run(ctx)
 	recorder := usage.NewRecorder(st, settings.Prices, monitor.SettleSoon, usageLog)
 	budget := usage.NewBudget(st, recorder)
+	flags, err := promptflags.New(ctx, st, log.With("component", "promptflags"))
+	if err != nil {
+		return err
+	}
 	outbound, err := egress.Start(log.With("component", "egress"))
 	if err != nil {
 		return err
@@ -158,6 +163,7 @@ func runServe(args []string) error {
 		MaxWorkers:  settings.MaxWorkers,
 		Recorder:    recorder,
 		Budget:      budget,
+		Flags:       flags,
 		Refresh: func(ctx context.Context, account *pool.Account) error {
 			_, err := monitor.Refresh(ctx, account)
 			return err
@@ -175,7 +181,7 @@ func runServe(args []string) error {
 	defer gw.Close()
 
 	ctl, err := control.New(ctx, control.Config{
-		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Egress: outbound, CloudCode: cloudCode, AgyBin: agyBin, Level: level,
+		Store: st, Pool: accountPool, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Flags: flags, Egress: outbound, CloudCode: cloudCode, AgyBin: agyBin, Level: level,
 		AccountsDir: cfg.accountsDir(), Settings: settings, Log: log.With("component", "control"),
 	})
 	if err != nil {

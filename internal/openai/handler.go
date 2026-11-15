@@ -386,6 +386,10 @@ func errorInfo(err *conv.Error) (status int, errType, code string) {
 		// 403 (not 429): spending limits do not reset automatically, so
 		// clients must not retry.
 		status, errType, code = http.StatusForbidden, "insufficient_quota", "insufficient_quota"
+	case conv.ErrRiskControl:
+		// 403 (not 429): the same system prompt stays refused, so clients
+		// must not retry.
+		status, errType, code = http.StatusForbidden, "permission_denied", "risk_control"
 	case conv.ErrKeyBusy:
 		status, errType, code = http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded"
 	case conv.ErrCancelled:

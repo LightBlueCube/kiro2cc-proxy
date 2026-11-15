@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -88,7 +89,12 @@ type Account struct {
 	// modelFailures holds, by session, the failure of its latest
 	// generation call; sessions whose latest call succeeded are absent.
 	modelFailures map[string]ModelFailure
-	procs         map[string]*procSlot
+	// calls is the generation calls of the last callHistory, oldest
+	// first; streaks counts, by session, its consecutive calls refused
+	// with a 429 that names no wait.
+	calls   []callRecord
+	streaks map[string]*noWaitStreak
+	procs   map[string]*procSlot
 	// models is the ACP model catalog agy last reported for the account,
 	// nil until it opens a session.
 	models []agy.ModelInfo
@@ -162,6 +168,7 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 		runs:              map[any]time.Time{},
 		cooldown:          map[string]time.Time{},
 		modelFailures:     map[string]ModelFailure{},
+		streaks:           map[string]*noWaitStreak{},
 		procs:             map[string]*procSlot{},
 	}
 	if err := os.MkdirAll(a.workspace, 0o700); err != nil {
@@ -469,16 +476,107 @@ type ModelFailure struct {
 	Reset time.Time
 }
 
-// RecordModelCall notes how the session's latest generation call went;
-// failure is nil when it succeeded.
-func (a *Account) RecordModelCall(session string, failure *ModelFailure) {
+// Risk control: Google answers a request it dislikes with a 429 that names
+// no wait, while the account's other requests go through. A real quota
+// or capacity 429 names a wait, so the same session getting such a 429
+// again and again is already suspect.
+const (
+	// callHistory is how long the account remembers its generation calls.
+	callHistory = 10 * time.Minute
+	// riskStreakWithPeers is how many such 429s in a row, while other
+	// sessions' calls on the same model succeed, show risk control.
+	riskStreakWithPeers = 2
+	// riskStreakAlone is how many show it when no other session made a
+	// call on the model meanwhile.
+	riskStreakAlone = 3
+)
+
+// callRecord is one generation call's outcome.
+type callRecord struct {
+	at      time.Time
+	session string
+	model   string
+	ok      bool
+	// noWait is a 429 that names no wait.
+	noWait bool
+}
+
+// noWaitStreak is a session's run of 429s that name no wait.
+type noWaitStreak struct {
+	since time.Time
+	count int
+	// risky is set once the streak was judged risk control.
+	risky bool
+}
+
+func isNoWait429(failure *ModelFailure) bool {
+	return failure != nil && failure.Code == http.StatusTooManyRequests && failure.Reset.IsZero()
+}
+
+// RecordModelCall notes how the session's latest generation call, made
+// on model, went; failure is nil when it succeeded. It reports true when
+// the call shows the session's request is under risk control, once per
+// session turn: the call is the session's second 429 in a row that names
+// no wait while other sessions' calls on the model succeeded, or its
+// third when no other session made a call on the model meanwhile. When
+// another session's call on the model was refused the same way, the
+// trouble is the model's or the account's, not the request's.
+func (a *Account) RecordModelCall(session, model string, failure *ModelFailure) (risk bool) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	now := time.Now()
+	a.pruneCallsLocked(now)
+	noWait := isNoWait429(failure)
+	a.calls = append(a.calls, callRecord{at: now, session: session, model: model, ok: failure == nil, noWait: noWait})
 	if failure == nil {
 		delete(a.modelFailures, session)
-		return
+	} else {
+		a.modelFailures[session] = *failure
 	}
-	a.modelFailures[session] = *failure
+	if noWait {
+		risk = a.countNoWaitLocked(session, model, now)
+	} else {
+		delete(a.streaks, session)
+	}
+	a.mu.Unlock()
+	if risk {
+		a.pool.log.Warn("request under risk control", "account", a.name, "session", session, "model", model)
+	}
+	return risk
+}
+
+func (a *Account) pruneCallsLocked(now time.Time) {
+	keep := 0
+	for keep < len(a.calls) && now.Sub(a.calls[keep].at) > callHistory {
+		keep++
+	}
+	a.calls = a.calls[keep:]
+}
+
+// countNoWaitLocked adds a 429 that names no wait to the session's
+// streak and judges the streak.
+func (a *Account) countNoWaitLocked(session, model string, now time.Time) bool {
+	streak := a.streaks[session]
+	if streak == nil {
+		streak = &noWaitStreak{since: now}
+		a.streaks[session] = streak
+	}
+	streak.count++
+	if streak.risky {
+		return false
+	}
+	peersServed, peersRefused := false, false
+	for _, c := range a.calls {
+		if c.session == session || c.model != model || c.at.Before(streak.since) {
+			continue
+		}
+		peersServed = peersServed || c.ok
+		peersRefused = peersRefused || c.noWait
+	}
+	if peersRefused {
+		return false
+	}
+	streak.risky = streak.count >= riskStreakAlone || peersServed && streak.count >= riskStreakWithPeers
+	return streak.risky
 }
 
 // ModelFailure returns the failure of the session's latest generation
@@ -493,10 +591,12 @@ func (a *Account) ModelFailure(session string) *ModelFailure {
 	return &failure
 }
 
-// ForgetModelFailure drops the session's recorded failure.
+// ForgetModelFailure drops the session's recorded failure and its run of
+// 429s that name no wait.
 func (a *Account) ForgetModelFailure(session string) {
 	a.mu.Lock()
 	delete(a.modelFailures, session)
+	delete(a.streaks, session)
 	a.mu.Unlock()
 }
 

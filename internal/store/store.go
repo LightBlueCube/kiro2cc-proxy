@@ -23,6 +23,9 @@ var migrations = []string{
 	// pruned; key limits count it. key_totals likewise keeps each key's
 	// successful requests and tokens by model, and key_quota keeps each
 	// key's attributed weekly-quota shares by account and quota group.
+	// flagged_prompts keeps the system prompts Google's risk control
+	// refused, whole and for good: the admin cancels a flag by ending it,
+	// the row stays, and neither retention nor deleting the key touches it.
 	`CREATE TABLE settings (
 		name  TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
@@ -131,6 +134,18 @@ var migrations = []string{
 		grp      TEXT NOT NULL,
 		used     REAL NOT NULL DEFAULT 0,
 		PRIMARY KEY (key_hash, account, grp)
+	);
+	CREATE TABLE flagged_prompts (
+		fingerprint   TEXT PRIMARY KEY,
+		text          TEXT NOT NULL DEFAULT '',
+		first_at      INTEGER NOT NULL DEFAULT 0,
+		last_at       INTEGER NOT NULL DEFAULT 0,
+		flagged_until INTEGER NOT NULL DEFAULT 0,
+		hits          INTEGER NOT NULL DEFAULT 0,
+		key_hash      TEXT NOT NULL DEFAULT '',
+		key_name      TEXT NOT NULL DEFAULT '',
+		account       TEXT NOT NULL DEFAULT '',
+		model         TEXT NOT NULL DEFAULT ''
 	);`,
 }
 

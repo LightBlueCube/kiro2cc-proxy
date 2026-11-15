@@ -69,7 +69,10 @@ type Config struct {
 	// harness's default, as HarnessSignatures recognize it.
 	RefuseHarnessPrompts bool
 	HarnessSignatures    []sysprompt.Signature
-	Log                  *slog.Logger
+	// Flags, when set, remembers the system prompts that Google's risk
+	// control refused, and the gateway refuses them (see risk.go).
+	Flags PromptFlags
+	Log   *slog.Logger
 }
 
 // Budget reports API keys' list-price spend.
@@ -87,6 +90,7 @@ type Gateway struct {
 	snaps        *snapshotStore
 	recorder     Recorder
 	budget       Budget
+	flags        PromptFlags
 	refresh      func(ctx context.Context, account *pool.Account) error
 	keepForQuota func(ctx context.Context, account *pool.Account, lastUsed time.Time) bool
 	// refreshes holds, by account name, a running refresh or the last one
@@ -149,7 +153,10 @@ type activeTurn struct {
 	// consuming is true while a response reads the turn's events.
 	consuming        bool
 	cancelledByAdmin bool
-	finished         bool
+	// risky is set when the turn was cancelled because Google's risk
+	// control refused its request.
+	risky    bool
+	finished bool
 	// baseSteps is a lower bound of the session's native steps at launch.
 	baseSteps int
 	// The turn's earlier responses reported the model calls before step
@@ -183,6 +190,7 @@ func New(cfg Config) (*Gateway, error) {
 		snaps:        snaps,
 		recorder:     cfg.Recorder,
 		budget:       cfg.Budget,
+		flags:        cfg.Flags,
 		refresh:      cfg.Refresh,
 		keepForQuota: cfg.KeepForQuota,
 		refreshes:    map[string]*refreshCall{},
@@ -309,6 +317,9 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if err := g.checkSystemPrompt(t); err != nil {
 		return err
 	}
+	if err := g.checkFlaggedPrompt(t); err != nil {
+		return err
+	}
 	g.refreshUnreported(ctx)
 	if ctx.Err() != nil {
 		return &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}
@@ -331,7 +342,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		return err
 	}
 
-	r := &run{user: caller.KeyHash, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
+	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
 	attempts := min(maxAttempts, len(g.pool.Accounts()))
 	for attempt := 1; ; attempt++ {
 		at, failure := g.start(ctx, r)
@@ -493,6 +504,7 @@ func validate(req conv.Request, t *transcript) *conv.Error {
 // run is one request's planning state across attempts.
 type run struct {
 	user       string
+	keyName    string
 	maxWorkers *int
 	req        conv.Request
 	t          *transcript
@@ -638,6 +650,14 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 	account := at.account.Name()
 	failure := at.account.ModelFailure(at.sess.id)
 	at.account.ForgetModelFailure(at.sess.id)
+	g.mu.Lock()
+	risky := at.risky
+	g.mu.Unlock()
+	if risky {
+		// The session holds the refused input now.
+		g.forget(account, at.sess.id)
+		return g.riskControl(at, r)
+	}
 	if outcome.Err != nil {
 		g.log.Warn("turn failed", "account", account, "session", at.sess.id, "err", outcome.Err)
 		g.forget(at.account.Name(), at.sess.id)

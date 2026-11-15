@@ -13,6 +13,9 @@
 //	@retry429            fail the model call (capacity), stream RetryNotice,
 //	                     then reply "retried" from a call that succeeds
 //	@steps               reply "steps: N", N the steps before this prompt
+//	@ok                  report a model call that succeeded, reply "ok"
+//	@risk429             risk control: report RiskError (a 429 naming no
+//	                     wait) up to RiskAttempts times, then end the turn
 //
 // Anything else gets a thought and "reply to: <input>".
 //
@@ -21,7 +24,8 @@
 //
 // A failed model call is reported, before agy's line about it, as a
 // ModelCall posted to the --cloud_code_endpoint path plus ModelCallPath;
-// so is a later call that succeeds. Calls that just succeed are not.
+// so is a later call that succeeds. Calls that just succeed are not,
+// except those of "@ok".
 //
 // Its language server also answers GetUserStatus and
 // RetrieveUserQuotaSummary; the gemini-weekly bucket loses
@@ -116,13 +120,27 @@ const (
 const ModelCallPath = "/fake/model-call"
 
 // ModelCall is the outcome of one of the fake's model calls: Code 200 for
-// one that succeeded.
+// one that succeeded. Model is the upstream model it named.
 type ModelCall struct {
 	Session    string        `json:"session"`
+	Model      string        `json:"model"`
 	Code       int           `json:"code"`
 	Message    string        `json:"message,omitempty"`
 	RetryAfter time.Duration `json:"retryAfter,omitempty"`
 }
+
+// UpstreamModel is the model every model call of the fake names.
+const UpstreamModel = "fake-upstream-model"
+
+// RiskError is the 429 that Google's risk control answers "@risk429" with
+// (live, 2026-11-15): no RetryInfo, no Retry-After. The fake repeats the
+// call RiskAttempts times, RiskRetryDelay apart, unless the call report is
+// refused, as agy retries, and then ends the turn.
+const (
+	RiskError      = "RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota)."
+	RiskAttempts   = 6
+	RiskRetryDelay = 20 * time.Millisecond
+)
 
 // LoginCode is the authorization code the fake login accepts; it signs in
 // LoginEmail.
@@ -647,6 +665,7 @@ func (f *fake) modelCall(call ModelCall) error {
 	if f.cloudCodeEndpoint == "" {
 		return errors.New("fake agy: no --cloud_code_endpoint to report model calls to")
 	}
+	call.Model = UpstreamModel
 	body, _ := json.Marshal(call)
 	resp, err := http.Post(f.cloudCodeEndpoint+ModelCallPath, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -673,6 +692,25 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		f.chunk(sessionID, "agent_thought_chunk", "thinking")
 		<-ctx.Done()
 		return "", nil
+	case "@ok":
+		if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusOK}); err != nil {
+			return "", err
+		}
+		return "ok", nil
+	case "@risk429":
+		for range RiskAttempts {
+			// A refused report means the relay stopped the session.
+			if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusTooManyRequests, Message: RiskError}); err != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return "", nil
+			case <-time.After(RiskRetryDelay):
+			}
+		}
+		f.addSteps(sessionID, s, stepErrorMessage)
+		return "⚠ " + RiskError, nil
 	case "@retry429":
 		if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusTooManyRequests, Message: CapacityError}); err != nil {
 			return "", err

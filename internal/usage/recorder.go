@@ -93,6 +93,7 @@ var statusNames = map[conv.ErrorKind]string{
 	conv.ErrUnavailable:    "unavailable",
 	conv.ErrCancelled:      store.StatusCancelled,
 	conv.ErrUpstream:       "upstream_error",
+	conv.ErrRiskControl:    "risk_control",
 }
 
 func errorStatus(kind conv.ErrorKind) string {

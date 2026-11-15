@@ -34,10 +34,23 @@ type CallError struct {
 }
 
 // ModelCallFunc learns the outcome of each generation call agy makes for
-// a session, before agy does: err is nil when the call succeeded.
-type ModelCallFunc func(session string, err *CallError)
+// a session, before agy does: err is nil when the call succeeded, and
+// model is the upstream model the call named. It returns true to stop the
+// session: the proxy then refuses the session's later generation calls
+// instead of sending them upstream.
+type ModelCallFunc func(session, model string, err *CallError) (stop bool)
 
-type sessionKey struct{}
+// stoppedFor bounds how long a stopped session's calls are refused; the
+// caller ends the session's turn long before.
+const stoppedFor = 10 * time.Minute
+
+type callKey struct{}
+
+// call is the generation call a request carries: the session it serves
+// and the model it names.
+type call struct {
+	session, model string
+}
 
 func isGeneration(r *http.Request) bool {
 	return r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, generationSuffix)
@@ -55,6 +68,7 @@ func (s *Server) withSession(account string, r *http.Request) (*http.Request, er
 
 	var body struct {
 		RequestID string `json:"requestId"`
+		Model     string `json:"model"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		s.log.Warn("generation call not watched: body is not JSON", "account", account, "err", err)
@@ -65,25 +79,50 @@ func (s *Server) withSession(account string, r *http.Request) (*http.Request, er
 		return r, nil
 	}
 	session, _, _ := strings.Cut(rest, "/")
-	return r.WithContext(context.WithValue(r.Context(), sessionKey{}, session)), nil
+	return r.WithContext(context.WithValue(r.Context(), callKey{}, call{session: session, model: body.Model})), nil
 }
 
-func callSession(r *http.Request) string {
-	session, _ := r.Context().Value(sessionKey{}).(string)
-	return session
+func callOf(r *http.Request) call {
+	c, _ := r.Context().Value(callKey{}).(call)
+	return c
 }
 
 // watchModelCall reports the outcome of a tagged generation call.
 func (ap *accountProxy) watchModelCall(resp *http.Response) {
-	session := callSession(resp.Request)
-	if session == "" {
+	c := callOf(resp.Request)
+	if c.session == "" {
 		return
 	}
 	if resp.StatusCode/100 == 2 {
-		ap.onModelCall(session, nil)
+		ap.report(c, nil)
 		return
 	}
-	ap.onModelCall(session, callError(resp))
+	ap.report(c, callError(resp))
+}
+
+// report hands a call's outcome to the account and stops the session when
+// it asks.
+func (ap *accountProxy) report(c call, err *CallError) {
+	if !ap.onModelCall(c.session, c.model, err) {
+		return
+	}
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	now := time.Now()
+	for session, at := range ap.stopped {
+		if now.Sub(at) > stoppedFor {
+			delete(ap.stopped, session)
+		}
+	}
+	ap.stopped[c.session] = now
+}
+
+// isStopped reports whether the session was stopped.
+func (ap *accountProxy) isStopped(session string) bool {
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	at, ok := ap.stopped[session]
+	return ok && time.Since(at) <= stoppedFor
 }
 
 // callError reads Google's error from resp, leaving its body for agy as it

@@ -28,6 +28,7 @@ import (
 	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/promptflags"
 	"agyrelay/internal/store"
 	"agyrelay/internal/sysprompt"
 	"agyrelay/internal/usage"
@@ -222,6 +223,9 @@ type Config struct {
 	Monitor  *usage.Monitor
 	Recorder *usage.Recorder
 	Budget   *usage.Budget
+	// Flags holds the system prompts Google's risk control refused; the
+	// gateway shares it.
+	Flags *promptflags.Flags
 	// Egress carries every account's agy traffic.
 	Egress *egress.Server
 	// CloudCode carries every account's Cloud Code API calls, through
@@ -431,20 +435,23 @@ func (c *Control) addToPool(name string, env []string, accountProxy string) (*po
 			return
 		}
 		account.SetVerification(true, v.URL)
-	}, func(session string, callErr *cloudcode.CallError) {
+	}, func(session, model string, callErr *cloudcode.CallError) bool {
 		account := c.cfg.Pool.Account(name)
 		if account == nil {
-			return
+			return false
 		}
-		if callErr == nil {
-			account.RecordModelCall(session, nil)
-			return
+		var failure *pool.ModelFailure
+		if callErr != nil {
+			failure = &pool.ModelFailure{Code: callErr.Code, Message: callErr.Message}
+			if callErr.RetryAfter > 0 {
+				failure.Reset = time.Now().Add(callErr.RetryAfter)
+			}
 		}
-		failure := &pool.ModelFailure{Code: callErr.Code, Message: callErr.Message}
-		if callErr.RetryAfter > 0 {
-			failure.Reset = time.Now().Add(callErr.RetryAfter)
+		if !account.RecordModelCall(session, model, failure) {
+			return false
 		}
-		account.RecordModelCall(session, failure)
+		c.cfg.Gateway.StopRiskySession(account, session)
+		return true
 	})
 	if err != nil {
 		c.cfg.Egress.Forget(name)
