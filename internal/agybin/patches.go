@@ -16,6 +16,7 @@ const mcpCallTimeout = 24 * time.Hour
 const (
 	pkgCortex = "google3/third_party/jetski/cortex/"
 	pkgCLI    = "google3/third_party/jetski/cli/"
+	pkgFS     = "google3/third_party/jetski/fs/"
 
 	fnCallToolRaw          = pkgCortex + "utils/mcp/mcpcore/mcpcore.(*McpClientSessionInstance).callToolRaw"
 	fnCallToolTimeoutError = pkgCortex + "utils/mcp/mcpcore/mcpcore.(*McpClientSessionInstance).formatCallToolTimeoutError"
@@ -27,6 +28,7 @@ const (
 	fnCheckpointOverride   = pkgCortex + "config/config.applyFeatureProviderCheckpointOverrideConfig"
 	fnMaxTokensForStep     = pkgCortex + "chatconverters/chatconverters.(*TrajectoryChatConverter).getMaxTokensForStep"
 	fnStepToMessage        = "google3/third_party/oneharness/internal/core/serializers/serializers.DefaultSerializer.stepToMessage"
+	fnFileWatcherListen    = pkgFS + "file_watcher/file_watcher.(*FileWatcherDefault).listenAndForwardEvents"
 )
 
 // patch is one behaviour change, made at one or more sites.
@@ -121,6 +123,17 @@ var patches = []patch{
 		name: "full-step-output",
 		sites: []site{
 			{function: fnStepToMessage, signature: mustPattern("31 ff eb 08 48 8b bc 24 ?? ?? ?? ?? 48 85 ff 7f"), rewrite: write(4, mustBytes("31 ff 90 90 90 90 90 90"))},
+		},
+	},
+	{
+		// selectgo returns (chosen in rax, recvOK in bl). Checking rax == 0
+		// alone ignores a closed watcher.Events channel, so between
+		// Shutdown's watcher.Close() and close(done) the loop spins logging
+		// "skipping empty or temp file: ". Neither done nor a closed Events
+		// yields recvOK == 1, so testing bl exits on either close.
+		name: "file-watcher-closed-channel",
+		sites: []site{
+			{function: fnFileWatcherListen, signature: mustPattern("be 02 00 00 00 41 b8 01 00 00 00 e8 ?? ?? ?? ?? 48 85 c0 0f 84 ?? ?? ?? ??"), rewrite: write(16, mustBytes("84 db 90"))},
 		},
 	},
 }
