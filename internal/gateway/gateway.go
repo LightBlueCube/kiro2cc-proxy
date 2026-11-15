@@ -24,6 +24,7 @@ import (
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/conv"
 	"agyrelay/internal/pool"
+	"agyrelay/internal/sysprompt"
 	"agyrelay/internal/tokens"
 )
 
@@ -64,7 +65,10 @@ type Config struct {
 	// ContextCheck turns on the check of prompts against ContextWindows.
 	ContextCheck   bool
 	ContextWindows []ContextWindow
-	Log            *slog.Logger
+	// RefuseHarnessPrompts refuses requests whose system prompt is still a
+	// harness's default (see sysprompt.DetectHarness).
+	RefuseHarnessPrompts bool
+	Log                  *slog.Logger
 }
 
 // Budget reports API keys' list-price spend.
@@ -96,6 +100,8 @@ type Gateway struct {
 	// serializes its changes.
 	limits   atomic.Pointer[contextLimits]
 	limitsMu sync.Mutex
+	// refuseHarnessPrompts is Config.RefuseHarnessPrompts, changed by the admin.
+	refuseHarnessPrompts atomic.Bool
 
 	// mu guards sessions and every session's and activeTurn's mutable state.
 	mu        sync.Mutex
@@ -184,6 +190,7 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	g.idleClose.Store(int64(cfg.IdleClose))
 	g.maxWorkers.Store(int64(cfg.MaxWorkers))
+	g.refuseHarnessPrompts.Store(cfg.RefuseHarnessPrompts)
 	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
 		return nil, err
 	}
@@ -193,6 +200,10 @@ func New(cfg Config) (*Gateway, error) {
 
 // SetIdleClose changes how long an idle session stays open in agy.
 func (g *Gateway) SetIdleClose(d time.Duration) { g.idleClose.Store(int64(d)) }
+
+// SetRefuseHarnessPrompts turns the refusal of harnesses' default system
+// prompts on or off.
+func (g *Gateway) SetRefuseHarnessPrompts(on bool) { g.refuseHarnessPrompts.Store(on) }
 
 // SetMaxWorkers changes the global worker cap (0 = unlimited) and closes
 // idle sessions above the new global or per-account caps.
@@ -287,6 +298,9 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if err := validate(req, t); err != nil {
 		return err
 	}
+	if err := g.checkSystemPrompt(t); err != nil {
+		return err
+	}
 	g.refreshUnreported(ctx)
 	if ctx.Err() != nil {
 		return &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}
@@ -350,6 +364,20 @@ func (g *Gateway) finalizeFailure(r *run, failure *attemptFailure) *conv.Error {
 		return &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}
 	}
 	return failure.err
+}
+
+// checkSystemPrompt refuses, while that is on, a system prompt that is
+// still a harness's default: clients must send their own.
+func (g *Gateway) checkSystemPrompt(t *transcript) *conv.Error {
+	if !g.refuseHarnessPrompts.Load() {
+		return nil
+	}
+	name, found := sysprompt.DetectHarness(t.system)
+	if !found {
+		return nil
+	}
+	return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf(
+		"the system prompt is %s's default prompt; replace it with your own", name)}
 }
 
 // checkLimit refuses a key that spent its limit: the total, or the quota

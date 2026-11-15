@@ -694,6 +694,34 @@ func TestPruneDeletesSessionsNobodyCanContinue(t *testing.T) {
 	}
 }
 
+func TestRefuseHarnessPrompt(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	harnessDefault := []conv.Message{{Role: conv.RoleSystem, Text: "be brief"},
+		{Role: conv.RoleSystem, Text: "You are opencode, an interactive CLI tool that helps users with software engineering tasks."}, user("hello")}
+	own := []conv.Message{{Role: conv.RoleSystem, Text: "You are my assistant; opencode runs you."}, user("hello")}
+
+	if res := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: harnessDefault}); res.err != nil {
+		t.Fatalf("refusal off: %v", res.err)
+	}
+
+	h.gw.SetRefuseHarnessPrompts(true)
+	refused := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: harnessDefault})
+	if refused.err == nil || refused.err.Kind != conv.ErrForbidden || !strings.Contains(refused.err.Message, "OpenCode") {
+		t.Fatalf("err = %+v, want a refusal naming OpenCode", refused.err)
+	}
+	if res := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: own}); res.err != nil {
+		t.Fatalf("own prompt: %v", res.err)
+	}
+	if n := len(h.requests("session/prompt")); n != 2 {
+		t.Fatalf("session/prompt count = %d, want 2 (the refused request reaches no agy)", n)
+	}
+	records := h.records.all(t, 3)
+	if len(records) != 3 || records[1].Err == nil || records[1].Err.Kind != conv.ErrForbidden {
+		t.Fatalf("records = %+v, want the refusal recorded second", records)
+	}
+}
+
 func TestSystemMessagePlacement(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()

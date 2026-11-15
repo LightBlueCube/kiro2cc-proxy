@@ -58,6 +58,9 @@ type Settings struct {
 	// ContextWindows; it costs the tokenizers' memory and counting time.
 	ContextCheck   bool                    `json:"context_check"`
 	ContextWindows []gateway.ContextWindow `json:"context_windows"`
+	// RefuseHarnessPrompts refuses requests whose system prompt is still a
+	// harness's default (OpenCode's, Claude Code's, ...).
+	RefuseHarnessPrompts bool `json:"refuse_harness_prompts"`
 	// FallbackProxy carries the traffic of accounts without their own
 	// proxy ("" = none).
 	FallbackProxy string `json:"fallback_proxy"`
@@ -283,6 +286,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Gateway.SetMaxWorkers(s.MaxWorkers)
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
+	c.cfg.Gateway.SetRefuseHarnessPrompts(s.RefuseHarnessPrompts)
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
 	if err := c.cfg.Gateway.SetContextWindows(s.ContextWindows, s.ContextCheck); err != nil {

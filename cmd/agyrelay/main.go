@@ -162,10 +162,11 @@ func runServe(args []string) error {
 			_, err := monitor.Refresh(ctx, account)
 			return err
 		},
-		KeepForQuota:   monitor.KeepForQuota,
-		ContextCheck:   settings.ContextCheck,
-		ContextWindows: settings.ContextWindows,
-		Log:            log.With("component", "gateway"),
+		KeepForQuota:         monitor.KeepForQuota,
+		ContextCheck:         settings.ContextCheck,
+		ContextWindows:       settings.ContextWindows,
+		RefuseHarnessPrompts: settings.RefuseHarnessPrompts,
+		Log:                  log.With("component", "gateway"),
 	})
 	if err != nil {
 		return err

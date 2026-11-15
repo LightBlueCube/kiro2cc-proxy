@@ -579,6 +579,7 @@ views.settings = container => {
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
     const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
+    const refuseHarness = h("input", { type: "checkbox", checked: s.refuse_harness_prompts });
 
     const modelInput = value => h("input", { value, list: "settings-models", required: true, style: "width:260px" });
     const number = (min, step) => value => h("input", { type: "number", min, step, value, style: "width:110px" });
@@ -600,7 +601,7 @@ views.settings = container => {
         await api("PUT", "settings", {
           turns_per_account: Number(turns.value), max_workers: Number(maxWorkers.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
           retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
-          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
+          refuse_harness_prompts: refuseHarness.checked, fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
         });
         toast(t("common.saved"));
         await loadGeneral();
@@ -619,6 +620,9 @@ views.settings = container => {
         h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
         h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, t("settings.direct")), resetButton(direct, d.allow_direct))),
       h("p", { class: "muted" }, t("settings.outbound.note")),
+      h("h3", {}, t("settings.system_prompts")),
+      h("span", { class: "with-reset" }, h("label", { class: "check" }, refuseHarness, t("settings.refuse_harness")), resetButton(refuseHarness, d.refuse_harness_prompts)),
+      h("p", { class: "muted" }, t("settings.refuse_harness.note")),
       h("details", { class: "fold" },
         h("summary", {}, s.context_check
           ? t("settings.windows.summary.on", { count: s.context_windows.length })
