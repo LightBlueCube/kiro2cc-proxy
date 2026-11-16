@@ -949,14 +949,14 @@ func TestLogsAndUsageNeedSession(t *testing.T) {
 
 	ctx := context.Background()
 	cost := 0.5
-	if err := e.st.AddRequest(ctx, store.Request{At: time.Now(), KeyHash: "hash-alice", KeyName: "alice", Account: "main", Model: "m", Status: "ok", Input: 100, Cached: 40, Output: 10, CostUSD: &cost}); err != nil {
+	if err := e.st.AddRequest(ctx, store.Request{At: time.Now(), KeyHash: "hash-alice", KeyName: "alice", Account: "main", Model: "m", Stream: true, Anchor: "ok", Status: "ok", Input: 100, Cached: 40, Output: 10, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 	r = c.do("GET", "/admin/api/usage?by=day_key&tz=480", nil, nil)
 	if r.status != http.StatusOK || !strings.Contains(r.raw, `hash-alice","key_name":"alice","requests":1`) || !strings.Contains(r.raw, `"cost_usd":0.5`) {
 		t.Fatalf("usage = %d %s", r.status, r.raw)
 	}
-	if r := c.do("GET", "/admin/api/requests?key=hash-alice&limit=10", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"key":"alice","key_hash":"hash-alice"`) || !strings.Contains(r.raw, `"cached":40`) {
+	if r := c.do("GET", "/admin/api/requests?key=hash-alice&limit=10", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"key":"alice","key_hash":"hash-alice"`) || !strings.Contains(r.raw, `"cached":40`) || !strings.Contains(r.raw, `"anchor":"ok"`) {
 		t.Fatalf("requests = %d %s", r.status, r.raw)
 	}
 	if r := c.do("GET", "/admin/api/requests?key=alice&limit=10", nil, nil); r.raw != "[]\n" {

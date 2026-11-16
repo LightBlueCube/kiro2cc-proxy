@@ -98,6 +98,7 @@ var migrations = []string{
 		effort        TEXT NOT NULL DEFAULT '',
 		api           TEXT NOT NULL DEFAULT '',
 		stream        INTEGER NOT NULL DEFAULT 0,
+		anchor        TEXT NOT NULL DEFAULT '',
 		mode          TEXT NOT NULL DEFAULT '',
 		replay_reason TEXT NOT NULL DEFAULT '',
 		status        TEXT NOT NULL DEFAULT '',

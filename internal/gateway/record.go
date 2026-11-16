@@ -38,6 +38,28 @@ const (
 	ReplayRetry ReplayReason = "retry"
 )
 
+// AnchorStatus reports whether the request returned a usable anchor
+// (encrypted_content / reasoning.encrypted) for its conversation history.
+type AnchorStatus string
+
+const (
+	// AnchorNone means the request had no prior assistant turn, so no anchor
+	// was expected.
+	AnchorNone AnchorStatus = ""
+	// AnchorOK means a well-formed agr1. anchor matched the transcript prefix
+	// through the latest assistant message.
+	AnchorOK AnchorStatus = "ok"
+	// AnchorStale means a well-formed agr1. anchor matched an earlier prefix,
+	// but not the latest assistant message.
+	AnchorStale AnchorStatus = "stale"
+	// AnchorInvalid means the client sent encrypted_content / reasoning.encrypted
+	// data, but none matched the transcript prefix.
+	AnchorInvalid AnchorStatus = "invalid"
+	// AnchorMissing means the request had prior assistant turns and the client
+	// sent no anchor data at all.
+	AnchorMissing AnchorStatus = "missing"
+)
+
 // Record describes one served request, reported after its last event.
 type Record struct {
 	At      time.Time
@@ -45,6 +67,7 @@ type Record struct {
 	KeyName string
 	API     string
 	Stream  bool
+	Anchor  AnchorStatus
 	// Model is the public model id once resolved, else as requested.
 	Model string
 	Slug  string

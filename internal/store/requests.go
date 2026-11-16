@@ -22,6 +22,7 @@ type Request struct {
 	Effort  string
 	API     string
 	Stream  bool
+	Anchor  string
 	Mode    string
 	// ReplayReason says why a replay-mode request reused no session.
 	ReplayReason string
@@ -70,7 +71,7 @@ const StatusOK = "ok"
 // whose turn was cancelled.
 const StatusCancelled = "cancelled"
 
-const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
+const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip, call_token`
 
 // AddRequest stores the request, adds its cost to the key's spend, and
@@ -85,9 +86,9 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
-		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, call_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
+	_, err = tx.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
+		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, call_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Anchor, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
 		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup, r.CallToken)
 	if err != nil {
 		return err
@@ -170,7 +171,7 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		var at, duration int64
 		var ttft sql.NullInt64
 		var cost, quota sql.NullFloat64
-		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.Model, &r.Slug, &r.Effort, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
+		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.Model, &r.Slug, &r.Effort, &r.API, &r.Stream, &r.Anchor, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
 			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota, &r.QuotaSkip, &r.CallToken, &r.Upstream); err != nil {
 			return nil, err
 		}

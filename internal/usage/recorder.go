@@ -48,7 +48,7 @@ func (r *Recorder) priced(model string) bool {
 func (r *Recorder) Record(rec gateway.Record) {
 	row := store.Request{
 		At: rec.At, KeyHash: rec.KeyHash, KeyName: rec.KeyName, Account: rec.Account, Model: rec.Model, Slug: rec.Slug, Effort: rec.Effort,
-		API: rec.API, Stream: rec.Stream, Mode: string(rec.Mode), ReplayReason: string(rec.ReplayReason), Status: store.StatusOK, Finish: string(rec.Finish),
+		API: rec.API, Stream: rec.Stream, Anchor: string(rec.Anchor), Mode: string(rec.Mode), ReplayReason: string(rec.ReplayReason), Status: store.StatusOK, Finish: string(rec.Finish),
 		Duration: rec.Duration, QuotaGroup: rec.QuotaGroup, CallToken: rec.CallToken,
 	}
 	if rec.TimeToFirstOutput > 0 {

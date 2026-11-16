@@ -1517,6 +1517,15 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
     ], sums));
   }
 
+  // anchorBadge shows whether the client returned a valid encrypted_content
+  // anchor when the request carried prior assistant turns.
+  function anchorBadge(status) {
+    const glyphs = { ok: ["+", "ok"], stale: ["~", "warn"], invalid: ["!", "bad"], missing: ["?", "bad"] };
+    const glyph = glyphs[status];
+    if (!glyph) return "";
+    return [" ", h("span", { class: glyph[1], title: lookup("anchor", status) || status }, glyph[0])];
+  }
+
   let rows = [];
   async function loadRows(more) {
     const before = more && rows.length ? { before: String(rows[rows.length - 1].id) } : {};
@@ -1526,7 +1535,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
       { title: t("common.time"), cell: r => stack(fmt.time(r.at),
           r.ttft_ms === null ? fmt.ms(r.duration_ms) : t("calls.time.first_output", { total: fmt.ms(r.duration_ms), first: fmt.ms(r.ttft_ms) })) },
       { title: t("calls.who"), cell: r => stack(keyName(r.key, r.key_hash),
-          [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : ""]) },
+          [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : "", anchorBadge(r.anchor)]) },
       { title: t("calls.model_mode"), cell: r => stack(
           [h("span", { title: r.slug }, r.model), r.effort ? term(" · " + r.effort, t("calls.effort.hint")) : ""],
           r.mode ? [term(r.mode, lookup("mode", r.mode)), r.replay_reason ? [" · ", term(r.replay_reason, lookup("replay", r.replay_reason))] : ""] : null) },

@@ -326,6 +326,7 @@ func (g *Gateway) report(rec Record, w *response, err *conv.Error) {
 
 func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Request, w *response, rec *Record) *conv.Error {
 	t := newTranscript(req.Messages)
+	rec.Anchor = inspectAnchor(t)
 	if err := validate(req, t); err != nil {
 		return err
 	}

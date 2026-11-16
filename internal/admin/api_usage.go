@@ -26,6 +26,7 @@ type requestView struct {
 	Effort string `json:"effort"`
 	API    string `json:"api"`
 	Stream bool   `json:"stream"`
+	Anchor string `json:"anchor"`
 	Mode   string `json:"mode"`
 	// ReplayReason is set for mode "replay".
 	ReplayReason string   `json:"replay_reason"`
@@ -104,7 +105,7 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		v := requestView{
 			ID: row.ID, At: row.At, Key: row.KeyName, KeyHash: row.KeyHash, Account: row.Account, Model: row.Model, Slug: row.Slug, Effort: row.Effort, API: row.API,
-			Stream: row.Stream, Mode: row.Mode, ReplayReason: row.ReplayReason, Status: row.Status, Error: row.Error, Finish: row.Finish,
+			Stream: row.Stream, Anchor: row.Anchor, Mode: row.Mode, ReplayReason: row.ReplayReason, Status: row.Status, Error: row.Error, Finish: row.Finish,
 			DurationMS: row.Duration.Milliseconds(), Input: row.Input, Cached: row.Cached, Output: row.Output,
 			Reasoning: row.Reasoning, CostUSD: row.CostUSD, QuotaGroup: row.QuotaGroup, QuotaUsed: row.QuotaUsed, QuotaSkip: string(row.QuotaSkip),
 		}

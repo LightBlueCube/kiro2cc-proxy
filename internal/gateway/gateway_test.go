@@ -1630,6 +1630,64 @@ func TestAnchorLetsAnotherKeyContinue(t *testing.T) {
 	if len(h.requests("session/new")) != 2 || prompts[len(prompts)-1].Params.SessionID != prompts[0].Params.SessionID {
 		t.Fatal("anchored request did not reuse alice's session")
 	}
+	if recs := h.records.all(t, 3); recs[0].Anchor != AnchorNone || recs[1].Anchor != AnchorInvalid || recs[2].Anchor != AnchorOK {
+		t.Fatalf("anchor statuses = [%q, %q, %q], want [\"\", %q, %q]", recs[0].Anchor, recs[1].Anchor, recs[2].Anchor, AnchorInvalid, AnchorOK)
+	}
+}
+
+func TestInspectAnchorStatuses(t *testing.T) {
+	t1 := newTranscript([]conv.Message{user("hello")})
+	if got := inspectAnchor(t1); got != AnchorNone {
+		t.Fatalf("first turn = %q, want %q", got, AnchorNone)
+	}
+
+	reply1 := conv.Message{Role: conv.RoleAssistant, Text: "hi"}
+	t2Base := newTranscript([]conv.Message{user("hello"), reply1, user("next")})
+	if got := inspectAnchor(t2Base); got != AnchorMissing {
+		t.Fatalf("missing anchor = %q, want %q", got, AnchorMissing)
+	}
+
+	a1 := anchor{Account: "acct0", SessionID: "s1", Count: 2, Hash: t2Base.hashes[2]}.encode()
+	t2OK := newTranscript([]conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: "hi", Anchors: []string{a1}}, user("next")})
+	if got := inspectAnchor(t2OK); got != AnchorOK {
+		t.Fatalf("valid anchor = %q, want %q", got, AnchorOK)
+	}
+
+	// Edited history invalidates the anchor's prefix hash.
+	t2Edited := newTranscript([]conv.Message{user("edited"), {Role: conv.RoleAssistant, Text: "hi", Anchors: []string{a1}}, user("next")})
+	if got := inspectAnchor(t2Edited); got != AnchorInvalid {
+		t.Fatalf("edited history anchor = %q, want %q", got, AnchorInvalid)
+	}
+
+	// Foreign or malformed anchors without any matching agr1. anchor report invalid.
+	t2Foreign := newTranscript([]conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: "hi", Anchors: []string{"gAAAA-other"}}, user("next")})
+	if got := inspectAnchor(t2Foreign); got != AnchorInvalid {
+		t.Fatalf("foreign anchor = %q, want %q", got, AnchorInvalid)
+	}
+
+	// Multi-turn: keeping turn 1's anchor while dropping turn 2's reports stale.
+	t3Stale := newTranscript([]conv.Message{
+		user("hello"),
+		{Role: conv.RoleAssistant, Text: "hi", Anchors: []string{a1}},
+		user("next"),
+		{Role: conv.RoleAssistant, Text: "sure"},
+		user("last"),
+	})
+	if got := inspectAnchor(t3Stale); got != AnchorStale {
+		t.Fatalf("stale anchor = %q, want %q", got, AnchorStale)
+	}
+
+	a2 := anchor{Account: "acct0", SessionID: "s1", Count: 4, Hash: t3Stale.hashes[4]}.encode()
+	t3OK := newTranscript([]conv.Message{
+		user("hello"),
+		{Role: conv.RoleAssistant, Text: "hi", Anchors: []string{a1}},
+		user("next"),
+		{Role: conv.RoleAssistant, Text: "sure", Anchors: []string{a2}},
+		user("last"),
+	})
+	if got := inspectAnchor(t3OK); got != AnchorOK {
+		t.Fatalf("multi-turn valid anchor = %q, want %q", got, AnchorOK)
+	}
 }
 
 // A key that continues another key's session through its anchor owns the

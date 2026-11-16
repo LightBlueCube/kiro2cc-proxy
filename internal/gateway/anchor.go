@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+
+	"agyrelay/internal/conv"
 )
 
 // An anchor names the native position an assistant reply left its session
@@ -68,4 +70,44 @@ func (g *Gateway) anchoredSnapshot(t *transcript) (snapshot, bool) {
 		}
 	}
 	return best, found
+}
+
+// inspectAnchor checks whether the request returned a valid agr1. anchor
+// covering its latest assistant turn.
+func inspectAnchor(t *transcript) AnchorStatus {
+	lastAsst := -1
+	anyAnchor := false
+	for i, m := range t.body {
+		if m.Role == conv.RoleAssistant {
+			lastAsst = i
+		}
+		if len(m.Anchors) > 0 {
+			anyAnchor = true
+		}
+	}
+	if lastAsst < 0 {
+		return AnchorNone
+	}
+	bestCount := 0
+	for _, m := range t.body {
+		for _, value := range m.Anchors {
+			a, ok := parseAnchor(value)
+			if !ok || a.Count > len(t.body) || t.hashes[a.Count] != a.Hash {
+				continue
+			}
+			if a.Count > bestCount {
+				bestCount = a.Count
+			}
+		}
+	}
+	if bestCount >= lastAsst+1 {
+		return AnchorOK
+	}
+	if bestCount > 0 {
+		return AnchorStale
+	}
+	if anyAnchor {
+		return AnchorInvalid
+	}
+	return AnchorMissing
 }

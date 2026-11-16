@@ -407,7 +407,7 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 		t.Fatalf("keys after upgrade = %+v, %v", keys, err)
 	}
 	reqs, err := st.Requests(ctx, RequestFilter{}, 0, 10)
-	if err != nil || len(reqs) != 3 || reqs[0].Effort != "" || reqs[0].QuotaSkip != "" {
+	if err != nil || len(reqs) != 3 || reqs[0].Effort != "" || reqs[0].QuotaSkip != "" || reqs[0].Anchor != "" {
 		t.Fatalf("requests after upgrade = %+v, %v", reqs, err)
 	}
 	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 0 {
