@@ -44,6 +44,16 @@ func TestProxyEnvAndBlocking(t *testing.T) {
 		t.Fatalf("verified pick = %v, %v", got, err)
 	}
 	a.Release()
+
+	a.Disable(errors.New("sign-in required"))
+	if _, err := p.Pick("u", "gemini", nil, nil); !errors.Is(err, ErrNoAccount) || a.Status().Disabled == "" {
+		t.Fatalf("disabled account picked: %v, %+v", err, a.Status())
+	}
+	a.Enable()
+	if got, err := p.Pick("u", "gemini", nil, nil); err != nil || got != a || a.Status().Disabled != "" {
+		t.Fatalf("enabled pick = %v, %v, %+v", got, err, a.Status())
+	}
+	a.Release()
 }
 
 func TestPriorityAndAllowedModels(t *testing.T) {

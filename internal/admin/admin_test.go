@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"agyrelay/internal/agy"
 	"agyrelay/internal/agy/agytest"
 	"agyrelay/internal/bridge"
 	"agyrelay/internal/cloudcode"
@@ -747,6 +749,64 @@ func TestImportSignIn(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.accounts, "main")); !os.IsNotExist(err) {
 		t.Fatalf("HOME after removal: %v", err)
+	}
+}
+
+func TestRefreshReenablesRecoveredAccount(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	add := map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}
+	if r := c.do("POST", "/admin/api/accounts", add, nil); r.status != http.StatusOK {
+		t.Fatalf("add = %d %s", r.status, r.raw)
+	}
+	tokenDir := filepath.Join(e.accounts, "main", ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(tokenDir, "antigravity-oauth-token")
+	valid := `{"token":{"refresh_token":"` + agytest.RefreshToken + `"},"auth_method":"consumer"}`
+	if err := os.WriteFile(tokenFile, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("initial refresh = %d %s", r.status, r.raw)
+	}
+
+	// Simulate gateway failing session/new with Authentication required.
+	e.p.Account("main").Disable(fmt.Errorf("%w (session/new: Authentication required)", agy.ErrAuthRequired))
+	if err := os.WriteFile(tokenFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusBadGateway {
+		t.Fatalf("refresh with bad token = %d %s", r.status, r.raw)
+	}
+	var accounts []accountView
+	if err := json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &accounts); err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].Disabled == "" || accounts[0].SampleErr == "" || accounts[0].User == nil {
+		t.Fatalf("accounts while disabled = %+v", accounts)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("refresh after recovery = %d %s", r.status, r.raw)
+	}
+	accounts = nil
+	if err := json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &accounts); err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].Disabled != "" || accounts[0].SampleErr != "" || accounts[0].User == nil || len(accounts[0].Groups) == 0 || len(accounts[0].Models) == 0 {
+		t.Fatalf("accounts after recovery = %+v", accounts)
+	}
+	if err := e.p.Account("main").Available("gemini"); err != nil {
+		t.Fatalf("account still unavailable after recovery: %v", err)
 	}
 }
 

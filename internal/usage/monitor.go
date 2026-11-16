@@ -90,7 +90,9 @@ func (m *Monitor) SampleRunning(ctx context.Context, account *pool.Account) {
 	if proc == nil {
 		return // no agy, or its idle sessions were all closed
 	}
-	m.sample(ctx, account, proc)
+	if _, err := m.sample(ctx, account, proc); err == nil {
+		account.Enable()
+	}
 }
 
 // maxQuotaHold bounds how long KeepForQuota keeps an idle account's agy
@@ -179,25 +181,43 @@ func withLanguageServer(procs []*agy.Proc) (*agy.Proc, error) {
 
 // Refresh samples the account now, starting agy and its language server
 // when needed. An account whose sign-in agy refuses leaves rotation, as
-// when a request meets that, until it signs in again.
+// when a request meets that, until a new sign-in or successful refresh
+// restores it.
 func (m *Monitor) Refresh(ctx context.Context, account *pool.Account) (AccountQuota, error) {
-	q, err := m.TryRefresh(ctx, account)
-	if agy.IsAuthError(err) {
-		account.Disable(err)
-	}
+	q, authOK, err := m.tryRefresh(ctx, account)
+	finishRefresh(account, authOK, err)
 	return q, err
+}
+
+func finishRefresh(account *pool.Account, authOK bool, err error) {
+	switch {
+	case agy.IsAuthError(err):
+		account.Disable(err)
+	case err == nil || (authOK && account.Status().Verify):
+		account.Enable()
+	}
 }
 
 // TryRefresh is Refresh that leaves a refused sign-in to the caller, for
 // trying a sign-in the account may not keep.
 func (m *Monitor) TryRefresh(ctx context.Context, account *pool.Account) (AccountQuota, error) {
+	q, _, err := m.tryRefresh(ctx, account)
+	return q, err
+}
+
+func (m *Monitor) tryRefresh(ctx context.Context, account *pool.Account) (AccountQuota, bool, error) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	proc, err := account.Proc(ctx, m.cfg.Profile)
 	probe := ""
 	var models []agy.ModelInfo
 	if err == nil {
-		probe, models, err = proc.EnsureLanguageServer(ctx, agy.SessionSpec{Cwd: account.Workspace()})
+		spec := agy.SessionSpec{Cwd: account.Workspace()}
+		if account.Status().Disabled != "" {
+			probe, models, err = proc.ProbeLanguageServer(ctx, spec)
+		} else {
+			probe, models, err = proc.EnsureLanguageServer(ctx, spec)
+		}
 	}
 	if probe != "" {
 		account.SetModels(models)
@@ -206,9 +226,10 @@ func (m *Monitor) TryRefresh(ctx context.Context, account *pool.Account) (Accoun
 	if err != nil {
 		m.fail(account.Name(), err)
 		q, _ := m.Latest(account.Name())
-		return q, err
+		return q, false, err
 	}
-	return m.sample(ctx, account, proc)
+	q, err := m.sample(ctx, account, proc)
+	return q, true, err
 }
 
 // closeProbe closes the empty session Refresh opened to start a language

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -149,6 +150,124 @@ func TestRefreshDisablesAccountThatNeedsSignIn(t *testing.T) {
 	}
 	if got := account.Status().Disabled; got != "" {
 		t.Fatalf("account still disabled after signing in: %q", got)
+	}
+}
+
+// When a previously refused sign-in works again (e.g. after a transient
+// network error), Refresh probes session/new even if a language server
+// already runs, re-enabling the account without killing live processes.
+// SampleRunning also re-enables a disabled account on a successful sample.
+func TestRefreshAndSampleEnableRecoveredAccount(t *testing.T) {
+	e := newMonitorEnv(t)
+	ctx := context.Background()
+	account := e.p.Account("a")
+	tokenDir := filepath.Join(account.GeminiDir(), "antigravity-cli")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(tokenDir, "antigravity-oauth-token")
+	valid := `{"token": {"refresh_token": "` + agytest.RefreshToken + `"}, "auth_method": "consumer"}`
+	if err := os.WriteFile(tokenFile, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open a live session so a language server already runs on IdleProfile.
+	proc, err := account.Proc(ctx, e.monitor.cfg.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessID, _, err := proc.NewSession(ctx, agy.SessionSpec{Cwd: account.Workspace()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// While the token is still rejected, Refresh must probe session/new and
+	// keep the account disabled despite the already-running language server.
+	if err := os.WriteFile(tokenFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account.Disable(agy.ErrAuthRequired)
+	if _, err := e.monitor.Refresh(ctx, account); !agy.IsAuthError(err) {
+		t.Fatalf("Refresh with invalid token = %v, want auth error", err)
+	}
+	if account.Status().Disabled == "" {
+		t.Fatal("account re-enabled while session/new still fails")
+	}
+
+	// Once the sign-in works again, Refresh re-enables without calling SignedIn
+	// and without killing the running process or its live session.
+	if err := os.WriteFile(tokenFile, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q, err := e.monitor.Refresh(ctx, account)
+	if err != nil {
+		t.Fatalf("Refresh after recovery: %v", err)
+	}
+	if q.Err != "" || len(q.Groups) == 0 {
+		t.Fatalf("quota after Refresh = %+v", q)
+	}
+	if got := account.Status().Disabled; got != "" {
+		t.Fatalf("account still disabled after Refresh succeeded: %q", got)
+	}
+	if account.Available("gemini") != nil {
+		t.Fatalf("account still unavailable: %v", account.Available("gemini"))
+	}
+	if !proc.Alive() || !proc.HasSession(sessID) {
+		t.Fatal("Refresh killed existing live process or session")
+	}
+
+	// SampleRunning also re-enables a disabled account when sampling succeeds.
+	account.Disable(agy.ErrAuthRequired)
+	e.monitor.SampleRunning(ctx, account)
+	if got := account.Status().Disabled; got != "" {
+		t.Fatalf("account still disabled after SampleRunning succeeded: %q", got)
+	}
+
+	// Non-auth refresh failures (e.g. cancellation) leave a disabled account
+	// disabled when it does not await verification.
+	account.Disable(agy.ErrAuthRequired)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := e.monitor.Refresh(cancelled, account); err == nil {
+		t.Fatal("Refresh with cancelled context succeeded")
+	}
+	if account.Status().Disabled == "" {
+		t.Fatal("account re-enabled after failed Refresh")
+	}
+
+	// If Refresh fails before session/new completes (e.g. cancelled), a
+	// disabled account stays disabled even when Verify is set. If auth
+	// succeeded and sampling failed due to VALIDATION_REQUIRED, the stale
+	// sign-in disable clears so verification is shown instead.
+	account.SetVerification(true, "https://accounts.google.com/v")
+	if err := os.WriteFile(tokenFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.monitor.Refresh(ctx, account); !agy.IsAuthError(err) {
+		t.Fatalf("Refresh auth failure = %v", err)
+	}
+	if account.Status().Disabled == "" {
+		t.Fatal("auth failure must stay disabled even if Verify was set earlier")
+	}
+	if _, err := e.monitor.Refresh(cancelled, account); err == nil {
+		t.Fatal("Refresh with cancelled context succeeded")
+	}
+	if account.Status().Disabled == "" {
+		t.Fatal("cancelled Refresh cleared disabled when Verify was set")
+	}
+	finishRefresh(account, true, errors.New("verify your account to continue"))
+	if account.Status().Disabled != "" {
+		t.Fatalf("disabled = %q, want empty once auth succeeded and Verify is set", account.Status().Disabled)
+	}
+	account.SetVerification(false, "")
+	if err := os.WriteFile(tokenFile, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.monitor.Refresh(ctx, account); err != nil {
+		t.Fatalf("Refresh with valid token: %v", err)
+	}
+	if account.Status().Disabled != "" {
+		t.Fatalf("disabled = %q, want empty", account.Status().Disabled)
 	}
 }
 

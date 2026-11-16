@@ -618,6 +618,18 @@ func (a *Account) SignedIn() {
 	a.pool.log.Info("account signed in", "account", a.name)
 }
 
+// Enable returns a disabled account to rotation when its sign-in works
+// again (e.g. after a transient auth error), keeping running processes.
+func (a *Account) Enable() {
+	a.mu.Lock()
+	wasDisabled := a.disabled != nil
+	a.disabled = nil
+	a.mu.Unlock()
+	if wasDisabled {
+		a.pool.log.Info("account re-enabled", "account", a.name)
+	}
+}
+
 func (a *Account) SetPaused(paused bool) {
 	a.mu.Lock()
 	a.paused = paused

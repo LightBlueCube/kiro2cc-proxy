@@ -104,9 +104,22 @@ func (p *Proc) UserStatus(ctx context.Context) (UserStatus, error) {
 // closes the session when done, so under --process-per-session its worker
 // does not stay behind.
 func (p *Proc) EnsureLanguageServer(ctx context.Context, spec SessionSpec) (string, []ModelInfo, error) {
-	ports, err := p.lsPorts()
-	if err != nil || len(ports) > 0 {
-		return "", nil, err
+	return p.ensureLanguageServer(ctx, spec, false)
+}
+
+// ProbeLanguageServer opens an empty session in spec.Cwd even when a
+// language server already runs, so callers can verify sign-in and refresh
+// the model catalog.
+func (p *Proc) ProbeLanguageServer(ctx context.Context, spec SessionSpec) (string, []ModelInfo, error) {
+	return p.ensureLanguageServer(ctx, spec, true)
+}
+
+func (p *Proc) ensureLanguageServer(ctx context.Context, spec SessionSpec, forceProbe bool) (string, []ModelInfo, error) {
+	if !forceProbe {
+		ports, err := p.lsPorts()
+		if err != nil || len(ports) > 0 {
+			return "", nil, err
+		}
 	}
 	probe, models, err := p.NewSession(ctx, spec)
 	if err != nil {
