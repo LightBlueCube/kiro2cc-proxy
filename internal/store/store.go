@@ -26,6 +26,9 @@ var migrations = []string{
 	// flagged_prompts keeps the system prompts Google's risk control
 	// refused, whole and for good: the admin cancels a flag by ending it,
 	// the row stays, and neither retention nor deleting the key touches it.
+	// upstream_calls keeps the Cloud Code generation calls agy made for a
+	// request (debug capture), gzipped and tied to the request by
+	// call_token; UpstreamRetention bounds them, not retention_days.
 	`CREATE TABLE settings (
 		name  TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
@@ -109,7 +112,8 @@ var migrations = []string{
 		cost_usd      REAL,
 		quota_group   TEXT NOT NULL DEFAULT '',
 		quota_used    REAL,
-		quota_skip    TEXT NOT NULL DEFAULT ''
+		quota_skip    TEXT NOT NULL DEFAULT '',
+		call_token    TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX requests_at ON requests (at);
 	CREATE INDEX requests_key_at ON requests (key_hash, at);
@@ -146,7 +150,24 @@ var migrations = []string{
 		key_name      TEXT NOT NULL DEFAULT '',
 		account       TEXT NOT NULL DEFAULT '',
 		model         TEXT NOT NULL DEFAULT ''
-	);`,
+	);
+	CREATE TABLE upstream_calls (
+		id                 INTEGER PRIMARY KEY,
+		at                 INTEGER NOT NULL DEFAULT 0,
+		call_token         TEXT NOT NULL DEFAULT '',
+		account            TEXT NOT NULL DEFAULT '',
+		session            TEXT NOT NULL DEFAULT '',
+		seq                INTEGER NOT NULL DEFAULT 0,
+		model              TEXT NOT NULL DEFAULT '',
+		status             INTEGER NOT NULL DEFAULT 0,
+		request            BLOB NOT NULL DEFAULT x'',
+		response           BLOB NOT NULL DEFAULT x'',
+		request_bytes      INTEGER NOT NULL DEFAULT 0,
+		response_bytes     INTEGER NOT NULL DEFAULT 0,
+		response_truncated INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX upstream_calls_token ON upstream_calls (call_token);
+	CREATE INDEX upstream_calls_at ON upstream_calls (at);`,
 }
 
 // ErrNotFound means the named row does not exist.

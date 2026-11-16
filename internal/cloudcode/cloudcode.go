@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,6 +58,9 @@ type Server struct {
 	upstream *url.URL
 	listener net.Listener
 	http     *http.Server
+
+	// capture records generation calls; nil while recording is off.
+	capture atomic.Pointer[Capture]
 
 	mu       sync.Mutex
 	accounts map[string]*accountProxy
@@ -144,8 +148,8 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 			r.Out.URL.Path = strings.TrimPrefix(r.In.URL.Path, prefix)
 			r.Out.URL.RawPath = ""
 			r.SetURL(s.upstream)
-			if isCatalog(r.Out) {
-				// The rewrite needs the body as plain JSON.
+			if isCatalog(r.Out) || callOf(r.In).capture != nil {
+				// The rewrite and the capture need the body as plain text.
 				r.Out.Header.Set("Accept-Encoding", "identity")
 			}
 		},
@@ -155,6 +159,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		ModifyResponse: func(resp *http.Response) error {
 			s.watchVerification(name, resp)
 			ap.watchModelCall(resp)
+			recordResponse(resp)
 			if !isCatalog(resp.Request) || resp.StatusCode != http.StatusOK {
 				return nil
 			}
@@ -164,6 +169,9 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 			s.log.Error("cloud code request failed", "account", name, "path", r.URL.Path, "err", err)
 			if c := callOf(r); c.session != "" {
 				ap.report(c, &CallError{Code: http.StatusBadGateway, Message: "upstream request failed"})
+			}
+			if c := callOf(r); c.capture != nil {
+				c.capture.finish(http.StatusBadGateway, nil, false)
 			}
 			http.Error(w, "agyrelay: Cloud Code upstream request failed", http.StatusBadGateway)
 		},

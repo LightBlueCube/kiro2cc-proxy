@@ -43,6 +43,9 @@ type requestView struct {
 	QuotaUsed    *float64 `json:"quota_used"`
 	// QuotaSkip is why quota_used stays null for good; "" while pending.
 	QuotaSkip string `json:"quota_skip"`
+	// Upstream counts the captured upstream calls still kept; admin
+	// routes only.
+	Upstream int `json:"upstream"`
 }
 
 // queryFilter reads key (a key hash), model, account, and since/until
@@ -96,6 +99,7 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "list requests", err)
 		return
 	}
+	_, forKey := currentUserKey(r)
 	out := []requestView{}
 	for _, row := range rows {
 		v := requestView{
@@ -107,6 +111,9 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 		if row.TTFT != nil {
 			ms := row.TTFT.Milliseconds()
 			v.TTFTMS = &ms
+		}
+		if !forKey {
+			v.Upstream = row.Upstream
 		}
 		out = append(out, v)
 	}

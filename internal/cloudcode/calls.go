@@ -50,6 +50,8 @@ type callKey struct{}
 // and the model it names.
 type call struct {
 	session, model string
+	// capture is set while the call is being recorded.
+	capture *pendingCapture
 }
 
 func isGeneration(r *http.Request) bool {
@@ -79,12 +81,23 @@ func (s *Server) withSession(account string, r *http.Request) (*http.Request, er
 		return r, nil
 	}
 	session, _, _ := strings.Cut(rest, "/")
-	return r.WithContext(context.WithValue(r.Context(), callKey{}, call{session: session, model: body.Model})), nil
+	c := call{session: session, model: body.Model, capture: s.beginCapture(account, session, body.RequestID, body.Model, raw)}
+	return r.WithContext(context.WithValue(r.Context(), callKey{}, c)), nil
 }
 
 func callOf(r *http.Request) call {
 	c, _ := r.Context().Value(callKey{}).(call)
 	return c
+}
+
+// recordResponse saves a call being captured once agy has read its
+// response.
+func recordResponse(resp *http.Response) {
+	c := callOf(resp.Request)
+	if c.capture == nil {
+		return
+	}
+	resp.Body = &recordingBody{ReadCloser: resp.Body, pending: c.capture, status: resp.StatusCode}
 }
 
 // watchModelCall reports the outcome of a tagged generation call.

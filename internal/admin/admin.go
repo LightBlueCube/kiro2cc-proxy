@@ -113,6 +113,8 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/logs/stream", h.authed(h.streamLogs))
 
 	h.mux.HandleFunc("GET /admin/api/requests", h.authed(h.listRequests))
+	h.mux.HandleFunc("GET /admin/api/requests/{id}/upstream", h.authed(h.listUpstreamCalls))
+	h.mux.HandleFunc("GET /admin/api/upstream-calls/{id}", h.authed(h.getUpstreamCall))
 	h.mux.HandleFunc("GET /admin/api/usage", h.authed(h.summarize))
 	h.mux.HandleFunc("GET /admin/api/usage/filters", h.authed(h.filterValues))
 	h.mux.HandleFunc("GET /admin/api/usage/quota", h.authed(h.quota))

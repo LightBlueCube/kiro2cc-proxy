@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -172,6 +173,8 @@ type activeTurn struct {
 	// closing marks a claim held while the idle session is closed in agy;
 	// closed is closed when that is done.
 	closing bool
+	// callToken is the Record.CallToken of the request the turn serves now.
+	callToken string
 }
 
 func newActiveTurn(sess *session) *activeTurn {
@@ -275,6 +278,18 @@ func (g *Gateway) SetContextWindows(windows []ContextWindow, check bool) error {
 // Close stops background work. Running turns end with their processes.
 func (g *Gateway) Close() { close(g.stop) }
 
+// CallTokenOf returns the CallToken of the request the session's turn
+// serves now, or "" when the session has no turn.
+func (g *Gateway) CallTokenOf(account, sessionID string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	sess := g.sessions[sessionRef(account, sessionID)]
+	if sess == nil || sess.turn == nil {
+		return ""
+	}
+	return sess.turn.callToken
+}
+
 // SetSnapshotTTL changes how long idle sessions stay reusable.
 func (g *Gateway) SetSnapshotTTL(ttl time.Duration) { g.snaps.setTTL(ttl) }
 
@@ -287,7 +302,7 @@ func (g *Gateway) Complete(ctx context.Context, caller conv.Caller, req conv.Req
 	go func() {
 		defer close(out)
 		w := &response{ctx: ctx, out: out}
-		rec := Record{At: time.Now(), KeyHash: caller.KeyHash, KeyName: caller.Name, API: req.API, Stream: req.Stream, Model: req.Model}
+		rec := Record{At: time.Now(), KeyHash: caller.KeyHash, KeyName: caller.Name, API: req.API, Stream: req.Stream, Model: req.Model, CallToken: rand.Text()}
 		err := g.serve(ctx, caller, req, w, &rec)
 		if err != nil {
 			w.fail(err)
@@ -349,6 +364,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		if failure == nil {
 			g.mu.Lock()
 			rec.Account, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
+			at.callToken = rec.CallToken
 			g.mu.Unlock()
 			failure = g.consume(ctx, at, r, w)
 		}

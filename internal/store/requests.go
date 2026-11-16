@@ -40,6 +40,11 @@ type Request struct {
 	QuotaUsed *float64
 	// QuotaSkip, when set, is why the request gets no QuotaUsed.
 	QuotaSkip QuotaSkip
+	// CallToken ties the request to the upstream calls captured for it.
+	CallToken string
+	// Upstream counts the request's captured upstream calls still kept;
+	// Requests fills it, AddRequest ignores it.
+	Upstream int
 }
 
 // QuotaSkip is why a request's quota use cannot be attributed.
@@ -66,7 +71,7 @@ const StatusOK = "ok"
 const StatusCancelled = "cancelled"
 
 const requestColumns = `id, at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
-	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip`
+	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip, call_token`
 
 // AddRequest stores the request, adds its cost to the key's spend, and
 // counts it in the key's totals when it succeeded.
@@ -81,9 +86,9 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, model, slug, effort, api, stream, mode, replay_reason, status, error, finish,
-		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, call_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
-		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup)
+		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup, r.CallToken)
 	if err != nil {
 		return err
 	}
@@ -152,7 +157,9 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		}
 		args = append(args, beforeID)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+requestColumns+` FROM requests`+where+` ORDER BY id DESC LIMIT ?`, append(args, limit)...)
+	upstream := `(SELECT COUNT(*) FROM upstream_calls u WHERE u.call_token = requests.call_token AND requests.call_token != '' AND u.at >= ?)`
+	args = append([]any{upstreamCutoff()}, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestColumns+`, `+upstream+` FROM requests`+where+` ORDER BY id DESC LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +171,7 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		var ttft sql.NullInt64
 		var cost, quota sql.NullFloat64
 		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.Model, &r.Slug, &r.Effort, &r.API, &r.Stream, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
-			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota, &r.QuotaSkip); err != nil {
+			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota, &r.QuotaSkip, &r.CallToken, &r.Upstream); err != nil {
 			return nil, err
 		}
 		r.At, r.Duration = time.UnixMilli(at), time.Duration(duration)*time.Millisecond

@@ -68,6 +68,10 @@ type Record struct {
 	Usage  *conv.Usage
 	Finish conv.FinishReason
 	Err    *conv.Error
+	// CallToken names the request; the model calls its turn makes carry
+	// it (Gateway.CallTokenOf), so captured upstream calls find their
+	// request.
+	CallToken string
 }
 
 // Recorder receives one Record per request.

@@ -126,12 +126,14 @@ function stopView() {
 function route() {
   if (isUserPage) return;
   stopView();
-  const name = (location.hash || "#accounts").slice(1);
+  // "#upstream/12" opens the view "upstream" with the argument "12".
+  const [name, ...args] = (location.hash || "#accounts").slice(1).split("/");
   const view = views[name] ? name : "accounts";
-  for (const a of document.querySelectorAll("#tabs a")) a.classList.toggle("active", a.getAttribute("href") === "#" + view);
+  const tab = view === "upstream" ? "calls" : view;
+  for (const a of document.querySelectorAll("#tabs a")) a.classList.toggle("active", a.getAttribute("href") === "#" + tab);
   const container = document.getElementById("view");
   container.replaceChildren();
-  cleanup = views[view](container) || null;
+  cleanup = views[view](container, ...args) || null;
 }
 
 async function start() {
@@ -612,6 +614,8 @@ views.settings = container => {
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
     const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
+    const capture = h("input", { type: "checkbox", checked: s.capture_upstream });
+    const captureLimit = h("input", { type: "number", min: 1, max: 256, value: s.capture_response_mib });
     const refuseHarness = h("input", { type: "checkbox", checked: s.refuse_harness_prompts });
     // The harness signatures are edited as JSON; ↺ puts back the built-in list.
     const signaturesJSON = list => JSON.stringify(list, null, 2);
@@ -649,6 +653,7 @@ views.settings = container => {
           retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
           refuse_harness_prompts: refuseHarness.checked, harness_signatures: readSignatures(),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
+          capture_upstream: capture.checked, capture_response_mib: Number(captureLimit.value),
         });
         toast(t("common.saved"));
         await loadGeneral();
@@ -667,6 +672,11 @@ views.settings = container => {
         h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
         h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, t("settings.direct")), resetButton(direct, d.allow_direct))),
       h("p", { class: "muted" }, t("settings.outbound.note")),
+      h("h3", {}, t("settings.capture")),
+      h("div", { class: "row" },
+        h("span", { class: "with-reset" }, h("label", { class: "check" }, capture, t("settings.capture.enable")), resetButton(capture, d.capture_upstream)),
+        h("label", {}, t("settings.capture.limit"), withReset(captureLimit, d.capture_response_mib))),
+      h("p", { class: "muted" }, t("settings.capture.note")),
       h("h3", {}, t("settings.system_prompts")),
       h("span", { class: "with-reset" }, h("label", { class: "check" }, refuseHarness, t("settings.refuse_harness")), resetButton(refuseHarness, d.refuse_harness_prompts)),
       h("p", { class: "muted" }, t("settings.refuse_harness.note")),
@@ -1525,6 +1535,9 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
       { title: t("calls.tokens"), num: true, cell: r => tokensCell(r) },
       { title: t("calls.cost"), num: true, hint: t("calls.cost.hint"), cell: r => !r.input && !r.output ? h("span", { class: "muted" }, "—") : stack(fmt.usd(r.cost_usd),
           quotaCell(r)) },
+      // Only while some request has captured calls; the column is empty otherwise.
+      ...(rows.some(r => r.upstream > 0) ? [{ title: t("upstream.column"), cell: r => r.upstream > 0
+        ? h("a", { href: "#upstream/" + r.id }, t("upstream.open", { count: r.upstream })) : null }] : []),
     ], rows),
     page.length === 100 ? h("button", { style: "margin-top:8px", onclick: e => guarded(() => loadRows(true), e.target) }, t("calls.load_more")) : null,
     h("p", { class: "muted" }, t("calls.requests.note"))));
@@ -1548,6 +1561,126 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
 views.calls = container => {
   container.append(h("h1", {}, t("calls.title")));
   usagePanel(container);
+};
+
+// ---- upstream calls --------------------------------------------------
+
+// The kinds of block the upstream view folds, in toolbar order.
+const BLOCK_KINDS = ["meta", "system", "tools", "user", "model", "thought", "call", "result", "other"];
+// Kinds that start folded: long, and the same in every call of a session.
+const FOLDED_KINDS = ["meta", "system", "tools"];
+const PREVIEW_CHARS = 100;
+
+const blockKindLabels = () => ({
+  meta: t("upstream.kind.meta"), system: t("upstream.kind.system"), tools: t("upstream.kind.tools"), user: t("upstream.kind.user"),
+  model: t("upstream.kind.model"), thought: t("upstream.kind.thought"), call: t("upstream.kind.call"), result: t("upstream.kind.result"),
+  other: t("upstream.kind.other"),
+});
+
+const prettyJSON = value => JSON.stringify(value, null, 2);
+const preview = text => text.replace(/\s+/g, " ").trim().slice(0, PREVIEW_CHARS);
+
+// block is a foldable piece of the conversation; the toolbar folds blocks by kind.
+function block(kind, title, previewText, content) {
+  return h("details", { class: "blk blk-" + kind, "data-kind": kind, open: !FOLDED_KINDS.includes(kind) },
+    h("summary", {}, h("span", { class: "blk-title" }, title), previewText ? h("span", { class: "muted" }, " " + previewText) : null),
+    h("pre", { class: "blk-text" }, content));
+}
+
+// partBlock shows one part of a message: text, a thought, a tool call or
+// result, or something else (an image, say) as JSON.
+function partBlock(role, part, labels) {
+  if (typeof part.text === "string") {
+    const kind = part.thought === true ? "thought" : role === "user" ? "user" : "model";
+    return block(kind, labels[kind], preview(part.text), part.text);
+  }
+  if (part.functionCall) return block("call", `${labels.call}: ${part.functionCall.name}`, "", prettyJSON(part.functionCall));
+  if (part.functionResponse) return block("result", `${labels.result}: ${part.functionResponse.name}`, "", prettyJSON(part.functionResponse));
+  if (part.inlineData) {
+    const { data, ...rest } = part.inlineData;
+    return block("other", labels.other, t("upstream.inline_data", { type: rest.mimeType || "?", size: fmt.bytes(data ? data.length : 0) }), prettyJSON(rest));
+  }
+  return block("other", labels.other, "", prettyJSON(part));
+}
+
+function toolBlocks(tools, labels) {
+  return tools.flatMap(tool => (tool.functionDeclarations || [null]).map(decl => decl
+    ? block("tools", decl.name, preview(decl.description || ""), prettyJSON(decl))
+    : block("tools", labels.tools, "", prettyJSON(tool))));
+}
+
+// requestBlocks lays out the call's request as agy sent it.
+function requestBlocks(body, labels) {
+  const { request = {}, ...envelope } = body;
+  const { contents = [], tools = [], systemInstruction, ...settings } = request;
+  const blocks = [block("meta", labels.meta, "", prettyJSON({ ...envelope, request: settings }))];
+  for (const part of (systemInstruction && systemInstruction.parts) || []) {
+    blocks.push(block("system", labels.system, preview(part.text || ""), part.text || prettyJSON(part)));
+  }
+  blocks.push(...toolBlocks(tools, labels));
+  for (const message of contents) {
+    for (const part of message.parts || []) blocks.push(partBlock(message.role, part, labels));
+  }
+  return blocks;
+}
+
+function responseBlocks(response, truncated, labels) {
+  const blocks = response.parts.map(part => partBlock("model", part, labels));
+  const meta = {};
+  if (response.finish_reason) meta.finishReason = response.finish_reason;
+  if (response.usage) meta.usageMetadata = response.usage;
+  if (Object.keys(meta).length) blocks.push(block("meta", t("upstream.response_meta"), "", prettyJSON(meta)));
+  if (response.text) blocks.push(block("other", labels.other, preview(response.text), response.text));
+  const notices = [];
+  if (truncated) notices.push(h("p", { class: "bad" }, t("upstream.truncated")));
+  if (response.skipped) notices.push(h("p", { class: "muted" }, t("upstream.skipped", { count: response.skipped })));
+  return [...notices, ...blocks];
+}
+
+// foldToolbar has, for each kind present in root, buttons that fold or
+// unfold all its blocks, and the same for all blocks.
+function foldToolbar(root, labels) {
+  const setOpen = (selector, open) => { for (const d of root.querySelectorAll(selector)) d.open = open; };
+  const buttons = (label, selector, count) => h("span", { class: "fold-group" },
+    label + (count === undefined ? "" : ` (${count})`),
+    h("button", { type: "button", onclick: () => setOpen(selector, false) }, t("upstream.collapse")),
+    h("button", { type: "button", onclick: () => setOpen(selector, true) }, t("upstream.expand")));
+  const kinds = BLOCK_KINDS.filter(kind => root.querySelector(`details[data-kind="${kind}"]`));
+  return h("div", { class: "fold-bar" }, buttons(t("upstream.all"), "details.blk"),
+    kinds.map(kind => buttons(labels[kind], `details[data-kind="${kind}"]`, root.querySelectorAll(`details[data-kind="${kind}"]`).length)));
+}
+
+views.upstream = (container, requestId) => {
+  const info = h("div", { class: "card" });
+  const detail = h("div", {});
+  container.append(h("h1", {}, t("upstream.title")), h("p", {}, h("a", { href: "#calls" }, t("upstream.back"))), info, detail);
+
+  async function showCall(id) {
+    const labels = blockKindLabels();
+    const call = await api("GET", "upstream-calls/" + id);
+    const content = h("div", { class: "blk-list" });
+    const request = call.request ? requestBlocks(call.request, labels) : [block("other", labels.other, "", call.request_text)];
+    content.append(h("h3", {}, t("upstream.request"), " ", h("span", { class: "muted" }, fmt.bytes(call.request_bytes))), ...request,
+      h("h3", {}, t("upstream.response"), " ", h("span", { class: "muted" }, joined(String(call.status), fmt.bytes(call.response_bytes)))),
+      ...responseBlocks(call.response, call.response_truncated, labels));
+    detail.replaceChildren(foldToolbar(content, labels), content);
+  }
+
+  guarded(async () => {
+    const calls = await api("GET", `requests/${encodeURIComponent(requestId)}/upstream`);
+    if (!calls.length) {
+      info.replaceChildren(h("p", { class: "muted" }, t("upstream.none")));
+      return;
+    }
+    const sessions = [...new Set(calls.map(c => `${c.account}/${c.session}`))];
+    const select = h("select", { onchange: e => guarded(() => showCall(e.target.value)) },
+      calls.map(c => h("option", { value: c.id }, joined(`#${c.seq}`, c.model, String(c.status), fmt.time(c.at)))));
+    select.value = calls[calls.length - 1].id;
+    info.replaceChildren(
+      h("div", { class: "row" }, h("label", {}, t("upstream.call"), select),
+        h("div", {}, h("div", { class: "muted" }, t("upstream.sessions")), sessions.map(s => h("div", { class: "mono" }, s)))));
+    await showCall(select.value);
+  });
 };
 
 views.user = (container, initialData) => {

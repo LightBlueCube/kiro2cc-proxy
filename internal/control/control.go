@@ -36,6 +36,11 @@ import (
 
 const settingsKey = "settings"
 
+const (
+	maxCaptureResponseMiB = 256
+	saveUpstreamTimeout   = 30 * time.Second
+)
+
 // Settings are the admin-editable knobs.
 type Settings struct {
 	TurnsPerAccount int `json:"turns_per_account"`
@@ -71,11 +76,17 @@ type Settings struct {
 	// AllowDirect lets accounts with no proxy at all connect directly
 	// (a server abroad); otherwise their traffic is refused.
 	AllowDirect bool `json:"allow_direct"`
+	// CaptureUpstream records the generation calls agy sends to Google and
+	// their responses, for debugging; store.UpstreamRetention bounds them.
+	// Turning it off deletes them.
+	CaptureUpstream bool `json:"capture_upstream"`
+	// CaptureResponseMiB is the most response MiB kept per captured call.
+	CaptureResponseMiB int `json:"capture_response_mib"`
 }
 
 // DefaultSettings are the settings before the admin changes any.
 func DefaultSettings() Settings {
-	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90,
+	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, CaptureResponseMiB: 4,
 		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows),
 		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures)}
 }
@@ -102,6 +113,9 @@ func (s Settings) validate() error {
 	}
 	if s.RetentionDays < 1 || s.RetentionDays > 3650 {
 		return errors.New("retention_days must be between 1 and 3650")
+	}
+	if s.CaptureResponseMiB < 1 || s.CaptureResponseMiB > maxCaptureResponseMiB {
+		return fmt.Errorf("capture_response_mib must be between 1 and %d", maxCaptureResponseMiB)
 	}
 	if clean, err := cleanProxy(s.FallbackProxy); err != nil || clean != s.FallbackProxy {
 		return errors.New("fallback_proxy must be empty or an http:// URL with a host and port, e.g. http://127.0.0.1:7890")
@@ -200,6 +214,9 @@ func decodeSettings(raw []byte, s *Settings) error {
 	if s.RetentionDays == 0 {
 		s.RetentionDays = defaults.RetentionDays
 	}
+	if s.CaptureResponseMiB == 0 {
+		s.CaptureResponseMiB = defaults.CaptureResponseMiB
+	}
 
 	for i, row := range stored.Prices {
 		if _, saved := row["cache_write"]; saved {
@@ -270,6 +287,9 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 	if err := c.reloadKeys(ctx); err != nil {
 		return nil, err
 	}
+	if err := c.applyCapture(ctx, cfg.Settings); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -307,7 +327,44 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	if err := c.cfg.Gateway.SetContextWindows(s.ContextWindows, s.ContextCheck); err != nil {
 		return err
 	}
+	if err := c.applyCapture(ctx, s); err != nil {
+		return err
+	}
 	return c.applyRoutes(ctx)
+}
+
+// applyCapture starts or stops the recording of agy's generation calls;
+// stopping deletes the recorded ones.
+func (c *Control) applyCapture(ctx context.Context, s Settings) error {
+	if !s.CaptureUpstream {
+		c.cfg.CloudCode.SetCapture(nil)
+		return c.cfg.Store.DeleteUpstreamCalls(ctx)
+	}
+	c.cfg.CloudCode.SetCapture(&cloudcode.Capture{
+		ResponseLimit: int64(s.CaptureResponseMiB) << 20,
+		Begin:         c.cfg.Gateway.CallTokenOf,
+		Save:          c.saveUpstreamCall,
+	})
+	return nil
+}
+
+// saveUpstreamCall stores a captured call off the response path. A call
+// that ended after the capture was turned off is dropped.
+func (c *Control) saveUpstreamCall(call cloudcode.Captured) {
+	if !c.Settings().CaptureUpstream {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), saveUpstreamTimeout)
+		defer cancel()
+		err := c.cfg.Store.AddUpstreamCall(ctx, store.UpstreamCall{
+			At: call.At, CallToken: call.Tag, Account: call.Account, Session: call.Session, Seq: call.Seq, Model: call.Model,
+			Status: call.Status, Request: call.Request, Response: call.Response, ResponseTruncated: call.ResponseTruncated,
+		})
+		if err != nil {
+			c.log.Error("upstream call not saved", "account", call.Account, "session", call.Session, "err", err)
+		}
+	}()
 }
 
 // ErrNoRoute blocks an account whose traffic would have nowhere to go.
@@ -364,6 +421,9 @@ func (c *Control) RunRetention(ctx context.Context) {
 		days := c.Settings().RetentionDays
 		if err := c.cfg.Store.Prune(ctx, time.Now().AddDate(0, 0, -days)); err != nil && ctx.Err() == nil {
 			c.log.Error("pruning old records failed", "err", err)
+		}
+		if err := c.cfg.Store.PruneUpstream(ctx); err != nil && ctx.Err() == nil {
+			c.log.Error("pruning captured upstream calls failed", "err", err)
 		}
 		for _, account := range c.cfg.Pool.Accounts() {
 			removed, err := agy.PruneLogs(account.GeminiDir(), time.Now().Add(-agyLogRetention))

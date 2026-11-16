@@ -45,6 +45,7 @@ type harness struct {
 	records *recordLog
 	budget  *fakeBudget
 	flags   *fakeFlags
+	tokens  *tokenLog
 }
 
 // fakeFlags keeps the flagged system prompts in memory.
@@ -87,7 +88,8 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 	}
 	var p *pool.Pool
 	var gw *Gateway
-	cloudCode := httptest.NewServer(modelCallRecorder(t, func() *pool.Pool { return p }, func() *Gateway { return gw }))
+	tokens := &tokenLog{}
+	cloudCode := httptest.NewServer(modelCallRecorder(t, func() *pool.Pool { return p }, func() *Gateway { return gw }, tokens.add))
 	t.Cleanup(cloudCode.Close)
 	var configs []pool.AccountConfig
 	for i := range accounts {
@@ -115,12 +117,24 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 		p.Close()
 		b.Close()
 	})
-	return &harness{t: t, gw: gw, p: p, log: logPath, records: records, budget: budget, flags: flags}
+	return &harness{t: t, gw: gw, p: p, log: logPath, records: records, budget: budget, flags: flags, tokens: tokens}
+}
+
+// tokenLog keeps the call token the gateway named for each model call.
+type tokenLog struct {
+	mu   sync.Mutex
+	list []string
+}
+
+func (l *tokenLog) add(token string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.list = append(l.list, token)
 }
 
 // modelCallRecorder stands in for the Cloud Code proxy: it records the
 // model calls the fake agy of account <name> posts to /<name>.
-func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGateway func() *Gateway) http.Handler {
+func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGateway func() *Gateway, seenToken func(string)) http.Handler {
 	stopped := &stoppedSessions{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name, path, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
@@ -135,6 +149,7 @@ func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGatew
 			http.Error(w, "stopped by risk control", http.StatusForbidden)
 			return
 		}
+		seenToken(currentGateway().CallTokenOf(name, call.Session))
 		var failure *pool.ModelFailure
 		if call.Code != http.StatusOK {
 			if call.Code == http.StatusForbidden && strings.Contains(call.Message, "VALIDATION_REQUIRED") {
@@ -342,6 +357,37 @@ func (h *harness) waitRequests(method string, n int) []acpRequest {
 var readTool = conv.ToolSpec{Name: "read", Description: "Read a file", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)}
 
 func user(text string) conv.Message { return conv.Message{Role: conv.RoleUser, Text: text} }
+
+// A model call names the request its turn serves now: each request gets
+// its own token, and the Record carries it.
+func TestModelCallsCarryTheirRequestsToken(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	// "@ok" makes the fake agy report one successful model call.
+	messages := []conv.Message{user("@ok")}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first)
+	}
+	messages = append(messages, conv.Message{Role: conv.RoleAssistant, Text: first.text}, user("@ok"))
+	if second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages}); second.err != nil {
+		t.Fatalf("second = %+v", second)
+	}
+
+	records := h.records.all(t, 2)
+	h.tokens.mu.Lock()
+	seen := slices.Clone(h.tokens.list)
+	h.tokens.mu.Unlock()
+	if len(records) != 2 || records[0].CallToken == "" || records[0].CallToken == records[1].CallToken {
+		t.Fatalf("record tokens = %+v", records)
+	}
+	if want := []string{records[0].CallToken, records[1].CallToken}; !slices.Equal(seen, want) {
+		t.Fatalf("model calls carried %v, want %v", seen, want)
+	}
+	if token := h.gw.CallTokenOf("acct0", "no-such-session"); token != "" {
+		t.Fatalf("token of an unknown session = %q", token)
+	}
+}
 
 func TestInspectAndCloseSession(t *testing.T) {
 	h := newHarness(t, 1, nil)
