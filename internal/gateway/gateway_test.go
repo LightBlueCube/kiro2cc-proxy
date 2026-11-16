@@ -1632,6 +1632,47 @@ func TestAnchorLetsAnotherKeyContinue(t *testing.T) {
 	}
 }
 
+// A key that continues another key's session through its anchor owns the
+// worker from then on: the busy slot it takes is the one the turn's end
+// frees, and the worker counts toward its cap.
+func TestAnchoredWarmChargesTheCallingKey(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello")}})
+	if first.err != nil || first.anchor == "" {
+		t.Fatalf("first = %+v", first)
+	}
+
+	one := 1
+	bob := testCaller("bob")
+	bob.MaxWorkers = &one
+	anchored := []conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: first.text}, user("again")}
+	anchored[0].Anchors = []string{first.anchor}
+	warm := h.completeAs(ctx, bob, conv.Request{Model: "gemini-3.8-flash", Messages: anchored})
+	if warm.err != nil {
+		t.Fatalf("anchored warm = %+v", warm.err)
+	}
+	if recs := h.records.all(t, 2); recs[1].Mode != ModeWarm {
+		t.Fatalf("anchored mode = %s, want warm", recs[1].Mode)
+	}
+
+	if got := h.gw.Sessions(); len(got) != 1 || got[0].KeyHash != bob.KeyHash {
+		t.Fatalf("sessions after the warm turn = %+v, want the one worker owned by bob", got)
+	}
+
+	// Nothing runs for bob now, so his one-worker cap has room: a new
+	// conversation evicts the idle worker instead of failing.
+	for i := 0; i < 3; i++ {
+		r := h.completeAs(ctx, bob, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(fmt.Sprintf("later %d", i))}})
+		if r.err != nil {
+			t.Fatalf("request %d after the warm turn = %+v, want no limit error", i, r.err)
+		}
+	}
+	if got := h.gw.Sessions(); len(got) != 1 {
+		t.Fatalf("sessions = %+v, want 1 under bob's cap", got)
+	}
+}
+
 func TestUnknownModel(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	r := h.complete(context.Background(), "alice", conv.Request{Model: "nope", Messages: []conv.Message{user("hi")}})

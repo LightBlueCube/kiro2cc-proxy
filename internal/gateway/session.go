@@ -211,9 +211,13 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 		}
 		live := sess != nil && sess.proc.Alive() && sess.proc.HasSession(snap.SessionID)
 		if sess == nil {
-			sess = &session{ref: ref, id: snap.SessionID, user: snap.User, account: account}
+			sess = &session{ref: ref, id: snap.SessionID, account: account}
 			g.sessions[ref] = sess
 		}
+		// The key that claims the session owns it from now on, as the
+		// snapshot recorded after the turn will say: the busy slot taken
+		// above for r.user is released through sess.user.
+		sess.user = r.user
 		at := newActiveTurn(sess)
 		at.account = account
 		sess.turn = at
