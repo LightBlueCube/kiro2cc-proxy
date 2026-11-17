@@ -60,18 +60,21 @@ type Server struct {
 
 	mu       sync.Mutex
 	accounts map[string]*account
+	rules    []Rule
 }
 
 type account struct {
 	name  string
 	token string
 	route Route
-	// tunnels are the open connections; Reroute closes them.
+	// tunnels are the open connections; route or rule changes close stale ones.
 	tunnels map[*tunnel]struct{}
 	stats   Stats
 }
 
 type tunnel struct {
+	target           string
+	route            Route
 	client, upstream net.Conn
 }
 
@@ -89,7 +92,9 @@ type Stats struct {
 	Connections int64
 	BytesOut    int64
 	BytesIn     int64
-	Refused     int64
+	// Rejected counts connections blocked by egress rules (REJECT / REJECT-DROP).
+	Rejected int64
+	Refused  int64
 	// LastError is the newest refused or failed connection.
 	LastError   string
 	LastErrorAt time.Time
@@ -100,6 +105,7 @@ type Stats struct {
 type HostStat struct {
 	Host        string
 	Connections int64
+	Rejected    int64
 	LastAt      time.Time
 }
 
@@ -141,8 +147,8 @@ func (s *Server) Forget(name string) {
 	closeAll(tunnels)
 }
 
-// SetRoute changes where the account's connections go. When the route
-// changes, open tunnels are closed so agy reconnects through the new one.
+// SetRoute changes where the account's connections go. Open tunnels whose
+// effective route changed are closed so agy reconnects through the new one.
 func (s *Server) SetRoute(name string, route Route) {
 	s.mu.Lock()
 	a := s.accounts[name]
@@ -152,10 +158,44 @@ func (s *Server) SetRoute(name string, route Route) {
 	}
 	a.route = route
 	a.stats.Route = describe(route)
-	tunnels := a.takeTunnels()
+	tunnels := s.takeStaleTunnels(a)
 	s.mu.Unlock()
 	closeAll(tunnels)
 	s.log.Info("egress route changed", "account", name, "route", describe(route), "closed", len(tunnels))
+}
+
+// SetRules replaces the global egress rules and closes any open tunnels that
+// the new rules reject or route differently.
+func (s *Server) SetRules(rules []Rule) {
+	s.mu.Lock()
+	if rulesEqual(s.rules, rules) {
+		s.mu.Unlock()
+		return
+	}
+	s.rules = slices.Clone(rules)
+	var stale []*tunnel
+	for _, a := range s.accounts {
+		stale = append(stale, s.takeStaleTunnels(a)...)
+	}
+	s.mu.Unlock()
+	closeAll(stale)
+	s.log.Info("egress rules changed", "rules", len(rules), "closed", len(stale))
+}
+
+func rulesEqual(a, b []Rule) bool {
+	return slices.EqualFunc(a, b, func(x, y Rule) bool { return x.raw == y.raw })
+}
+
+func (s *Server) takeStaleTunnels(a *account) []*tunnel {
+	var stale []*tunnel
+	for t := range a.tunnels {
+		now := resolve(s.rules, a.route, t.target)
+		if now.reject || now.route.Refused() || now.route != t.route {
+			stale = append(stale, t)
+			delete(a.tunnels, t)
+		}
+	}
+	return stale
 }
 
 // Stats returns the account's traffic, or false when it is unknown.
@@ -225,7 +265,7 @@ func (s *Server) handle(client net.Conn) {
 		client.Close()
 		return
 	}
-	a, route, ok := s.authenticate(req)
+	a, ok := s.authenticate(req)
 	if !ok {
 		s.log.Warn("egress connection with a bad token", "target", req.Host)
 		reply(client, http.StatusProxyAuthRequired, "Proxy-Authenticate: Basic realm=\"agyrelay\"\r\n")
@@ -237,13 +277,22 @@ func (s *Server) handle(client net.Conn) {
 		return
 	}
 	target := req.Host
-	if route.Refused() {
+	dec := s.decide(a, target)
+	if dec.reject {
+		if dec.drop {
+			client.Close()
+			return
+		}
+		reply(client, http.StatusForbidden, "")
+		return
+	}
+	if dec.route.Refused() {
 		s.fail(a, target, "no proxy configured for the account, no fallback proxy, and direct connections are not allowed")
 		reply(client, http.StatusForbidden, "")
 		return
 	}
 
-	upstream, err := dialRoute(route, target)
+	upstream, err := dialRoute(dec.route, target)
 	if err != nil {
 		s.fail(a, target, err.Error())
 		reply(client, http.StatusBadGateway, "")
@@ -256,9 +305,9 @@ func (s *Server) handle(client net.Conn) {
 	}
 	client.SetDeadline(time.Time{})
 
-	t := &tunnel{client: client, upstream: upstream}
-	if !s.open(a.name, route, t, target) {
-		t.close() // the route changed while dialing; agy reconnects
+	t := &tunnel{target: target, route: dec.route, client: client, upstream: upstream}
+	if !s.open(a.name, t) {
+		t.close() // the route or rules changed while dialing; agy reconnects
 		return
 	}
 	var out int64
@@ -274,19 +323,33 @@ func (s *Server) handle(client net.Conn) {
 	s.closed(a.name, t, out, in)
 }
 
-// authenticate maps Proxy-Authorization to the account and its route.
-func (s *Server) authenticate(req *http.Request) (*account, Route, bool) {
+// authenticate maps Proxy-Authorization to the account.
+func (s *Server) authenticate(req *http.Request) (*account, bool) {
 	name, token, ok := basicAuth(req.Header.Get("Proxy-Authorization"))
 	if !ok {
-		return nil, Route{}, false
+		return nil, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a := s.accounts[name]
 	if a == nil || subtle.ConstantTimeCompare([]byte(a.token), []byte(token)) != 1 {
-		return nil, Route{}, false
+		return nil, false
 	}
-	return a, a.route, true
+	return a, true
+}
+
+func (s *Server) decide(a *account, target string) decision {
+	s.mu.Lock()
+	dec := resolve(s.rules, a.route, target)
+	if dec.reject {
+		a.stats.Rejected++
+		a.stats.Hosts = touchHost(a.stats.Hosts, parseTarget(target).hostLabel(), time.Now(), true)
+	}
+	s.mu.Unlock()
+	if dec.reject {
+		s.log.Debug("egress connection rejected by rule", "account", a.name, "target", target, "rule", dec.rule)
+	}
+	return dec
 }
 
 func basicAuth(header string) (user, password string, ok bool) {
@@ -301,19 +364,22 @@ func basicAuth(header string) (user, password string, ok bool) {
 	return strings.Cut(string(raw), ":")
 }
 
-// open records a tunnel dialed over route; it reports false when the
-// account is gone or its route changed meanwhile.
-func (s *Server) open(name string, route Route, t *tunnel, target string) bool {
+// open records a tunnel; it reports false when the account is gone or its
+// effective route changed while dialing.
+func (s *Server) open(name string, t *tunnel) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a := s.accounts[name]
-	if a == nil || a.route != route {
+	if a == nil {
+		return false
+	}
+	now := resolve(s.rules, a.route, t.target)
+	if now.reject || now.route != t.route {
 		return false
 	}
 	a.tunnels[t] = struct{}{}
 	a.stats.Connections++
-	host, _, _ := net.SplitHostPort(target)
-	a.stats.Hosts = touchHost(a.stats.Hosts, host, time.Now())
+	a.stats.Hosts = touchHost(a.stats.Hosts, parseTarget(t.target).hostLabel(), time.Now(), false)
 	return true
 }
 
@@ -338,10 +404,16 @@ func (s *Server) fail(a *account, target, reason string) {
 }
 
 // touchHost moves host to the front of the recent list.
-func touchHost(hosts []HostStat, host string, at time.Time) []HostStat {
-	entry := HostStat{Host: host, LastAt: at, Connections: 1}
+func touchHost(hosts []HostStat, host string, at time.Time, rejected bool) []HostStat {
+	entry := HostStat{Host: host, LastAt: at}
+	if rejected {
+		entry.Rejected = 1
+	} else {
+		entry.Connections = 1
+	}
 	if i := slices.IndexFunc(hosts, func(h HostStat) bool { return h.Host == host }); i >= 0 {
 		entry.Connections += hosts[i].Connections
+		entry.Rejected += hosts[i].Rejected
 		hosts = slices.Delete(hosts, i, i+1)
 	}
 	hosts = slices.Insert(hosts, 0, entry)

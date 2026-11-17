@@ -658,6 +658,14 @@ views.settings = container => {
     const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
     const direct = h("input", { type: "checkbox", checked: s.allow_direct });
+    const ruleLines = text => text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const egressRules = h("textarea", { rows: 5, spellcheck: "false", style: "width:100%" });
+    egressRules.value = s.egress_rules.join("\n");
+    const egressRulesReset = h("button", { type: "button", class: "reset" }, t("settings.defaults"));
+    const syncEgressRules = () => { egressRulesReset.disabled = JSON.stringify(ruleLines(egressRules.value)) === JSON.stringify(d.egress_rules); };
+    egressRulesReset.addEventListener("click", () => { egressRules.value = d.egress_rules.join("\n"); syncEgressRules(); });
+    egressRules.addEventListener("input", syncEgressRules);
+    syncEgressRules();
     const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
     const capture = h("input", { type: "checkbox", checked: s.capture_upstream });
     const captureLimit = h("input", { type: "number", min: 1, max: 256, value: s.capture_response_mib });
@@ -699,7 +707,7 @@ views.settings = container => {
           turns_per_account: Number(turns.value), max_workers: Number(maxWorkers.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
           retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
           refuse_harness_prompts: refuseHarness.checked, harness_signatures: readSignatures(),
-          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
+          fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, egress_rules: ruleLines(egressRules.value),
           capture_upstream: capture.checked, capture_response_mib: Number(captureLimit.value),
           risk_control: riskControl.checked, flagged_prompt_retention_days: Number(flaggedRetention.value),
         });
@@ -718,7 +726,11 @@ views.settings = container => {
         h("div", { class: "row" },
           h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
           h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, t("settings.direct")), resetButton(direct, d.allow_direct))),
-        h("p", { class: "muted" }, t("settings.outbound.note"))),
+        h("p", { class: "muted" }, t("settings.outbound.note")),
+        h("h3", {}, t("settings.egress_rules")),
+        h("p", { class: "muted" }, t("settings.egress_rules.note")),
+        egressRules,
+        h("div", { class: "row", style: "margin-top:8px" }, egressRulesReset)),
       topic(t("settings.records"),
         h("div", { class: "row" },
           h("label", {}, t("settings.log_level"), withReset(level, d.log_level)),
@@ -1350,6 +1362,12 @@ views.workers = container => {
     ], a.sessions);
   }
 
+  function hostStatText(x) {
+    if (!x.rejected) return `${x.host} ×${x.connections}`;
+    const rej = t("workers.egress.rejected", { count: x.rejected });
+    return x.connections ? `${x.host} ×${x.connections} (${rej})` : `${x.host} (${rej})`;
+  }
+
   function egress(a) {
     const e = a.egress;
     if (!e) return null;
@@ -1360,9 +1378,10 @@ views.workers = container => {
         t("workers.egress.open", { count: e.open }),
         t("workers.egress.connections", { count: e.connections }),
         t("workers.egress.bytes", { out: fmt.bytes(e.bytes_out), in: fmt.bytes(e.bytes_in) }),
+        e.rejected ? t("workers.egress.rejected", { count: e.rejected }) : "",
         e.refused ? t("workers.egress.refused", { count: e.refused }) : "")),
       e.last_error ? h("p", { class: "bad mono" }, `${fmt.time(e.last_error_at)}: ${e.last_error}`) : null,
-      e.hosts.length ? h("p", { class: "muted mono" }, e.hosts.map(x => `${x.host} ×${x.connections}`).join("  ·  ")) : null);
+      e.hosts.length ? h("p", { class: "muted mono" }, e.hosts.map(hostStatText).join("  ·  ")) : null);
   }
 
   function card(a, now) {

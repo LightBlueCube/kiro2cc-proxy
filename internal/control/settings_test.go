@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
 	"agyrelay/internal/store"
 	"agyrelay/internal/sysprompt"
@@ -175,9 +176,54 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if _, err := st.Setting(ctx, settingsKey, &stored); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "risk_control", "flagged_prompt_retention_days"} {
+	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "egress_rules", "risk_control", "flagged_prompt_retention_days"} {
 		if _, ok := stored[key]; !ok {
 			t.Errorf("persisted settings still missing key %q: %+v", key, stored)
 		}
+	}
+}
+
+func TestLoadSettingsEgressRules(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "agyrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	s, err := LoadSettings(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(s.EgressRules, egress.DefaultRules) {
+		t.Fatalf("default egress rules = %v, want %v", s.EgressRules, egress.DefaultRules)
+	}
+
+	// A null egress_rules entry falls back to the defaults, while [] clears them.
+	if err := st.SetSetting(ctx, settingsKey, map[string]any{"egress_rules": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = LoadSettings(ctx, st); err != nil || !slices.Equal(s.EgressRules, egress.DefaultRules) {
+		t.Fatalf("null egress rules = %v, %v, want %v", s.EgressRules, err, egress.DefaultRules)
+	}
+
+	// Stored rules replace the defaults whole, including an empty list.
+	for _, stored := range [][]string{{"DOMAIN,example.com,REJECT"}, {}} {
+		if err := st.SetSetting(ctx, settingsKey, map[string]any{"egress_rules": stored}); err != nil {
+			t.Fatal(err)
+		}
+		s, err := LoadSettings(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(s.EgressRules, stored) {
+			t.Fatalf("egress rules = %v, want %v", s.EgressRules, stored)
+		}
+	}
+
+	bad := DefaultSettings()
+	bad.EgressRules = []string{"DOMAIN,example.com,BOGUS"}
+	if err := bad.validate(); err == nil {
+		t.Fatal("invalid egress rule passed")
 	}
 }

@@ -71,6 +71,7 @@ type egressView struct {
 	Connections int64          `json:"connections"`
 	BytesOut    int64          `json:"bytes_out"`
 	BytesIn     int64          `json:"bytes_in"`
+	Rejected    int64          `json:"rejected"`
 	Refused     int64          `json:"refused"`
 	LastError   string         `json:"last_error"`
 	LastErrorAt *time.Time     `json:"last_error_at"`
@@ -80,6 +81,7 @@ type egressView struct {
 type hostStatView struct {
 	Host        string    `json:"host"`
 	Connections int64     `json:"connections"`
+	Rejected    int64     `json:"rejected"`
 	LastAt      time.Time `json:"last_at"`
 }
 
@@ -145,10 +147,10 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 		}
 		if traffic, ok := h.control.Egress(st.Name); ok {
 			ev := &egressView{Route: traffic.Route, Open: traffic.Open, Connections: traffic.Connections, BytesOut: traffic.BytesOut,
-				BytesIn: traffic.BytesIn, Refused: traffic.Refused, LastError: traffic.LastError, LastErrorAt: optionalTime(traffic.LastErrorAt),
+				BytesIn: traffic.BytesIn, Rejected: traffic.Rejected, Refused: traffic.Refused, LastError: traffic.LastError, LastErrorAt: optionalTime(traffic.LastErrorAt),
 				Hosts: []hostStatView{}}
 			for _, host := range traffic.Hosts {
-				ev.Hosts = append(ev.Hosts, hostStatView{Host: host.Host, Connections: host.Connections, LastAt: host.LastAt})
+				ev.Hosts = append(ev.Hosts, hostStatView{Host: host.Host, Connections: host.Connections, Rejected: host.Rejected, LastAt: host.LastAt})
 			}
 			v.Egress = ev
 		}

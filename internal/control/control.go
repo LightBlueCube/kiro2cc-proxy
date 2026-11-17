@@ -76,6 +76,9 @@ type Settings struct {
 	// AllowDirect lets accounts with no proxy at all connect directly
 	// (a server abroad); otherwise their traffic is refused.
 	AllowDirect bool `json:"allow_direct"`
+	// EgressRules are mihomo-format routing rules evaluated top-to-bottom
+	// before an account's own route.
+	EgressRules []string `json:"egress_rules"`
 	// CaptureUpstream records the generation calls agy sends to Google and
 	// their responses, for debugging; store.UpstreamRetention bounds them.
 	// Turning it off deletes them.
@@ -96,7 +99,7 @@ type Settings struct {
 // DefaultSettings are the settings before the admin changes any.
 func DefaultSettings() Settings {
 	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, CaptureResponseMiB: 4,
-		RiskControl: true, FlaggedPromptRetentionDays: 30,
+		RiskControl: true, FlaggedPromptRetentionDays: 30, EgressRules: slices.Clone(egress.DefaultRules),
 		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows),
 		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures)}
 }
@@ -132,6 +135,9 @@ func (s Settings) validate() error {
 	}
 	if clean, err := cleanProxy(s.FallbackProxy); err != nil || clean != s.FallbackProxy {
 		return errors.New("fallback_proxy must be empty or an http:// URL with a host and port, e.g. http://127.0.0.1:7890")
+	}
+	if _, err := egress.ParseRules(s.EgressRules); err != nil {
+		return err
 	}
 	if err := gateway.ValidateContextWindows(s.ContextWindows); err != nil {
 		return err
@@ -196,6 +202,7 @@ func decodeSettings(raw []byte, s *Settings) error {
 		Prices            []map[string]json.RawMessage `json:"prices"`
 		ContextWindows    json.RawMessage              `json:"context_windows"`
 		HarnessSignatures json.RawMessage              `json:"harness_signatures"`
+		EgressRules       json.RawMessage              `json:"egress_rules"`
 	}
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		return err
@@ -209,8 +216,15 @@ func decodeSettings(raw []byte, s *Settings) error {
 	if stored.HarnessSignatures != nil {
 		s.HarnessSignatures = nil
 	}
+	hasEgressRules := stored.EgressRules != nil && !bytes.Equal(bytes.TrimSpace(stored.EgressRules), []byte("null"))
+	if hasEgressRules {
+		s.EgressRules = []string{}
+	}
 	if err := json.Unmarshal(raw, s); err != nil {
 		return err
+	}
+	if !hasEgressRules {
+		s.EgressRules = defaults.EgressRules
 	}
 	if s.TurnsPerAccount == 0 {
 		s.TurnsPerAccount = defaults.TurnsPerAccount
@@ -287,6 +301,12 @@ type Control struct {
 
 // New registers the stored accounts with the pool and loads the API keys.
 func New(ctx context.Context, cfg Config) (*Control, error) {
+	cfg.Settings.EgressRules = cleanRuleLines(cfg.Settings.EgressRules)
+	rules, err := egress.ParseRules(cfg.Settings.EgressRules)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Egress.SetRules(rules)
 	c := &Control{cfg: cfg, log: cfg.Log, settings: cfg.Settings, logins: map[string]*pendingLogin{}}
 	accounts, err := cfg.Store.Accounts(ctx)
 	if err != nil {
@@ -325,9 +345,14 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 		return err
 	}
 	s.FallbackProxy = clean
+	if s.EgressRules == nil {
+		s.EgressRules = c.Settings().EgressRules
+	}
+	s.EgressRules = cleanRuleLines(s.EgressRules)
 	if err := s.validate(); err != nil {
 		return &InputError{err.Error()}
 	}
+	rules, _ := egress.ParseRules(s.EgressRules) // validated by s.validate()
 	if err := c.cfg.Store.SetSetting(ctx, settingsKey, s); err != nil {
 		return err
 	}
@@ -348,7 +373,18 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	if err := c.applyCapture(ctx, s); err != nil {
 		return err
 	}
+	c.cfg.Egress.SetRules(rules)
 	return c.applyRoutes(ctx)
+}
+
+func cleanRuleLines(lines []string) []string {
+	out := []string{}
+	for _, line := range lines {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // applyCapture starts or stops the recording of agy's generation calls;

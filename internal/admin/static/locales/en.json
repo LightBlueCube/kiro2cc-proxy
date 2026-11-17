@@ -108,6 +108,8 @@
   "settings.fallback": "Fallback HTTP proxy",
   "settings.direct": "Allow direct connections for accounts with no proxy at all",
   "settings.outbound.note": "Every agy connects only to agyrelay's local egress proxy, which forwards through the account's proxy, else the fallback proxy, else directly when allowed.",
+  "settings.egress_rules": "Egress rules",
+  "settings.egress_rules.note": "One mihomo-format rule per line, matched top to bottom before the account's route. Types: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-WILDCARD, DOMAIN-REGEX, IP-CIDR (literal IPs only, no DNS lookup), DST-PORT, MATCH. Targets: REJECT (403), REJECT-DROP (close TCP), PROXY (account route), DIRECT, PASS, or http://[user:pass@]host:port.",
   "settings.capture": "Debug capture",
   "settings.capture.enable": "Record agy's requests to Google and their responses",
   "settings.capture.limit": "Keep at most this much of each response (MiB)",
@@ -314,6 +316,7 @@
   "workers.egress.open": "{count} open",
   "workers.egress.connections": { "one": "{count} connection", "other": "{count} connections" },
   "workers.egress.bytes": "{out} out / {in} in",
+  "workers.egress.rejected": "{count} rejected",
   "workers.egress.refused": "{count} refused",
 
   "mode.continue": "Returned tool results to the turn waiting for them; the same agy turn went on",

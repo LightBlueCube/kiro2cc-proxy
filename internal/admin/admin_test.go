@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -45,11 +46,12 @@ func TestMain(m *testing.M) {
 const testPassword = "correct horse battery"
 
 type env struct {
-	t   *testing.T
-	url string
-	st  *store.Store
-	ctl *control.Control
-	p   *pool.Pool
+	t      *testing.T
+	url    string
+	st     *store.Store
+	ctl    *control.Control
+	p      *pool.Pool
+	egress *egress.Server
 	// flags is the risk-control flags the gateway and control share.
 	flags *promptflags.Flags
 	// accounts holds the account HOME directories.
@@ -116,7 +118,7 @@ func newEnv(t *testing.T) *env {
 		b.Close()
 		st.Close()
 	})
-	return &env{t: t, url: srv.URL, st: st, ctl: ctl, p: p, flags: flags, accounts: filepath.Join(dir, "accounts")}
+	return &env{t: t, url: srv.URL, st: st, ctl: ctl, p: p, egress: outbound, flags: flags, accounts: filepath.Join(dir, "accounts")}
 }
 
 type client struct {
@@ -665,6 +667,18 @@ func TestWorkers(t *testing.T) {
 	if a := workers(); len(a.Procs) != 0 {
 		t.Fatalf("after restart = %+v", a)
 	}
+	// Default egress rules reject play.googleapis.com and report it under workers.
+	proxyURL, err := url.Parse(e.egress.Register("main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	if _, err := hc.Get("https://play.googleapis.com/log"); err == nil {
+		t.Fatal("play.googleapis.com succeeded through default egress rules")
+	}
+	if a := workers(); a.Egress == nil || a.Egress.Rejected != 1 || a.Egress.Refused != 0 || len(a.Egress.Hosts) != 1 || a.Egress.Hosts[0].Host != "play.googleapis.com" || a.Egress.Hosts[0].Rejected != 1 {
+		t.Fatalf("workers egress after rule reject = %+v", a.Egress)
+	}
 	if r := c.do("POST", "/admin/api/workers/nobody/restart", nil, nil); r.status != http.StatusNotFound {
 		t.Fatalf("restart unknown = %d", r.status)
 	}
@@ -725,7 +739,14 @@ func TestSettingsValidation(t *testing.T) {
 		t.Fatalf("bad settings = %d %s", r.status, r.raw)
 	}
 	good := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14, "risk_control": false,
-		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
+		"egress_rules": []string{"  DOMAIN-SUFFIX,telemetry.example.com,REJECT  ", ""},
+		"prices":       []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
+	badRule := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
+		"egress_rules": []string{"DOMAIN,play.googleapis.com,INVALID_ACTION"},
+		"prices":       []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
+	if r := c.do("PUT", "/admin/api/settings", badRule, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("bad egress rule = %d %s", r.status, r.raw)
+	}
 	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
 		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}, {"model": "m", "input": 2, "cached": 0.1, "output": 2}}}
 	if r := c.do("PUT", "/admin/api/settings", badPrice, nil); r.status != http.StatusBadRequest {
@@ -734,8 +755,18 @@ func TestSettingsValidation(t *testing.T) {
 	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK || r.body["turns_per_account"] != float64(3) || r.body["max_workers"] != float64(10) {
 		t.Fatalf("good settings = %d %s", r.status, r.raw)
 	}
-	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.TurnsPerAccount != 3 || got.MaxWorkers != 10 {
+	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.TurnsPerAccount != 3 || got.MaxWorkers != 10 || !slices.Equal(got.EgressRules, []string{"DOMAIN-SUFFIX,telemetry.example.com,REJECT"}) {
 		t.Fatalf("applied = %+v", got)
+	}
+	// An update from an older tab that omits egress_rules keeps the active rules;
+	// an explicit empty array clears them.
+	omitRules := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14}
+	if r := c.do("PUT", "/admin/api/settings", omitRules, nil); r.status != http.StatusOK || !slices.Equal(e.ctl.Settings().EgressRules, []string{"DOMAIN-SUFFIX,telemetry.example.com,REJECT"}) {
+		t.Fatalf("omitted egress_rules = %d %+v", r.status, e.ctl.Settings().EgressRules)
+	}
+	clearRules := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14, "egress_rules": []string{}}
+	if r := c.do("PUT", "/admin/api/settings", clearRules, nil); r.status != http.StatusOK || len(e.ctl.Settings().EgressRules) != 0 {
+		t.Fatalf("cleared egress_rules = %d %+v", r.status, e.ctl.Settings().EgressRules)
 	}
 	if got := e.ctl.Settings(); got.RiskControl || got.FlaggedPromptRetentionDays != 14 || e.flags.Enabled() {
 		t.Fatalf("risk control = %v, %d days, flags enabled = %v; want it off with 14 days", got.RiskControl, got.FlaggedPromptRetentionDays, e.flags.Enabled())
