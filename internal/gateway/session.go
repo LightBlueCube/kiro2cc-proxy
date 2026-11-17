@@ -554,16 +554,34 @@ func (g *Gateway) closeEvicted(claims []*activeTurn) {
 	}
 }
 
-// sessionSpec appends the tool policy and the client's leading system
-// messages, verbatim, to agy's system prompt. A session always gets the
-// same text, since the system prompt seeds its prefix hashes: resuming a
-// live session with a different append adds it next to the old one
-// (verified on 1.5.3).
-func sessionSpec(account *pool.Account, binding *bridge.Binding, r *run) agy.SessionSpec {
-	appended := toolPolicy(r.req.Tools)
-	if r.t.system != "" {
-		appended += "\n\n" + r.t.system
+// agy closes its own <System Prompt> tag after the agent profile and puts
+// the append behind it; these tags keep the relay's tool policy separate
+// from the client's system prompt and mark where the whole prompt ends.
+const (
+	additionalPromptOpen  = "<Additional System Prompt>"
+	additionalPromptClose = "</Additional System Prompt>"
+	clientPromptOpen      = "<Client System Prompt>"
+	clientPromptClose     = "</Client System Prompt>"
+)
+
+// appendedPrompt wraps the tool policy in <Additional System Prompt> and,
+// when present, the client's leading system messages verbatim in
+// <Client System Prompt>.
+func appendedPrompt(tools []conv.ToolSpec, clientSystem string) string {
+	policy := additionalPromptOpen + "\n" + toolPolicy(tools) + "\n" + additionalPromptClose
+	if clientSystem == "" {
+		return policy
 	}
+
+	client := clientPromptOpen + "\n" + clientSystem + "\n" + clientPromptClose
+	return policy + "\n" + client
+}
+
+// sessionSpec appends the appendedPrompt to agy's system prompt. A session
+// always gets the same text, since the system prompt seeds its prefix
+// hashes: resuming a live session with a different append adds it next to
+// the old one (verified on 1.5.3).
+func sessionSpec(account *pool.Account, binding *bridge.Binding, r *run) agy.SessionSpec {
 	return agy.SessionSpec{
 		Cwd: account.Workspace(),
 		MCPServers: []agy.MCPServer{{
@@ -572,7 +590,7 @@ func sessionSpec(account *pool.Account, binding *bridge.Binding, r *run) agy.Ses
 			URL:     binding.URL(),
 			Headers: []agy.HTTPHeader{{Name: bridge.TokenHeader, Value: binding.Token()}},
 		}},
-		SystemAppend: appended,
+		SystemAppend: appendedPrompt(r.req.Tools, r.t.system),
 	}
 }
 

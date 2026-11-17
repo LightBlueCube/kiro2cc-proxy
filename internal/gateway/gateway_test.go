@@ -1050,8 +1050,8 @@ func TestSystemMessagePlacement(t *testing.T) {
 		t.Fatal(first.err)
 	}
 	opened := h.requests("session/new")
-	if got := opened[0].Params.Meta.Antigravity.SystemPrompt.Append; !strings.HasSuffix(got, "\n\nbe brief\n\nbe kind") {
-		t.Fatalf("append = %q, want the leading system messages at its end", got)
+	if got := opened[0].Params.Meta.Antigravity.SystemPrompt.Append; !strings.HasSuffix(got, "\n"+clientPromptOpen+"\nbe brief\n\nbe kind\n"+clientPromptClose) {
+		t.Fatalf("append = %q, want the leading system messages in the client tag at its end", got)
 	}
 	if prompt := h.requests("session/prompt")[0].Params.Prompt[0].Text; prompt != "hello" {
 		t.Fatalf("fresh prompt = %q, want only the user input", prompt)
@@ -1075,7 +1075,7 @@ func TestSystemMessagePlacement(t *testing.T) {
 		t.Fatal(third.err)
 	}
 	opened = h.requests("session/new")
-	if len(opened) != 2 || !strings.HasSuffix(opened[1].Params.Meta.Antigravity.SystemPrompt.Append, "\n\nbe terse\n\nbe kind") {
+	if len(opened) != 2 || !strings.HasSuffix(opened[1].Params.Meta.Antigravity.SystemPrompt.Append, "\n"+clientPromptOpen+"\nbe terse\n\nbe kind\n"+clientPromptClose) {
 		t.Fatalf("session/new = %+v, want a second session with the new system prompt", opened)
 	}
 	replay := h.requests("session/prompt")[2].Params.Prompt[0].Text
