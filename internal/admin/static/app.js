@@ -566,12 +566,18 @@ function rowEditor(fields, rows, defaults, blank, addLabel) {
 }
 
 views.settings = container => {
-  const general = h("div", { class: "card" });
+  // general holds the settings form, a card per topic; the list of flagged
+  // prompts sits in the form, in the card of the risk-control setting.
+  const general = h("div");
+  const flaggedList = h("div");
   const password = h("div", { class: "card" });
   const sessions = h("div", { class: "card" });
-  const flagged = h("div", { class: "card" });
   const audit = h("div", { class: "card" });
-  container.append(h("h1", {}, t("settings.title")), general, flagged, password, sessions, audit);
+
+  // topic is a settings card that folds away under its title.
+  const topic = (title, ...body) => h("details", { class: "card fold topic" }, h("summary", {}, title), body);
+
+  container.append(h("h1", {}, t("settings.title")), general, password, sessions, audit);
 
   // flaggedPromptCell shows a flagged prompt's fingerprint; View loads its
   // text on demand.
@@ -602,7 +608,7 @@ views.settings = container => {
       if (p.pinned) return h("span", {}, t("flagged.kept"));
       return p.active ? fmt.time(p.until) : h("span", { class: "muted" }, t("flagged.ended"));
     };
-    flagged.replaceChildren(h("h2", {}, t("flagged.title")), h("p", { class: "muted" }, t("flagged.note")), table([
+    flaggedList.replaceChildren(table([
       { title: t("flagged.prompt"), cell: flaggedPromptCell },
       { title: t("flagged.last"), cell: p => fmt.time(p.last_at) },
       { title: t("flagged.until"), cell: flaggedUntil },
@@ -610,7 +616,7 @@ views.settings = container => {
         onchange: e => setPinned(p, e.target.checked, e.target) }) },
       { title: t("flagged.hits"), num: true, cell: p => String(p.hits) },
       { title: t("flagged.by"), cell: p => stack(keyName(p.key_name, p.key_hash), joined(p.account, p.model)) },
-      { title: "", actions: true, cell: p => p.active ? h("button", { class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null },
+      { title: "", actions: true, cell: p => p.active ? h("button", { type: "button", class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null },
     ], prompts));
   }
 
@@ -675,53 +681,54 @@ views.settings = container => {
       }, event.submitter);
     } },
       h("datalist", { id: "settings-models" }, catalog.map(m => h("option", { value: m.id }, m.name))),
-      h("div", { class: "row" },
-        h("label", {}, t("settings.turns"), withReset(turns, d.turns_per_account)),
-        h("label", {}, t("settings.max_workers"), withReset(maxWorkers, d.max_workers)),
-        h("label", {}, t("settings.ttl"), withReset(ttl, d.snapshot_ttl)),
-        h("label", { title: t("settings.idle_close.hint") }, t("settings.idle_close"), withReset(idleClose, d.session_idle_close)),
-        h("label", {}, t("settings.log_level"), withReset(level, d.log_level)),
-        h("label", {}, t("settings.retention"), withReset(retention, d.retention_days))),
-      h("h3", {}, t("settings.outbound")),
-      h("div", { class: "row" },
-        h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
-        h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, t("settings.direct")), resetButton(direct, d.allow_direct))),
-      h("p", { class: "muted" }, t("settings.outbound.note")),
-      h("h3", {}, t("settings.capture")),
-      h("div", { class: "row" },
-        h("span", { class: "with-reset" }, h("label", { class: "check" }, capture, t("settings.capture.enable")), resetButton(capture, d.capture_upstream)),
-        h("label", {}, t("settings.capture.limit"), withReset(captureLimit, d.capture_response_mib))),
-      h("p", { class: "muted" }, t("settings.capture.note")),
-      h("h3", {}, t("settings.risk")),
-      h("div", { class: "row" },
-        h("span", { class: "with-reset" }, h("label", { class: "check" }, riskControl, t("settings.risk.enable")), resetButton(riskControl, d.risk_control)),
-        h("label", {}, t("settings.risk.retention"), withReset(flaggedRetention, d.flagged_prompt_retention_days))),
-      h("p", { class: "muted" }, t("settings.risk.note")),
-      h("h3", {}, t("settings.system_prompts")),
-      h("span", { class: "with-reset" }, h("label", { class: "check" }, refuseHarness, t("settings.refuse_harness")), resetButton(refuseHarness, d.refuse_harness_prompts)),
-      h("p", { class: "muted" }, t("settings.refuse_harness.note")),
-      h("details", { class: "fold" },
-        h("summary", {}, t("settings.signatures.summary", { count: s.harness_signatures.length })),
+      h("div", { class: "card" }, h("h2", {}, t("settings.sessions")),
+        h("div", { class: "row" },
+          h("label", {}, t("settings.turns"), withReset(turns, d.turns_per_account)),
+          h("label", {}, t("settings.max_workers"), withReset(maxWorkers, d.max_workers)),
+          h("label", {}, t("settings.ttl"), withReset(ttl, d.snapshot_ttl)),
+          h("label", { title: t("settings.idle_close.hint") }, t("settings.idle_close"), withReset(idleClose, d.session_idle_close)))),
+      h("div", { class: "card" }, h("h2", {}, t("settings.outbound")),
+        h("div", { class: "row" },
+          h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),
+          h("span", { class: "with-reset" }, h("label", { class: "check" }, direct, t("settings.direct")), resetButton(direct, d.allow_direct))),
+        h("p", { class: "muted" }, t("settings.outbound.note"))),
+      topic(t("settings.records"),
+        h("div", { class: "row" },
+          h("label", {}, t("settings.log_level"), withReset(level, d.log_level)),
+          h("label", {}, t("settings.retention"), withReset(retention, d.retention_days))),
+        h("h3", {}, t("settings.capture")),
+        h("div", { class: "row" },
+          h("span", { class: "with-reset" }, h("label", { class: "check" }, capture, t("settings.capture.enable")), resetButton(capture, d.capture_upstream)),
+          h("label", {}, t("settings.capture.limit"), withReset(captureLimit, d.capture_response_mib))),
+        h("p", { class: "muted" }, t("settings.capture.note"))),
+      topic(t("settings.harness"),
+        h("div", { class: "field" }, h("span", { class: "with-reset" },
+          h("label", { class: "check" }, refuseHarness, t("settings.refuse_harness")), resetButton(refuseHarness, d.refuse_harness_prompts))),
+        h("p", { class: "muted" }, t("settings.refuse_harness.note")),
+        h("h3", {}, t("settings.signatures")),
         h("p", { class: "muted" }, t("settings.signatures.note")),
         signatures,
         h("div", { class: "row", style: "margin-top:8px" }, signaturesReset)),
-      h("details", { class: "fold" },
-        h("summary", {}, s.context_check
-          ? t("settings.windows.summary.on", { count: s.context_windows.length })
-          : t("settings.windows.summary.off", { count: s.context_windows.length })),
+      topic(t("flagged.title"),
+        h("div", { class: "row" },
+          h("span", { class: "with-reset" }, h("label", { class: "check" }, riskControl, t("settings.risk.enable")), resetButton(riskControl, d.risk_control)),
+          h("label", {}, t("settings.risk.retention"), withReset(flaggedRetention, d.flagged_prompt_retention_days))),
+        h("p", { class: "muted" }, t("flagged.note")),
+        h("p", { class: "muted" }, t("settings.risk.note")),
+        flaggedList),
+      topic(t("settings.windows"),
         h("div", { class: "field" }, h("span", { class: "with-reset" },
           h("label", { class: "check", title: t("settings.context_check.hint") }, contextCheck, t("settings.context_check")),
           resetButton(contextCheck, d.context_check))),
         h("p", { class: "muted" }, t("settings.windows.note")),
         windows.node),
-      h("details", { class: "fold" },
-        h("summary", {}, t("settings.prices.summary", { count: s.prices.length })),
+      topic(t("settings.prices"),
         h("p", { class: "muted" }, t("settings.prices.note")),
         prices.node),
-      h("div", { class: "row", style: "margin-top:12px" },
+      h("div", { class: "row", style: "margin-bottom:16px" },
         h("span", { class: "grow" }),
         h("button", { type: "submit" }, t("settings.save"))));
-    general.replaceChildren(h("h2", {}, t("settings.general")), form);
+    general.replaceChildren(form);
   }
 
   function renderPassword() {
