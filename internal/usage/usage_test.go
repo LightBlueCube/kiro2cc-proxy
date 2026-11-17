@@ -62,11 +62,11 @@ func TestRecordAndAttribute(t *testing.T) {
 	// Two requests, the second costing three times the first.
 	for i, tokens := range []int64{1000, 3000} {
 		rec.Record(gateway.Record{
-			At: t0.Add(time.Duration(i+1) * time.Minute), KeyHash: "k", KeyName: "alice", Account: "a", Model: "m", QuotaGroup: "gemini",
+			At: t0.Add(time.Duration(i+1) * time.Minute), KeyHash: "k", KeyName: "alice", Account: "a", Model: "m", QuotaGroup: "gemini", KeyGroup: "gemini",
 			Usage: &conv.Usage{PromptTokens: tokens},
 		})
 	}
-	rec.Record(gateway.Record{At: t0.Add(3 * time.Minute), KeyHash: "k", KeyName: "alice", Account: "a", Model: "m", QuotaGroup: "gemini",
+	rec.Record(gateway.Record{At: t0.Add(3 * time.Minute), KeyHash: "k", KeyName: "alice", Account: "a", Model: "m", QuotaGroup: "gemini", KeyGroup: "gemini",
 		Err: &conv.Error{Kind: conv.ErrQuota, Message: "limit"}})
 	// Requests that used tokens ask for a settling sample; the failed one does not.
 	if !slices.Equal(settled, []string{"a", "a"}) {
@@ -92,7 +92,7 @@ func TestRecordAndAttribute(t *testing.T) {
 	}
 
 	record := func(at time.Duration, key string) {
-		rec.Record(gateway.Record{At: t0.Add(at), KeyHash: key, Account: "a", Model: "m", QuotaGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
+		rec.Record(gateway.Record{At: t0.Add(at), KeyHash: key, Account: "a", Model: "m", QuotaGroup: "gemini", KeyGroup: "gemini", Usage: &conv.Usage{PromptTokens: 1000}})
 	}
 	// A sample while a turn that began before its cutoff runs carries its
 	// drop to the next sample without one.

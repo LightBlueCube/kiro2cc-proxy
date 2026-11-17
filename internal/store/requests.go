@@ -36,7 +36,11 @@ type Request struct {
 	Output       int64
 	Reasoning    int64
 	CostUSD      *float64
-	QuotaGroup   string
+	// QuotaGroup is the quota group the serving account charged.
+	QuotaGroup string
+	// KeyGroup is the group of the key's spend limit the cost counts in;
+	// it is not stored with the request, only in the key's total.
+	KeyGroup string
 	// QuotaUsed is the attributed share of the weekly quota, 0 to 1.
 	QuotaUsed *float64
 	// QuotaSkip, when set, is why the request gets no QuotaUsed.
@@ -95,7 +99,7 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	}
 	if r.CostUSD != nil && *r.CostUSD > 0 {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_hash, grp, cost_usd) VALUES (?, ?, ?)
-			ON CONFLICT (key_hash, grp) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd`, r.KeyHash, r.QuotaGroup, *r.CostUSD); err != nil {
+			ON CONFLICT (key_hash, grp) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd`, r.KeyHash, r.KeyGroup, *r.CostUSD); err != nil {
 			return err
 		}
 	}

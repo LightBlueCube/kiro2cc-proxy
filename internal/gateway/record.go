@@ -72,8 +72,11 @@ type Record struct {
 	Model string
 	Slug  string
 	// Effort is the tier sent to agy, "" for a model without tiers.
-	Effort     string
+	Effort string
+	// QuotaGroup is the quota group the serving account charged.
 	QuotaGroup string
+	// KeyGroup is the group of the key's spend limit that the request counts in.
+	KeyGroup string
 	// Account and Mode are empty when no attempt started.
 	Account string
 	Mode    Mode

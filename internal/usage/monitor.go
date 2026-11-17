@@ -265,14 +265,18 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 	m.mu.Unlock()
 
 	var samples []store.QuotaSample
+	var bucketGroups []string
 	for _, g := range groups {
 		for _, b := range g.Buckets {
-			if group := BucketGroup(b.ID); group != "" && b.Remaining <= 0 && b.ResetAt.After(q.At) {
+			group := BucketGroup(b.ID)
+			bucketGroups = append(bucketGroups, group)
+			if group != "" && b.Remaining <= 0 && b.ResetAt.After(q.At) {
 				account.Cool(group, b.ResetAt)
 			}
 			samples = append(samples, store.QuotaSample{Account: name, At: q.At, Bucket: b.ID, Group: g.Name, Window: b.Window, Remaining: b.Remaining, ResetAt: b.ResetAt})
 		}
 	}
+	account.SetQuotaGroups(bucketGroups)
 	if err := m.cfg.Store.AddQuotaSamples(ctx, samples); err != nil {
 		m.cfg.Log.Error("quota samples not stored", "account", name, "err", err)
 		return q, nil

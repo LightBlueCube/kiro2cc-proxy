@@ -103,7 +103,7 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 	if account == nil {
 		return nil, fmt.Errorf("account %s is no longer configured", snap.Account)
 	}
-	if err := account.Available(r.group); err != nil {
+	if err := account.Available(r.poolGroup(account)); err != nil {
 		return nil, err
 	}
 	slug, tier, ok := slugOn(account, r)
@@ -204,7 +204,7 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 			g.mu.Unlock()
 			return nil, err
 		}
-		if err := account.TryAcquire(r.group); err != nil {
+		if err := account.TryAcquire(r.poolGroup(account)); err != nil {
 			g.releaseBusyLocked(r.user)
 			g.mu.Unlock()
 			return nil, err
@@ -359,7 +359,7 @@ func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
 		}
 		idle[name] = cur
 	}
-	return g.pool.Pick(r.user, r.group, r.exclude, idle)
+	return g.pool.Pick(r.user, r.model.id, r.exclude, idle)
 }
 
 // openSession creates a session on account and claims it.

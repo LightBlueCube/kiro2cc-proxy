@@ -36,7 +36,7 @@
 
   "group.gemini": "Gemini",
   "group.claude-gpt": "Claude + GPT",
-  "group.argon": "Gemini 4 Argon",
+  "group.argon": "Argon & Carbon",
 
   "keys.title": "API keys",
   "keys.name.placeholder": "alice",

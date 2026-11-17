@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
+
+	"agyrelay/internal/agy"
 )
 
 func TestProxyEnvAndBlocking(t *testing.T) {
@@ -25,32 +28,32 @@ func TestProxyEnvAndBlocking(t *testing.T) {
 	}
 
 	a.SetBlocked(errors.New("no route"))
-	if _, err := p.Pick("u", "gemini", nil, nil); err == nil || a.Status().Blocked != "no route" {
+	if _, err := p.Pick("u", "gemini-3.8-flash", nil, nil); err == nil || a.Status().Blocked != "no route" {
 		t.Fatalf("blocked account picked: %v", err)
 	}
 	a.SetBlocked(nil)
-	got, err := p.Pick("u", "gemini", nil, nil)
+	got, err := p.Pick("u", "gemini-3.8-flash", nil, nil)
 	if err != nil || got != a {
 		t.Fatalf("unblocked pick = %v, %v", got, err)
 	}
 	a.Release()
 
 	a.SetVerification(true, "https://accounts.google.com/x")
-	if _, err := p.Pick("u", "gemini", nil, nil); !errors.Is(err, ErrNoAccount) || !a.Status().Verify || a.Status().VerifyURL != "https://accounts.google.com/x" {
+	if _, err := p.Pick("u", "gemini-3.8-flash", nil, nil); !errors.Is(err, ErrNoAccount) || !a.Status().Verify || a.Status().VerifyURL != "https://accounts.google.com/x" {
 		t.Fatalf("account awaiting verification picked: %v, %+v", err, a.Status())
 	}
 	a.SetVerification(false, "")
-	if got, err := p.Pick("u", "gemini", nil, nil); err != nil || got != a {
+	if got, err := p.Pick("u", "gemini-3.8-flash", nil, nil); err != nil || got != a {
 		t.Fatalf("verified pick = %v, %v", got, err)
 	}
 	a.Release()
 
 	a.Disable(errors.New("sign-in required"))
-	if _, err := p.Pick("u", "gemini", nil, nil); !errors.Is(err, ErrNoAccount) || a.Status().Disabled == "" {
+	if _, err := p.Pick("u", "gemini-3.8-flash", nil, nil); !errors.Is(err, ErrNoAccount) || a.Status().Disabled == "" {
 		t.Fatalf("disabled account picked: %v, %+v", err, a.Status())
 	}
 	a.Enable()
-	if got, err := p.Pick("u", "gemini", nil, nil); err != nil || got != a || a.Status().Disabled != "" {
+	if got, err := p.Pick("u", "gemini-3.8-flash", nil, nil); err != nil || got != a || a.Status().Disabled != "" {
 		t.Fatalf("enabled pick = %v, %v, %+v", got, err, a.Status())
 	}
 	a.Release()
@@ -82,7 +85,7 @@ func TestPriorityAndAllowedModels(t *testing.T) {
 
 	// Higher priority wins for every user while a turn slot is free.
 	for _, user := range []string{"u1", "u2", "u3", "u4"} {
-		got, err := p.Pick(user, "gemini", nil, nil)
+		got, err := p.Pick(user, "gemini-3.8-flash", nil, nil)
 		if err != nil || got != high {
 			t.Fatalf("pick(%s) = %v, %v; want high", user, got, err)
 		}
@@ -90,14 +93,106 @@ func TestPriorityAndAllowedModels(t *testing.T) {
 	}
 
 	// With high's slot full, Pick moves to low.
-	first, err := p.Pick("u1", "gemini", nil, nil)
+	first, err := p.Pick("u1", "gemini-3.8-flash", nil, nil)
 	if err != nil || first != high {
 		t.Fatalf("first pick = %v, %v", first, err)
 	}
-	second, err := p.Pick("u1", "gemini", nil, nil)
+	second, err := p.Pick("u1", "gemini-3.8-flash", nil, nil)
 	if err != nil || second != low {
 		t.Fatalf("second pick with high busy = %v, %v; want low", second, err)
 	}
 	second.Release()
 	first.Release()
+}
+
+func TestKeyGroup(t *testing.T) {
+	for model, want := range map[string]string{
+		"gemini-4-argon":    GroupArgon,
+		"gemini-4-carbon":   GroupArgon,
+		"gemini-3.8-flash":  GroupGemini,
+		"gemini-4-hydrogen": GroupGemini,
+		"claude-sonnet-5-5": GroupClaudeGPT,
+		"gpt-oss-120b":      GroupClaudeGPT,
+	} {
+		if got := KeyGroup(model); got != want {
+			t.Errorf("KeyGroup(%s) = %s, want %s", model, got, want)
+		}
+	}
+}
+
+func newPoolGroupAccount(t *testing.T, p *Pool, name string, models []string, quotaGroups []string) *Account {
+	t.Helper()
+	a, err := p.Add(AccountConfig{Name: name, Home: filepath.Join(t.TempDir(), name)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog []agy.ModelInfo
+	for _, id := range models {
+		catalog = append(catalog, agy.ModelInfo{ModelID: id})
+	}
+	a.SetModels(catalog)
+	if quotaGroups != nil {
+		a.SetQuotaGroups(quotaGroups)
+	}
+	return a
+}
+
+func TestPoolGroup(t *testing.T) {
+	p, err := New(Config{TurnsPerAccount: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proModels := []string{"gemini-4-argon-medium", "gemini-3.8-flash-medium"}
+	ultraModels := append(slices.Clone(proModels), "gemini-4-carbon-medium")
+	proBuckets := []string{GroupGemini, GroupClaudeGPT, GroupArgon}
+	ultraBuckets := []string{GroupGemini, GroupClaudeGPT}
+
+	cases := []struct {
+		name    string
+		account *Account
+		want    map[string]string
+	}{
+		{"pro", newPoolGroupAccount(t, p, "pro", proModels, proBuckets), map[string]string{
+			"gemini-4-argon": GroupArgon, "gemini-4-carbon": GroupArgon, "gemini-3.8-flash": GroupGemini, "claude-opus-5-5": GroupClaudeGPT}},
+		{"ultra", newPoolGroupAccount(t, p, "ultra", ultraModels, ultraBuckets), map[string]string{
+			"gemini-4-argon": GroupGemini, "gemini-4-carbon": GroupGemini, "gemini-3.8-flash": GroupGemini, "claude-opus-5-5": GroupClaudeGPT}},
+		{"carbon offered, not sampled", newPoolGroupAccount(t, p, "unsampled", ultraModels, nil), map[string]string{
+			"gemini-4-argon": GroupArgon, "gemini-4-carbon": GroupArgon}},
+		{"sampled without Argon bucket, no carbon", newPoolGroupAccount(t, p, "free", proModels, ultraBuckets), map[string]string{
+			"gemini-4-argon": GroupArgon}},
+		{"carbon offered with an Argon bucket", newPoolGroupAccount(t, p, "both", ultraModels, proBuckets), map[string]string{
+			"gemini-4-argon": GroupArgon, "gemini-4-carbon": GroupArgon}},
+	}
+	for _, c := range cases {
+		for model, want := range c.want {
+			if got := c.account.PoolGroup(model); got != want {
+				t.Errorf("%s: PoolGroup(%s) = %s, want %s", c.name, model, got, want)
+			}
+		}
+	}
+}
+
+// An exhausted Argon bucket cools the Argon group; an account that charges
+// Argon to the Gemini bucket stays pickable for Argon models.
+func TestPickByAccountPoolGroup(t *testing.T) {
+	p, err := New(Config{TurnsPerAccount: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pro := newPoolGroupAccount(t, p, "pro", []string{"gemini-4-argon-medium"}, []string{GroupGemini, GroupClaudeGPT, GroupArgon})
+	ultra := newPoolGroupAccount(t, p, "ultra", []string{"gemini-4-argon-medium", "gemini-4-carbon-medium"}, []string{GroupGemini, GroupClaudeGPT})
+	until := time.Now().Add(time.Hour)
+	pro.Cool(GroupArgon, until)
+	ultra.Cool(GroupArgon, until)
+
+	got, err := p.Pick("u", "gemini-4-argon", nil, nil)
+	if err != nil || got != ultra {
+		t.Fatalf("pick with the Argon group cooling = %v, %v; want ultra", got, err)
+	}
+	got.Release()
+
+	ultra.Cool(GroupGemini, until)
+	if _, err := p.Pick("u", "gemini-4-argon", nil, nil); !errors.Is(err, ErrNoAccount) {
+		t.Fatalf("pick with the Gemini group cooling on ultra and Argon on pro: %v", err)
+	}
 }

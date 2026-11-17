@@ -998,8 +998,8 @@ func TestUserKeyUsageAndMetadata(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	costA, costB := 1.25, 2.5
 	for _, req := range []store.Request{
-		{At: now, KeyHash: aliceHash, KeyName: "alice", Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Cached: 40, Output: 10, CostUSD: &costA},
-		{At: now, KeyHash: bobHash, KeyName: "bob", Account: "other", QuotaGroup: "gemini", Model: "claude-opus-5-5", Status: store.StatusOK, Input: 500, Output: 50, CostUSD: &costB},
+		{At: now, KeyHash: aliceHash, KeyName: "alice", Account: "main", QuotaGroup: "gemini", KeyGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Cached: 40, Output: 10, CostUSD: &costA},
+		{At: now, KeyHash: bobHash, KeyName: "bob", Account: "other", QuotaGroup: "gemini", KeyGroup: "gemini", Model: "claude-opus-5-5", Status: store.StatusOK, Input: 500, Output: 50, CostUSD: &costB},
 	} {
 		if err := e.st.AddRequest(ctx, req); err != nil {
 			t.Fatal(err)

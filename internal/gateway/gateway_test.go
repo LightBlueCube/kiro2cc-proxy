@@ -714,6 +714,31 @@ func TestKeyLimits(t *testing.T) {
 	}
 }
 
+func TestArgonCarbonLimitGroup(t *testing.T) {
+	spent := map[string]float64{"gemini": 1, "argon": 2, "claude-gpt": 4}
+	merged := conv.Caller{Limits: map[string]float64{"gemini": 5}}
+	separate := conv.Caller{Limits: map[string]float64{"gemini": 5, "argon": 3}}
+
+	for _, c := range []struct {
+		name      string
+		caller    conv.Caller
+		keyGroup  string
+		wantGroup string
+		wantSpent float64
+	}{
+		{"argon merged into gemini", merged, "argon", "gemini", 3},
+		{"gemini counts argon when merged", merged, "gemini", "gemini", 3},
+		{"claude is not merged", merged, "claude-gpt", "claude-gpt", 4},
+		{"argon with its own limit", separate, "argon", "argon", 2},
+		{"gemini without argon when separate", separate, "gemini", "gemini", 1},
+	} {
+		group := limitGroup(c.caller, c.keyGroup)
+		if group != c.wantGroup || spentUnder(c.caller, spent, group) != c.wantSpent {
+			t.Errorf("%s: limit group %s spent %v, want %s %v", c.name, group, spentUnder(c.caller, spent, group), c.wantGroup, c.wantSpent)
+		}
+	}
+}
+
 func TestContextWindow(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()

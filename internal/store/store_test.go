@@ -153,7 +153,7 @@ func TestDeleteKey(t *testing.T) {
 		t.Fatalf("after clearing max_workers: %+v, %v", keys, err)
 	}
 	cost := 0.5
-	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Account: "main", Model: "m", Status: StatusOK, QuotaGroup: "gemini", Input: 1, CostUSD: &cost}); err != nil {
+	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Account: "main", Model: "m", Status: StatusOK, QuotaGroup: "gemini", KeyGroup: "argon", Input: 1, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10)
@@ -163,8 +163,9 @@ func TestDeleteKey(t *testing.T) {
 	if err := st.AttributeQuota(ctx, "main", "gemini-weekly", time.Now(), map[int64]float64{rows[0].ID: 0.2}); err != nil {
 		t.Fatal(err)
 	}
-	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.5 {
-		t.Fatalf("spend = %+v, %v", spends, err)
+	// The spend counts in the key group, whatever quota group was charged.
+	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.5 || spends[0].Group != "argon" || rows[0].QuotaGroup != "gemini" {
+		t.Fatalf("spend = %+v, %v; request group %q", spends, err, rows[0].QuotaGroup)
 	}
 	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 1 {
 		t.Fatalf("totals = %+v, %v", totals, err)
