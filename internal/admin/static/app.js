@@ -1629,14 +1629,14 @@ views.calls = container => {
 // ---- upstream calls --------------------------------------------------
 
 // The kinds of block the upstream view folds, in toolbar order.
-const BLOCK_KINDS = ["meta", "system", "tools", "user", "model", "thought", "call", "result", "other"];
-// Kinds that start folded: long, and the same in every call of a session.
-const FOLDED_KINDS = ["meta", "system", "tools"];
+const BLOCK_KINDS = ["meta", "system", "tools", "user", "model", "thought", "signature", "call", "result", "other"];
+// Kinds that start folded: long, and mostly the same in every call of a session.
+const FOLDED_KINDS = ["meta", "system", "tools", "signature"];
 const PREVIEW_CHARS = 100;
 
 const blockKindLabels = () => ({
   meta: t("upstream.kind.meta"), system: t("upstream.kind.system"), tools: t("upstream.kind.tools"), user: t("upstream.kind.user"),
-  model: t("upstream.kind.model"), thought: t("upstream.kind.thought"), call: t("upstream.kind.call"), result: t("upstream.kind.result"),
+  model: t("upstream.kind.model"), thought: t("upstream.kind.thought"), signature: t("upstream.kind.signature"), call: t("upstream.kind.call"), result: t("upstream.kind.result"),
   other: t("upstream.kind.other"),
 });
 
@@ -1650,9 +1650,9 @@ function block(kind, title, previewText, content) {
     h("pre", { class: "blk-text" }, content));
 }
 
-// partBlock shows one part of a message: text, a thought, a tool call or
+// contentBlock shows what a part holds: text, a thought, a tool call or
 // result, or something else (an image, say) as JSON.
-function partBlock(role, part, labels) {
+function contentBlock(role, part, labels) {
   if (typeof part.text === "string") {
     const kind = part.thought === true ? "thought" : role === "user" ? "user" : "model";
     return block(kind, labels[kind], preview(part.text), part.text);
@@ -1664,6 +1664,18 @@ function partBlock(role, part, labels) {
     return block("other", labels.other, t("upstream.inline_data", { type: rest.mimeType || "?", size: fmt.bytes(data ? data.length : 0) }), prettyJSON(rest));
   }
   return block("other", labels.other, "", prettyJSON(part));
+}
+
+// partBlocks lays out one part of a message: its content, then the thought
+// signature it carries, if any, as a block of its own.
+function partBlocks(role, part, labels) {
+  const { thoughtSignature, ...content } = part;
+  const blocks = [contentBlock(role, content, labels)];
+  if (thoughtSignature) {
+    const summary = t("upstream.signature_length", { length: thoughtSignature.length }) + " " + preview(thoughtSignature);
+    blocks.push(block("signature", labels.signature, summary, thoughtSignature));
+  }
+  return blocks;
 }
 
 function toolBlocks(tools, labels) {
@@ -1682,13 +1694,13 @@ function requestBlocks(body, labels) {
   }
   blocks.push(...toolBlocks(tools, labels));
   for (const message of contents) {
-    for (const part of message.parts || []) blocks.push(partBlock(message.role, part, labels));
+    for (const part of message.parts || []) blocks.push(...partBlocks(message.role, part, labels));
   }
   return blocks;
 }
 
 function responseBlocks(response, truncated, labels) {
-  const blocks = response.parts.map(part => partBlock("model", part, labels));
+  const blocks = response.parts.flatMap(part => partBlocks("model", part, labels));
   const meta = {};
   if (response.finish_reason) meta.finishReason = response.finish_reason;
   if (response.usage) meta.usageMetadata = response.usage;
