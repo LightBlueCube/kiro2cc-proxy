@@ -716,7 +716,7 @@ func TestKeyLimits(t *testing.T) {
 
 func TestArgonCarbonLimitGroup(t *testing.T) {
 	spent := map[string]float64{"gemini": 1, "argon": 2, "claude-gpt": 4}
-	merged := conv.Caller{Limits: map[string]float64{"gemini": 5}}
+	merged := conv.Caller{Limits: map[string]float64{"gemini": 5}, MergeArgon: true}
 	separate := conv.Caller{Limits: map[string]float64{"gemini": 5, "argon": 3}}
 
 	for _, c := range []struct {

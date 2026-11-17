@@ -426,6 +426,65 @@ func TestKeyLimits(t *testing.T) {
 	}
 }
 
+func TestKeyMergeArgon(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+	keyView := func() keyView {
+		t.Helper()
+		var list keysView
+		r := c.do("GET", "/admin/api/keys", nil, nil)
+		if err := json.Unmarshal([]byte(r.raw), &list); err != nil || len(list.Keys) != 1 {
+			t.Fatalf("keys = %s", r.raw)
+		}
+		return list.Keys[0]
+	}
+
+	// A key merges Argon & Carbon into Gemini unless it says otherwise.
+	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "limits": map[string]float64{"gemini": 5}}, nil)
+	token, _ := r.body["key"].(string)
+	caller, _ := e.ctl.Lookup(token)
+	if v := keyView(); !v.MergeArgon || !caller.MergeArgon || caller.Limits["gemini"] != 5 || len(caller.Limits) != 1 {
+		t.Fatalf("new key: view %+v, caller %+v", v, caller)
+	}
+
+	// A merged key has no limit of its own for them.
+	hash := keyView().Hash
+	both := map[string]float64{"gemini": 5, "argon": 3}
+	for _, update := range []map[string]any{{"limits": both}, {"limits": both, "merge_argon": true}} {
+		if r := c.do("PATCH", "/admin/api/keys/"+hash, update, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("merged key with an Argon limit %v = %d %s", update, r.status, r.raw)
+		}
+	}
+
+	// Unmerged, the limit is the key's own; merging again drops it.
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"limits": both, "merge_argon": false}, nil); r.status != http.StatusOK {
+		t.Fatalf("unmerge = %d %s", r.status, r.raw)
+	}
+	caller, _ = e.ctl.Lookup(token)
+	if v := keyView(); v.MergeArgon || caller.MergeArgon || caller.Limits["argon"] != 3 || caller.Limits["gemini"] != 5 {
+		t.Fatalf("unmerged key: view %+v, caller %+v", v, caller)
+	}
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"limits": map[string]float64{"gemini": 5}, "merge_argon": true}, nil); r.status != http.StatusOK {
+		t.Fatalf("merge = %d %s", r.status, r.raw)
+	}
+	caller, _ = e.ctl.Lookup(token)
+	if v := keyView(); !v.MergeArgon || len(v.Limits) != 1 || !caller.MergeArgon || len(caller.Limits) != 1 {
+		t.Fatalf("merged again: view %+v, caller %+v", v, caller)
+	}
+
+	// Unmerged without an Argon limit leaves them unlimited.
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"limits": map[string]float64{"gemini": 5}, "merge_argon": false}, nil); r.status != http.StatusOK {
+		t.Fatalf("unmerge without a limit = %d %s", r.status, r.raw)
+	}
+	if v := keyView(); v.MergeArgon || len(v.Limits) != 1 {
+		t.Fatalf("unmerged without a limit: %+v", v)
+	}
+}
+
 func TestAccountProxy(t *testing.T) {
 	e := newEnv(t)
 	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {

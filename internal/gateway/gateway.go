@@ -420,10 +420,9 @@ func (g *Gateway) checkSystemPrompt(t *transcript) *conv.Error {
 }
 
 // limitGroup is the group whose limit covers keyGroup. Argon & Carbon
-// count in Gemini's limit unless the key has a limit of its own for them.
+// count in Gemini's limit when the key merges them.
 func limitGroup(caller conv.Caller, keyGroup string) string {
-	_, ownLimit := caller.Limits[pool.GroupArgon]
-	if keyGroup == pool.GroupArgon && !ownLimit {
+	if keyGroup == pool.GroupArgon && caller.MergeArgon {
 		return pool.GroupGemini
 	}
 	return keyGroup
@@ -432,8 +431,7 @@ func limitGroup(caller conv.Caller, keyGroup string) string {
 // spentUnder is the key's spend that counts against the limit of group
 // (a result of limitGroup), given its spend by key group.
 func spentUnder(caller conv.Caller, spent map[string]float64, group string) float64 {
-	_, ownLimit := caller.Limits[pool.GroupArgon]
-	if group == pool.GroupGemini && !ownLimit {
+	if group == pool.GroupGemini && caller.MergeArgon {
 		return spent[pool.GroupGemini] + spent[pool.GroupArgon]
 	}
 	return spent[group]

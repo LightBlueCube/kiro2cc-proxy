@@ -154,6 +154,9 @@ type Caller struct {
 	// Limits caps the spend by quota group in USD; absent groups are
 	// unlimited. At most one of LimitTotal and Limits is set.
 	Limits map[string]float64
+	// MergeArgon counts Argon & Carbon spend in the Gemini limit; Limits
+	// then has no limit of their own.
+	MergeArgon bool
 }
 
 // Allows reports whether the caller may use the model id.

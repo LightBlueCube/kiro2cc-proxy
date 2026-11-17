@@ -53,6 +53,7 @@ var migrations = []string{
 		max_workers INTEGER,
 		limit_total REAL,
 		limits      TEXT NOT NULL DEFAULT '{}',
+		merge_argon INTEGER NOT NULL DEFAULT 1,
 		created_at  INTEGER NOT NULL DEFAULT 0,
 		revoked_at  INTEGER
 	);
@@ -225,6 +226,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	var hadMergeArgon int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name = 'merge_argon'`).Scan(&hadMergeArgon); err != nil {
+		return err
+	}
+
 	for i, m := range migrations {
 		if err := applySchema(tx, m); err != nil {
 			return fmt.Errorf("migration %d: %w", i+1, err)
@@ -237,6 +243,13 @@ func (s *Store) migrate() error {
 		`UPDATE api_keys SET limits = '{}' WHERE limits = ''`,
 	} {
 		if _, err := tx.Exec(initSQL); err != nil {
+			return err
+		}
+	}
+	// Before merge_argon, a key with an Argon limit counted Argon apart
+	// from Gemini; keep it so.
+	if hadMergeArgon == 0 {
+		if _, err := tx.Exec(`UPDATE api_keys SET merge_argon = 0 WHERE json_extract(limits, '$.argon') IS NOT NULL`); err != nil {
 			return err
 		}
 	}

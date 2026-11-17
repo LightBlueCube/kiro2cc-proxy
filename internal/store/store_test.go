@@ -203,6 +203,57 @@ func TestDeleteKey(t *testing.T) {
 	}
 }
 
+func TestKeyMergeArgon(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, k := range []Key{
+		{Hash: "h1", Name: "merged", MergeArgon: true, Limits: map[string]float64{"gemini": 5}, CreatedAt: time.Unix(1, 0)},
+		{Hash: "h2", Name: "apart", Limits: map[string]float64{"argon": 3}, CreatedAt: time.Unix(2, 0)},
+	} {
+		if err := st.AddKey(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys, err := st.Keys(ctx)
+	if err != nil || len(keys) != 2 || !keys[0].MergeArgon || keys[1].MergeArgon || keys[1].Limits["argon"] != 3 {
+		t.Fatalf("keys = %+v, %v", keys, err)
+	}
+	if err := st.UpdateKey(ctx, "h1", KeyUpdate{Limits: map[string]float64{"gemini": 5, "argon": 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateKey(ctx, "h1", KeyUpdate{MergeArgon: true, Limits: map[string]float64{"gemini": 5}}); err != nil {
+		t.Fatal(err)
+	}
+	keys, err = st.Keys(ctx)
+	if err != nil || !keys[0].MergeArgon || len(keys[0].Limits) != 1 {
+		t.Fatalf("after unmerging and merging h1: %+v, %v", keys, err)
+	}
+
+	// A database from before merge_argon: keys with an Argon limit keep
+	// counting Argon apart from Gemini, the others merge.
+	if _, err := st.db.Exec(`ALTER TABLE api_keys DROP COLUMN merge_argon`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.AddKey(ctx, Key{Hash: "h3", Name: "plain", MergeArgon: true, Limits: map[string]float64{"gemini": 1}, CreatedAt: time.Unix(3, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	keys, err = st.Keys(ctx)
+	if err != nil || len(keys) != 3 || !keys[0].MergeArgon || keys[1].MergeArgon || !keys[2].MergeArgon {
+		t.Fatalf("keys after the upgrade = %+v, %v", keys, err)
+	}
+}
+
 func TestAccountRouting(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "db"))
 	if err != nil {

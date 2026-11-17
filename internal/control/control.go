@@ -748,7 +748,7 @@ func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate)
 	token = keyPrefix + rand.Text()
 	hash = keyHash(token)
 	err = c.cfg.Store.AddKey(ctx, store.Key{
-		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), MaxWorkers: u.MaxWorkers, LimitTotal: u.LimitTotal, Limits: u.Limits, CreatedAt: time.Now(),
+		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), MaxWorkers: u.MaxWorkers, LimitTotal: u.LimitTotal, Limits: u.Limits, MergeArgon: u.MergeArgon, CreatedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrExists) {
 		return "", "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
@@ -854,6 +854,9 @@ func validateLimits(u store.KeyUpdate) error {
 	if u.LimitTotal != nil && *u.LimitTotal < 0 {
 		return &InputError{"the total limit cannot be negative"}
 	}
+	if _, own := u.Limits[pool.GroupArgon]; own && u.MergeArgon {
+		return &InputError{"a key that merges Argon & Carbon into Gemini has no limit of its own for them"}
+	}
 	for group, limit := range u.Limits {
 		if !slices.Contains(usage.Groups, group) {
 			return &InputError{fmt.Sprintf("unknown quota group %q (known: %s)", group, strings.Join(usage.Groups, ", "))}
@@ -906,7 +909,7 @@ func (c *Control) reloadKeys(ctx context.Context) error {
 	for _, k := range keys {
 		all[k.Hash] = k
 		if k.RevokedAt.IsZero() {
-			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits}
+			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits, MergeArgon: k.MergeArgon}
 		}
 	}
 	c.mu.Lock()

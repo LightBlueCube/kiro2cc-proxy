@@ -58,8 +58,11 @@ type keyView struct {
 	MaxWorkers *int     `json:"max_workers"`
 	// LimitTotal, Limits, and Spent are list-price USD; Limits and Spent
 	// are by quota group.
-	LimitTotal *float64                `json:"limit_total"`
-	Limits     map[string]float64      `json:"limits"`
+	LimitTotal *float64           `json:"limit_total"`
+	Limits     map[string]float64 `json:"limits"`
+	// MergeArgon counts Argon & Carbon spend in the Gemini limit; Limits
+	// then has no limit of their own.
+	MergeArgon bool                    `json:"merge_argon"`
 	Spent      map[string]float64      `json:"spent"`
 	Quota      map[string]keyQuotaView `json:"quota"`
 	Totals     keyTotalsView           `json:"totals"`
@@ -136,7 +139,7 @@ type keysView struct {
 func buildKeyView(k store.Key, spent map[string]float64, totals keyTotalsView, quota map[string]keyQuotaView) keyView {
 	v := keyView{
 		Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers,
-		LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spent, Quota: quota, Totals: totals, CreatedAt: k.CreatedAt,
+		LimitTotal: k.LimitTotal, Limits: k.Limits, MergeArgon: k.MergeArgon, Spent: spent, Quota: quota, Totals: totals, CreatedAt: k.CreatedAt,
 	}
 	if v.Models == nil {
 		v.Models = []string{}
@@ -228,10 +231,15 @@ type keyRequest struct {
 	MaxWorkers *int               `json:"max_workers"`
 	LimitTotal *float64           `json:"limit_total"`
 	Limits     map[string]float64 `json:"limits"`
+	// MergeArgon is on when absent.
+	MergeArgon *bool `json:"merge_argon"`
 }
 
 func (k keyRequest) update() store.KeyUpdate {
-	return store.KeyUpdate{Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits}
+	return store.KeyUpdate{
+		Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits,
+		MergeArgon: k.MergeArgon == nil || *k.MergeArgon,
+	}
 }
 
 func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
