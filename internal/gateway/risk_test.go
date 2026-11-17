@@ -145,7 +145,34 @@ func TestRiskControlSurvivesFlagFailure(t *testing.T) {
 	if r.err == nil || r.err.Kind != conv.ErrRiskControl {
 		t.Fatalf("risky request = %+v", r)
 	}
-	if h.flags.FlaggedUntil(sysprompt.Fingerprint(riskSystem)).IsZero() {
+	if until, _ := h.flags.Flagged(sysprompt.Fingerprint(riskSystem)); until.IsZero() {
 		t.Fatal("prompt not flagged in memory")
+	}
+}
+
+// A pinned prompt is refused after its flag ended, with a message that
+// names no end.
+func TestPinnedFlaggedPromptIsRefusedAfterItsFlagEnded(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	fingerprint := sysprompt.Fingerprint(riskSystem)
+	h.flags.mu.Lock()
+	h.flags.until[fingerprint] = time.Now().Add(-time.Hour)
+	h.flags.pinned[fingerprint] = true
+	h.flags.mu.Unlock()
+
+	r := h.complete(ctx, "alice", riskRequest(riskSystem, "hello"))
+	if r.err == nil || r.err.Kind != conv.ErrRiskControl || r.err.Message != pinnedMessage {
+		t.Fatalf("pinned prompt = %+v", r)
+	}
+	if n := len(h.requests("session/prompt")); n != 0 {
+		t.Fatalf("%d prompts reached agy", n)
+	}
+
+	h.flags.mu.Lock()
+	delete(h.flags.pinned, fingerprint)
+	h.flags.mu.Unlock()
+	if ok := h.complete(ctx, "alice", riskRequest(riskSystem, "hello")); ok.err != nil {
+		t.Fatalf("after unpinning = %+v", ok)
 	}
 }

@@ -82,11 +82,21 @@ type Settings struct {
 	CaptureUpstream bool `json:"capture_upstream"`
 	// CaptureResponseMiB is the most response MiB kept per captured call.
 	CaptureResponseMiB int `json:"capture_response_mib"`
+	// RiskControl turns on the handling of requests Google's risk control
+	// refuses: a request that draws 429s without a wait while other
+	// requests go through fails with 403, and its system prompt is
+	// flagged and refused. Off, such a request is retried like any 429
+	// and nothing is refused; the flagged prompts stay on record.
+	RiskControl bool `json:"risk_control"`
+	// FlaggedPromptRetentionDays is how long a flagged prompt that is not
+	// pinned stays on record after its last refusal or release.
+	FlaggedPromptRetentionDays int `json:"flagged_prompt_retention_days"`
 }
 
 // DefaultSettings are the settings before the admin changes any.
 func DefaultSettings() Settings {
 	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, CaptureResponseMiB: 4,
+		RiskControl: true, FlaggedPromptRetentionDays: 30,
 		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows),
 		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures)}
 }
@@ -113,6 +123,9 @@ func (s Settings) validate() error {
 	}
 	if s.RetentionDays < 1 || s.RetentionDays > 3650 {
 		return errors.New("retention_days must be between 1 and 3650")
+	}
+	if s.FlaggedPromptRetentionDays < 1 || s.FlaggedPromptRetentionDays > 3650 {
+		return errors.New("flagged_prompt_retention_days must be between 1 and 3650")
 	}
 	if s.CaptureResponseMiB < 1 || s.CaptureResponseMiB > maxCaptureResponseMiB {
 		return fmt.Errorf("capture_response_mib must be between 1 and %d", maxCaptureResponseMiB)
@@ -217,6 +230,9 @@ func decodeSettings(raw []byte, s *Settings) error {
 	if s.CaptureResponseMiB == 0 {
 		s.CaptureResponseMiB = defaults.CaptureResponseMiB
 	}
+	if s.FlaggedPromptRetentionDays == 0 {
+		s.FlaggedPromptRetentionDays = defaults.FlaggedPromptRetentionDays
+	}
 
 	for i, row := range stored.Prices {
 		if _, saved := row["cache_write"]; saved {
@@ -287,6 +303,7 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 	if err := c.reloadKeys(ctx); err != nil {
 		return nil, err
 	}
+	cfg.Flags.SetEnabled(cfg.Settings.RiskControl)
 	if err := c.applyCapture(ctx, cfg.Settings); err != nil {
 		return nil, err
 	}
@@ -322,6 +339,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
 	c.cfg.Gateway.SetHarnessPrompts(s.HarnessSignatures, s.RefuseHarnessPrompts)
+	c.cfg.Flags.SetEnabled(s.RiskControl)
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
 	if err := c.cfg.Gateway.SetContextWindows(s.ContextWindows, s.ContextCheck); err != nil {
@@ -425,6 +443,10 @@ func (c *Control) RunRetention(ctx context.Context) {
 		if err := c.cfg.Store.PruneUpstream(ctx); err != nil && ctx.Err() == nil {
 			c.log.Error("pruning captured upstream calls failed", "err", err)
 		}
+		flaggedDays := c.Settings().FlaggedPromptRetentionDays
+		if err := c.cfg.Store.PruneFlaggedPrompts(ctx, time.Now().AddDate(0, 0, -flaggedDays)); err != nil && ctx.Err() == nil {
+			c.log.Error("pruning flagged prompts failed", "err", err)
+		}
 		for _, account := range c.cfg.Pool.Accounts() {
 			removed, err := agy.PruneLogs(account.GeminiDir(), time.Now().Add(-agyLogRetention))
 			if err != nil {
@@ -507,7 +529,10 @@ func (c *Control) addToPool(name string, env []string, accountProxy string) (*po
 				failure.Reset = time.Now().Add(callErr.RetryAfter)
 			}
 		}
-		if !account.RecordModelCall(session, model, failure) {
+		// The call is recorded either way: the account's failure state
+		// does not depend on risk control.
+		risk := account.RecordModelCall(session, model, failure)
+		if !risk || !c.cfg.Flags.Enabled() {
 			return false
 		}
 		c.cfg.Gateway.StopRiskySession(account, session)

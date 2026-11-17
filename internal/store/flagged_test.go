@@ -81,3 +81,75 @@ func TestFlaggedPrompts(t *testing.T) {
 		t.Fatalf("list after prune = %+v, %v", list, err)
 	}
 }
+
+func fingerprints(t *testing.T, st *Store) []string {
+	t.Helper()
+	list, err := st.FlaggedPrompts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, p := range list {
+		out = append(out, p.Fingerprint)
+	}
+	return out
+}
+
+func TestPinnedFlaggedPromptsStayAndRestartRetentionWhenReleased(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	day := 24 * time.Hour
+	start := time.Now().Truncate(time.Millisecond)
+	for _, fp := range []string{"old", "pinned", "unpinned", "cancelled"} {
+		if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: fp, Text: fp, LastAt: start, Until: start.Add(day)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, fp := range []string{"pinned", "unpinned", "cancelled"} {
+		if err := st.PinFlaggedPrompt(ctx, fp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.PinFlaggedPrompt(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("pin of an unknown prompt: %v", err)
+	}
+
+	// Pinned stays active after its flag ran out.
+	later := start.Add(40 * day)
+	active, err := st.ActiveFlaggedPrompts(ctx, later)
+	if err != nil || len(active) != 3 || !active[0].Pinned {
+		t.Fatalf("active = %+v, %v", active, err)
+	}
+
+	// Releasing restarts the retention from then, not from the last
+	// refusal, which is 40 days back.
+	if err := st.UnpinFlaggedPrompt(ctx, "unpinned", later); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UnpinFlaggedPrompt(ctx, "unpinned", later); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second unpin: %v", err)
+	}
+	if err := st.CancelFlaggedPrompt(ctx, "cancelled", later); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CancelFlaggedPrompt(ctx, "cancelled", later); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second cancel: %v", err)
+	}
+	if err := st.PruneFlaggedPrompts(ctx, later.Add(-30*day)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fingerprints(t, st); len(got) != 3 || got[0] == "old" || got[1] == "old" || got[2] == "old" {
+		t.Fatalf("after the first prune: %v, want old gone", got)
+	}
+	if err := st.PruneFlaggedPrompts(ctx, later.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fingerprints(t, st); len(got) != 1 || got[0] != "pinned" {
+		t.Fatalf("after the second prune: %v, want only pinned", got)
+	}
+}

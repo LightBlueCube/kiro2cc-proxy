@@ -12,8 +12,10 @@ type flaggedPromptView struct {
 	FirstAt     time.Time `json:"first_at"`
 	LastAt      time.Time `json:"last_at"`
 	Until       time.Time `json:"until"`
-	// Active is whether the flag is still running.
+	// Active is whether the prompt is being refused: pinned, or its flag
+	// is still running.
 	Active  bool   `json:"active"`
+	Pinned  bool   `json:"pinned"`
 	Hits    int    `json:"hits"`
 	KeyHash string `json:"key_hash"`
 	KeyName string `json:"key_name"`
@@ -39,7 +41,7 @@ func (h *Handler) listFlaggedPrompts(w http.ResponseWriter, r *http.Request) {
 
 func buildFlaggedPromptView(p store.FlaggedPrompt, now time.Time) flaggedPromptView {
 	return flaggedPromptView{
-		Fingerprint: p.Fingerprint, FirstAt: p.FirstAt, LastAt: p.LastAt, Until: p.Until, Active: now.Before(p.Until),
+		Fingerprint: p.Fingerprint, FirstAt: p.FirstAt, LastAt: p.LastAt, Until: p.Until, Active: p.Pinned || now.Before(p.Until), Pinned: p.Pinned,
 		Hits: p.Hits, KeyHash: p.KeyHash, KeyName: p.KeyName, Account: p.Account, Model: p.Model,
 	}
 }
@@ -61,4 +63,24 @@ func (h *Handler) cancelFlaggedPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	h.audit(r, "flagged_prompt_cancelled", fingerprint)
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *Handler) pinFlaggedPrompt(pin bool) http.HandlerFunc {
+	action := "flagged_prompt_unpinned"
+	if pin {
+		action = "flagged_prompt_pinned"
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		fingerprint := r.PathValue("fingerprint")
+		apply := h.control.UnpinFlaggedPrompt
+		if pin {
+			apply = h.control.PinFlaggedPrompt
+		}
+		if err := apply(r.Context(), fingerprint); err != nil {
+			h.fail(w, "pin flagged prompt", err)
+			return
+		}
+		h.audit(r, action, fingerprint)
+		writeJSON(w, http.StatusOK, map[string]any{})
+	}
 }

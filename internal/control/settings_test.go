@@ -156,11 +156,26 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if !s.AllowDirect || s.SessionIdleClose != DefaultSettings().SessionIdleClose || s.TurnsPerAccount != DefaultSettings().TurnsPerAccount {
 		t.Fatalf("loaded settings = %+v", s)
 	}
+	// Risk control is on, keeping prompts for 30 days, unless stored otherwise.
+	if !s.RiskControl || s.FlaggedPromptRetentionDays != 30 {
+		t.Fatalf("risk control = %v with %d days, want on with 30", s.RiskControl, s.FlaggedPromptRetentionDays)
+	}
+	if err := st.SetSetting(ctx, settingsKey, map[string]any{"risk_control": false, "flagged_prompt_retention_days": 7}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = LoadSettings(ctx, st); err != nil || s.RiskControl || s.FlaggedPromptRetentionDays != 7 {
+		t.Fatalf("stored risk control = %+v, %v, want off with 7 days", s, err)
+	}
+	bad := DefaultSettings()
+	bad.FlaggedPromptRetentionDays = 0
+	if err := bad.validate(); err == nil {
+		t.Fatal("zero days of flagged prompt retention passed")
+	}
 	stored = nil
 	if _, err := st.Setting(ctx, settingsKey, &stored); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct"} {
+	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "risk_control", "flagged_prompt_retention_days"} {
 		if _, ok := stored[key]; !ok {
 			t.Errorf("persisted settings still missing key %q: %+v", key, stored)
 		}

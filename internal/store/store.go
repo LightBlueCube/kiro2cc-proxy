@@ -24,8 +24,11 @@ var migrations = []string{
 	// successful requests and tokens by model, and key_quota keeps each
 	// key's attributed weekly-quota shares by account and quota group.
 	// flagged_prompts keeps the system prompts Google's risk control
-	// refused, whole and for good: the admin cancels a flag by ending it,
-	// the row stays, and neither retention nor deleting the key touches it.
+	// refused, whole: the admin cancels a flag by ending it and the row
+	// stays, deleting the key does not touch it, and PruneFlaggedPrompts
+	// deletes it once it has been idle for the retention. A pinned prompt
+	// stays refused and is never deleted; released_at is when the admin
+	// last unpinned or cancelled it, which restarts its retention.
 	// upstream_calls keeps the Cloud Code generation calls agy made for a
 	// request (debug capture), gzipped and tied to the request by
 	// call_token; UpstreamRetention bounds them, not retention_days.
@@ -146,6 +149,8 @@ var migrations = []string{
 		first_at      INTEGER NOT NULL DEFAULT 0,
 		last_at       INTEGER NOT NULL DEFAULT 0,
 		flagged_until INTEGER NOT NULL DEFAULT 0,
+		pinned        INTEGER NOT NULL DEFAULT 0,
+		released_at   INTEGER NOT NULL DEFAULT 0,
 		hits          INTEGER NOT NULL DEFAULT 0,
 		key_hash      TEXT NOT NULL DEFAULT '',
 		key_name      TEXT NOT NULL DEFAULT '',

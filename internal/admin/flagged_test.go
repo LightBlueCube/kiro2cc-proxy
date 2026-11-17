@@ -54,7 +54,7 @@ func TestFlaggedPromptsAdminAPI(t *testing.T) {
 	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/cancel", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("cancel = %d %s", r.status, r.raw)
 	}
-	if time.Now().Before(e.flags.FlaggedUntil("abc123")) {
+	if until, _ := e.flags.Flagged("abc123"); time.Now().Before(until) {
 		t.Fatal("prompt still flagged after the cancel")
 	}
 	r = c.do("GET", "/admin/api/flagged-prompts", nil, nil)
@@ -66,17 +66,42 @@ func TestFlaggedPromptsAdminAPI(t *testing.T) {
 		t.Fatalf("second cancel = %d", r.status)
 	}
 
-	entries, err := e.st.AuditLog(ctx, 0, 10)
+	// An ended prompt can be pinned back into refusal, and unpinned.
+	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/pin", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("pin = %d %s", r.status, r.raw)
+	}
+	if _, pinned := e.flags.Flagged("abc123"); !pinned {
+		t.Fatal("prompt not refused after the pin")
+	}
+	r = c.do("GET", "/admin/api/flagged-prompts", nil, nil)
+	prompts, _ = r.body["prompts"].([]any)
+	if got := prompts[0].(map[string]any); got["active"] != true || got["pinned"] != true {
+		t.Fatalf("list after pin = %s", r.raw)
+	}
+	if r := c.do("POST", "/admin/api/flagged-prompts/nope/pin", nil, nil); r.status != http.StatusNotFound {
+		t.Fatalf("pin of an unknown prompt = %d", r.status)
+	}
+	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/unpin", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("unpin = %d %s", r.status, r.raw)
+	}
+	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/unpin", nil, nil); r.status != http.StatusNotFound {
+		t.Fatalf("second unpin = %d", r.status)
+	}
+	if _, pinned := e.flags.Flagged("abc123"); pinned {
+		t.Fatal("prompt pinned after the unpin")
+	}
+
+	entries, err := e.st.AuditLog(ctx, 0, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelled := 0
+	counts := map[string]int{}
 	for _, entry := range entries {
-		if entry.Action == "flagged_prompt_cancelled" && entry.Detail == "abc123" {
-			cancelled++
+		if entry.Detail == "abc123" {
+			counts[entry.Action]++
 		}
 	}
-	if cancelled != 1 {
-		t.Fatalf("audit entries for the cancel = %d, want 1", cancelled)
+	if counts["flagged_prompt_cancelled"] != 1 || counts["flagged_prompt_pinned"] != 1 || counts["flagged_prompt_unpinned"] != 1 {
+		t.Fatalf("audit entries = %v, want one each of cancelled, pinned, unpinned", counts)
 	}
 }

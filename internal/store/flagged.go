@@ -17,6 +17,9 @@ type FlaggedPrompt struct {
 	// FirstAt and LastAt are when it was first and last refused; Until is
 	// when its flag ends.
 	FirstAt, LastAt, Until time.Time
+	// Pinned keeps the prompt refused past Until, and out of
+	// PruneFlaggedPrompts, until the admin unpins or cancels it.
+	Pinned bool
 	// Hits counts the times it was refused.
 	Hits int
 	// KeyHash, KeyName, Account, and Model are of its latest refusal.
@@ -41,15 +44,15 @@ func (s *Store) FlagPrompt(ctx context.Context, p FlaggedPrompt) error {
 // FlaggedPrompts lists every flagged prompt without its text, the latest
 // refused first.
 func (s *Store) FlaggedPrompts(ctx context.Context) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, hits, key_hash, key_name, account, model
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, model
 		FROM flagged_prompts ORDER BY last_at DESC, fingerprint`)
 }
 
-// ActiveFlaggedPrompts lists the prompts whose flag has not ended at now,
-// without their text.
+// ActiveFlaggedPrompts lists the prompts that are pinned or whose flag has
+// not ended at now, without their text.
 func (s *Store) ActiveFlaggedPrompts(ctx context.Context, now time.Time) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, hits, key_hash, key_name, account, model
-		FROM flagged_prompts WHERE flagged_until > ? ORDER BY last_at DESC, fingerprint`, now.UnixMilli())
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, model
+		FROM flagged_prompts WHERE pinned = 1 OR flagged_until > ? ORDER BY last_at DESC, fingerprint`, now.UnixMilli())
 }
 
 func (s *Store) queryFlagged(ctx context.Context, query string, args ...any) ([]FlaggedPrompt, error) {
@@ -62,7 +65,7 @@ func (s *Store) queryFlagged(ctx context.Context, query string, args ...any) ([]
 	for rows.Next() {
 		var p FlaggedPrompt
 		var first, last, until int64
-		if err := rows.Scan(&p.Fingerprint, &first, &last, &until, &p.Hits, &p.KeyHash, &p.KeyName, &p.Account, &p.Model); err != nil {
+		if err := rows.Scan(&p.Fingerprint, &first, &last, &until, &p.Pinned, &p.Hits, &p.KeyHash, &p.KeyName, &p.Account, &p.Model); err != nil {
 			return nil, err
 		}
 		p.FirstAt, p.LastAt, p.Until = time.UnixMilli(first), time.UnixMilli(last), time.UnixMilli(until)
@@ -81,9 +84,33 @@ func (s *Store) FlaggedPromptText(ctx context.Context, fingerprint string) (stri
 	return text, err
 }
 
-// CancelFlaggedPrompt ends the flag of a prompt at now; the row stays. It
-// returns ErrNotFound when the prompt has no flag running at now.
+// CancelFlaggedPrompt ends the flag of a prompt at now and unpins it; the
+// row stays. It returns ErrNotFound when the prompt is neither pinned nor
+// flagged at now.
 func (s *Store) CancelFlaggedPrompt(ctx context.Context, fingerprint string, now time.Time) error {
-	return affected(s.db.ExecContext(ctx, `UPDATE flagged_prompts SET flagged_until = ? WHERE fingerprint = ? AND flagged_until > ?`,
-		now.UnixMilli(), fingerprint, now.UnixMilli()))
+	return affected(s.db.ExecContext(ctx, `UPDATE flagged_prompts
+		SET flagged_until = ?, pinned = 0, released_at = CASE WHEN pinned = 1 THEN ? ELSE released_at END
+		WHERE fingerprint = ? AND (pinned = 1 OR flagged_until > ?)`,
+		now.UnixMilli(), now.UnixMilli(), fingerprint, now.UnixMilli()))
+}
+
+// PinFlaggedPrompt keeps a prompt refused until it is unpinned. It returns
+// ErrNotFound when there is no such prompt.
+func (s *Store) PinFlaggedPrompt(ctx context.Context, fingerprint string) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE flagged_prompts SET pinned = 1 WHERE fingerprint = ?`, fingerprint))
+}
+
+// UnpinFlaggedPrompt lets a pinned prompt's flag run out, and restarts its
+// retention at now. It returns ErrNotFound when the prompt is not pinned.
+func (s *Store) UnpinFlaggedPrompt(ctx context.Context, fingerprint string, now time.Time) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE flagged_prompts SET pinned = 0, released_at = ? WHERE fingerprint = ? AND pinned = 1`,
+		now.UnixMilli(), fingerprint))
+}
+
+// PruneFlaggedPrompts deletes the unpinned prompts that were neither
+// refused nor released since before.
+func (s *Store) PruneFlaggedPrompts(ctx context.Context, before time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM flagged_prompts WHERE pinned = 0 AND last_at < ? AND released_at < ?`,
+		before.UnixMilli(), before.UnixMilli())
+	return err
 }

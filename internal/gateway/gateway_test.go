@@ -52,14 +52,15 @@ type harness struct {
 type fakeFlags struct {
 	mu      sync.Mutex
 	until   map[string]time.Time
+	pinned  map[string]bool
 	flagged []FlaggedPrompt
 	err     error
 }
 
-func (f *fakeFlags) FlaggedUntil(fingerprint string) time.Time {
+func (f *fakeFlags) Flagged(fingerprint string) (time.Time, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.until[fingerprint]
+	return f.until[fingerprint], f.pinned[fingerprint]
 }
 
 func (f *fakeFlags) Flag(ctx context.Context, p FlaggedPrompt) error {
@@ -107,7 +108,7 @@ func newHarness(t *testing.T, accounts int, extraEnv map[int][]string) *harness 
 	}
 	records := &recordLog{}
 	budget := &fakeBudget{spent: map[string]map[string]float64{}, unpriced: map[string]bool{}}
-	flags := &fakeFlags{until: map[string]time.Time{}}
+	flags := &fakeFlags{until: map[string]time.Time{}, pinned: map[string]bool{}}
 	gw, err = New(Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: records, Budget: budget, Flags: flags, Log: logger})
 	if err != nil {
 		t.Fatal(err)

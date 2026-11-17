@@ -592,10 +592,22 @@ views.settings = container => {
       toast(t("flagged.cancelled"));
       await loadFlagged();
     }, button);
+    // The list is drawn again afterwards, so a failed change shows the
+    // real state.
+    const setPinned = (p, pinned, box) => guarded(async () => {
+      try { await api("POST", `flagged-prompts/${p.fingerprint}/${pinned ? "pin" : "unpin"}`); }
+      finally { await loadFlagged(); }
+    }, box);
+    const flaggedUntil = p => {
+      if (p.pinned) return h("span", {}, t("flagged.kept"));
+      return p.active ? fmt.time(p.until) : h("span", { class: "muted" }, t("flagged.ended"));
+    };
     flagged.replaceChildren(h("h2", {}, t("flagged.title")), h("p", { class: "muted" }, t("flagged.note")), table([
       { title: t("flagged.prompt"), cell: flaggedPromptCell },
       { title: t("flagged.last"), cell: p => fmt.time(p.last_at) },
-      { title: t("flagged.until"), cell: p => p.active ? fmt.time(p.until) : h("span", { class: "muted" }, t("flagged.ended")) },
+      { title: t("flagged.until"), cell: flaggedUntil },
+      { title: t("flagged.keep"), cell: p => h("input", { type: "checkbox", checked: p.pinned, title: t("flagged.keep.hint"),
+        onchange: e => setPinned(p, e.target.checked, e.target) }) },
       { title: t("flagged.hits"), num: true, cell: p => String(p.hits) },
       { title: t("flagged.by"), cell: p => stack(keyName(p.key_name, p.key_hash), joined(p.account, p.model)) },
       { title: "", actions: true, cell: p => p.active ? h("button", { class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null },
@@ -616,6 +628,8 @@ views.settings = container => {
     const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
     const capture = h("input", { type: "checkbox", checked: s.capture_upstream });
     const captureLimit = h("input", { type: "number", min: 1, max: 256, value: s.capture_response_mib });
+    const riskControl = h("input", { type: "checkbox", checked: s.risk_control });
+    const flaggedRetention = h("input", { type: "number", min: 1, max: 3650, value: s.flagged_prompt_retention_days });
     const refuseHarness = h("input", { type: "checkbox", checked: s.refuse_harness_prompts });
     // The harness signatures are edited as JSON; ↺ puts back the built-in list.
     const signaturesJSON = list => JSON.stringify(list, null, 2);
@@ -654,6 +668,7 @@ views.settings = container => {
           refuse_harness_prompts: refuseHarness.checked, harness_signatures: readSignatures(),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked,
           capture_upstream: capture.checked, capture_response_mib: Number(captureLimit.value),
+          risk_control: riskControl.checked, flagged_prompt_retention_days: Number(flaggedRetention.value),
         });
         toast(t("common.saved"));
         await loadGeneral();
@@ -677,6 +692,11 @@ views.settings = container => {
         h("span", { class: "with-reset" }, h("label", { class: "check" }, capture, t("settings.capture.enable")), resetButton(capture, d.capture_upstream)),
         h("label", {}, t("settings.capture.limit"), withReset(captureLimit, d.capture_response_mib))),
       h("p", { class: "muted" }, t("settings.capture.note")),
+      h("h3", {}, t("settings.risk")),
+      h("div", { class: "row" },
+        h("span", { class: "with-reset" }, h("label", { class: "check" }, riskControl, t("settings.risk.enable")), resetButton(riskControl, d.risk_control)),
+        h("label", {}, t("settings.risk.retention"), withReset(flaggedRetention, d.flagged_prompt_retention_days))),
+      h("p", { class: "muted" }, t("settings.risk.note")),
       h("h3", {}, t("settings.system_prompts")),
       h("span", { class: "with-reset" }, h("label", { class: "check" }, refuseHarness, t("settings.refuse_harness")), resetButton(refuseHarness, d.refuse_harness_prompts)),
       h("p", { class: "muted" }, t("settings.refuse_harness.note")),

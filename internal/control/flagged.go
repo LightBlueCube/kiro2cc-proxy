@@ -17,8 +17,20 @@ func (c *Control) FlaggedPromptText(ctx context.Context, fingerprint string) (st
 	return c.cfg.Flags.Text(ctx, fingerprint)
 }
 
-// CancelFlaggedPrompt ends a system prompt's flag now; requests with it
-// go through again, and a new refusal flags it afresh.
+// CancelFlaggedPrompt ends a system prompt's flag now and unpins it;
+// requests with it go through again, and a new refusal flags it afresh.
 func (c *Control) CancelFlaggedPrompt(ctx context.Context, fingerprint string) error {
 	return c.cfg.Flags.Cancel(ctx, fingerprint)
+}
+
+// PinFlaggedPrompt keeps a system prompt refused, and on record, until it
+// is unpinned.
+func (c *Control) PinFlaggedPrompt(ctx context.Context, fingerprint string) error {
+	return c.cfg.Flags.Pin(ctx, fingerprint)
+}
+
+// UnpinFlaggedPrompt lets a pinned prompt's flag run out and restarts its
+// retention.
+func (c *Control) UnpinFlaggedPrompt(ctx context.Context, fingerprint string) error {
+	return c.cfg.Flags.Unpin(ctx, fingerprint)
 }

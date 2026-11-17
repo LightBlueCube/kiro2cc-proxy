@@ -16,7 +16,9 @@ import (
 // apart). Such a request is not retried: another account would only be
 // refused too, and each try spreads the refusal. Its system prompt is
 // flagged for flagDuration instead, and requests carrying it are refused
-// here until the flag ends or the admin cancels it.
+// here until the flag ends or the admin cancels it; a prompt the admin
+// pinned stays refused after the flag ends. The control layer turns the
+// whole of this off.
 
 // flagDuration is how long a refused system prompt stays flagged.
 const flagDuration = 24 * time.Hour
@@ -26,10 +28,12 @@ const flagTimeout = 5 * time.Second
 
 // PromptFlags remembers the system prompts Google's risk control refused.
 type PromptFlags interface {
-	// FlaggedUntil is when the flag on the system prompt with this
-	// fingerprint (sysprompt.Fingerprint) ends; the zero time when the
-	// prompt is not flagged.
-	FlaggedUntil(fingerprint string) time.Time
+	// Flagged is when the flag on the system prompt with this fingerprint
+	// (sysprompt.Fingerprint) ends, the zero time when the prompt is not
+	// flagged, and whether the admin pinned it: a pinned prompt is
+	// refused after its flag ends too. It reports nothing while risk
+	// control is off.
+	Flagged(fingerprint string) (until time.Time, pinned bool)
 	// Flag flags a system prompt, replacing an earlier flag of it.
 	Flag(ctx context.Context, prompt FlaggedPrompt) error
 }
@@ -98,12 +102,17 @@ func (g *Gateway) checkFlaggedPrompt(t *transcript) *conv.Error {
 	if g.flags == nil || t.system == "" {
 		return nil
 	}
-	until := g.flags.FlaggedUntil(sysprompt.Fingerprint(t.system))
+	until, pinned := g.flags.Flagged(sysprompt.Fingerprint(t.system))
+	if pinned {
+		return &conv.Error{Kind: conv.ErrRiskControl, Message: pinnedMessage}
+	}
 	if !time.Now().Before(until) {
 		return nil
 	}
 	return &conv.Error{Kind: conv.ErrRiskControl, Message: flaggedMessage(until)}
 }
+
+const pinnedMessage = "request rejected: Google's risk control refused this system prompt, and the admin keeps it refused. replace it with your own"
 
 func flaggedMessage(until time.Time) string {
 	return fmt.Sprintf("request rejected: Google's risk control refused this system prompt, and it stays refused until %s. replace it with your own",
