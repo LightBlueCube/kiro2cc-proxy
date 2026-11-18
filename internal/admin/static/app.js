@@ -837,7 +837,7 @@ views.accounts = container => {
   const cardEntries = new Map(); // account id → {node, body, panels, actions}
   const signins = new Map(); // account id → {code, node}
   const imports = new Map(); // account id → {token, node}
-  const routings = new Map(); // account id → panel node
+  const routings = new Map(); // account id → {node, sync}
 
   const setChildren = (node, ...children) => node.replaceChildren(...h("div", {}, ...children).childNodes);
 
@@ -967,11 +967,40 @@ views.accounts = container => {
     return state;
   }
 
+  function accountModelPicker(offered, selected) {
+    const boxes = [];
+    const list = h("div", { class: "picker" });
+    const add = (id, checked) => {
+      const box = h("input", { type: "checkbox", value: id, checked });
+      boxes.push(box);
+      list.append(h("label", { class: "check" }, box, h("span", { class: "mono" }, id)));
+    };
+    if (offered) {
+      for (const m of offered) add(m.id, selected.includes(m.id));
+      return {
+        node: boxes.length ? list : h("p", { class: "muted" }, "—"),
+        read: () => boxes.filter(b => b.checked).map(b => b.value),
+      };
+    }
+    for (const id of selected) add(id, true);
+    return {
+      node: h("div", {}, ...(boxes.length ? [list] : []), h("p", { class: "muted" }, t("accounts.models.unknown"))),
+      read: () => boxes.filter(b => b.checked).map(b => b.value),
+    };
+  }
+
   function makeRoutingPanel(a) {
     const accountID = a.id;
     const priority = h("input", { type: "number", step: 1, value: String(a.priority), style: "width:90px" });
-    const choices = [...new Set([...(a.models || []).map(m => m.id), ...catalog])];
-    const models = modelPicker(choices, a.allowed_models);
+    let known = Boolean(a.models);
+    let models = accountModelPicker(a.models, a.allowed_models);
+    const modelsBox = h("div", {}, models.node);
+    const sync = next => {
+      if (known || !next.models) return;
+      known = true;
+      models = accountModelPicker(next.models, models.read());
+      modelsBox.replaceChildren(models.node);
+    };
     const save = event => {
       event.preventDefault();
       runCardAction(accountID, event.submitter, async snap => {
@@ -984,14 +1013,15 @@ views.accounts = container => {
         await load(snap);
       });
     };
-    return h("form", { class: "card", onsubmit: save },
+    const node = h("form", { class: "card", onsubmit: save },
       h("h3", {}, t("accounts.routing.title")),
       h("div", { class: "row" },
         h("label", { title: t("accounts.routing.priority.hint") }, t("accounts.routing.priority"), priority)),
-      h("div", { class: "field" }, t("accounts.routing.models"), models.node),
+      h("div", { class: "field" }, t("accounts.routing.models"), modelsBox),
       h("div", { class: "row", style: "margin-top:8px" },
         h("button", { type: "submit", class: "primary" }, t("common.save")),
         h("button", { type: "button", onclick: () => { routings.delete(accountID); refreshCard(accountID); } }, t("common.cancel"))));
+    return { node, sync };
   }
 
   // verifyNotice tells what to do about Google's verification request.
@@ -1065,8 +1095,10 @@ views.accounts = container => {
       poolUsageLine(poolUsage(g))));
   }
 
-  function syncCardPanels(entry, accountID) {
-    const activePanels = [signins.get(accountID)?.node, imports.get(accountID)?.node, routings.get(accountID)].filter(Boolean);
+  function syncCardPanels(entry, a) {
+    const routing = routings.get(a.id);
+    if (routing) routing.sync(a);
+    const activePanels = [signins.get(a.id)?.node, imports.get(a.id)?.node, routing?.node].filter(Boolean);
     const unchanged = entry.panels.children.length === activePanels.length
       && activePanels.every((n, i) => entry.panels.children[i] === n);
     if (!unchanged) entry.panels.replaceChildren(...activePanels);
@@ -1085,7 +1117,7 @@ views.accounts = container => {
   }
 
   function updateCardControls(entry, a) {
-    syncCardPanels(entry, a.id);
+    syncCardPanels(entry, a);
     const enc = encodeURIComponent(a.id);
     const act = (label, action, cls) => h("button", {
       class: cls || "",
@@ -1105,6 +1137,9 @@ views.accounts = container => {
 
   function updateCardEntry(entry, a) {
     const route = a.route || t("accounts.route_unknown");
+    const routedModels = a.models
+      ? a.allowed_models.filter(id => a.models.some(m => m.id === id))
+      : a.allowed_models;
     setChildren(entry.body,
       h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), status(a)),
       a.user ? h("p", {}, `${a.user.email} · ${a.user.tier || a.user.plan}`) : null,
@@ -1122,7 +1157,7 @@ views.accounts = container => {
         a.proxy ? t("accounts.traffic", { route }) : t("accounts.traffic.no_own_proxy", { route }),
         a.env_names.length ? t("accounts.env_names", { names: a.env_names.join(", ") }) : "")),
       h("p", {}, a.models ? t("accounts.models", { models: a.models.map(m => m.id).join(", ") || "—" }) : h("span", { class: "muted" }, t("accounts.models.unknown"))),
-      a.allowed_models.length ? h("p", {}, t("accounts.allowed_models", { models: a.allowed_models.join(", ") })) : null,
+      a.allowed_models.length ? h("p", {}, t("accounts.allowed_models", { models: routedModels.join(", ") || "—" })) : null,
       quota(a));
     updateCardControls(entry, a);
   }
@@ -1335,11 +1370,8 @@ views.accounts = container => {
   }
 
   let accounts = [];
-  let catalog = [];
   async function load(priorSnap) {
-    const [list, offered] = await Promise.all([api("GET", "accounts"), api("GET", "models")]);
-    accounts = list;
-    catalog = offered.map(m => m.id);
+    accounts = await api("GET", "accounts");
     for (const a of accounts) if (a.login_pending === false) signins.delete(a.id);
     const snap = priorSnap && priorSnap.manualAtStart === manualScrolls
       ? priorSnap

@@ -273,6 +273,15 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 	var lastErr error
 	var lacking []string
 	for {
+		for _, a := range g.pool.Accounts() {
+			if r.exclude[a.ID()] {
+				continue
+			}
+			if _, _, ok := slugOn(a, r); !ok {
+				r.exclude[a.ID()] = true
+				lacking = append(lacking, a.Name())
+			}
+		}
 		account, err := g.pickAccount(r)
 		if err != nil {
 			// Catalogs that sessions just reported may show no account
@@ -294,13 +303,10 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			}
 			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}}
 		}
-		skip := func() {
+		if _, _, ok := slugOn(account, r); !ok {
 			account.Release()
 			r.exclude[account.ID()] = true
 			lacking = append(lacking, account.Name())
-		}
-		if _, _, ok := slugOn(account, r); !ok {
-			skip()
 			continue
 		}
 		at, err := g.openSession(ctx, r, account)

@@ -395,3 +395,26 @@ func TestExpirePendingQuota(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestRefreshProbesCatalogWhenLanguageServerAlreadyRuns(t *testing.T) {
+	e := newMonitorEnv(t)
+	ctx := context.Background()
+	account := e.p.Account("a")
+	if _, err := e.monitor.Refresh(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if len(account.Models()) == 0 {
+		t.Fatal("initial Refresh did not record models")
+	}
+
+	// Simulate a language server already running while Models() is still nil
+	// (e.g. a persisted session reopened via session/resume before any
+	// session/new): Refresh must still probe and populate Models().
+	account.SetModels(nil)
+	if _, err := e.monitor.Refresh(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if len(account.Models()) == 0 {
+		t.Fatal("Refresh with running LS left Models() nil")
+	}
+}

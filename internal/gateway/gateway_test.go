@@ -2185,9 +2185,15 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 		t.Fatalf("disallowed warm = %s %s, want acct0 replay", got.Account, got.Mode)
 	}
 
-	// A model disallowed on every account is not offered.
+	// A model disallowed on every account is not offered, even when an
+	// out-of-rotation account has not reported its catalog yet.
 	acct0.SetRouting(0, []string{"gemini-3.8-flash"})
 	acct1.SetRouting(5, []string{"gemini-3.8-flash"})
+	pausedAcct, err := h.p.Add(pool.AccountConfig{ID: "acct-paused", Name: "acct-paused", Home: filepath.Join(t.TempDir(), "paused")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pausedAcct.SetPaused(true)
 	for _, m := range h.gw.Models() {
 		if m.ID == "claude-opus-5-5" {
 			t.Fatalf("disallowed model still in Models(): %+v", h.gw.Models())
@@ -2196,6 +2202,7 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	if r := h.complete(ctx, alice, conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("no")}}); r.err == nil || r.err.Kind != conv.ErrUnknownModel {
 		t.Fatalf("disallowed on all accounts = %+v, want ErrUnknownModel", r)
 	}
+	h.p.Remove("acct-paused")
 
 	// Only acct1 allows claude-opus-5-5, and its claude-gpt quota is cooling
 	// down: no account can serve the model, so the error is ErrUnknownModel.
@@ -2205,6 +2212,54 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	if r.err == nil || r.err.Kind != conv.ErrUnknownModel ||
 		strings.Contains(r.err.Message, "acct0") || strings.Contains(r.err.Message, "acct1") || strings.Contains(r.err.Message, "cooling down") {
 		t.Fatalf("exhausted on only offering account = %+v, want ErrUnknownModel without pool details", r)
+	}
+}
+
+func TestUnsupportedAccountSlotUntouched(t *testing.T) {
+	h := newHarness(t, 2, map[int][]string{
+		0: {"FAKE_AGY_MODELS=gemini-3.8-flash-low"},
+		1: {"FAKE_AGY_MODELS=gemini-3.8-flash-low,claude-opus-5-5-high"},
+	})
+	h.p.SetTurnsPerAccount(1)
+	ctx := context.Background()
+	acct0, acct1 := h.p.Account("acct0"), h.p.Account("acct1")
+	acct0.SetRouting(10, nil)
+	acct1.SetRouting(0, nil)
+
+	// Populate both accounts' catalogs.
+	if r := h.complete(ctx, "seed0", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("s0")}}); r.err != nil {
+		t.Fatalf("seed0 = %+v", r.err)
+	}
+	if r := h.complete(ctx, "seed1", conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("s1")}}); r.err != nil {
+		t.Fatalf("seed1 = %+v", r.err)
+	}
+
+	// Hold acct1's single slot busy on a parked tool call; a concurrent
+	// claude-opus-5-5 request must fail without ever claiming acct0's slot,
+	// leaving acct0 free to serve gemini-3.8-flash throughout.
+	tools := []conv.ToolSpec{readTool}
+	parked := h.complete(ctx, "holder", conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user(`@tool read {}`)}, Tools: tools})
+	if parked.err != nil || parked.finish != conv.FinishToolCalls {
+		t.Fatalf("parked = %+v", parked)
+	}
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			_ = h.complete(ctx, fmt.Sprintf("c-%d", i), conv.Request{Model: "claude-opus-5-5", Messages: []conv.Message{user("busy")}})
+		})
+	}
+	if r := h.complete(ctx, "flash-user", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("ok")}}); r.err != nil {
+		t.Fatalf("flash while claude busy = %+v", r.err)
+	}
+	wg.Wait()
+	recs := h.records.all(t, 12)
+	for _, rec := range recs {
+		if rec.Model == "claude-opus-5-5" && rec.Account == "acct0" {
+			t.Fatalf("unsupported model routed to acct0: %+v", rec)
+		}
+		if rec.KeyName == "flash-user" && rec.Account != "acct0" {
+			t.Fatalf("flash-user routed to %s instead of high-priority acct0", rec.Account)
+		}
 	}
 }
 

@@ -45,6 +45,11 @@ var fallbackModels = []modelEntry{
 // Models lists what the accounts offer.
 func (g *Gateway) Models() []conv.ModelInfo { return modelInfos(g.offered()) }
 
+func inRotation(account *pool.Account) bool {
+	st := account.Status()
+	return !st.Paused && st.Disabled == "" && st.Blocked == "" && !st.Verify
+}
+
 // offered merges the catalogs agy reported for the accounts, a model's
 // tiers being those of any account that allows the model; before any
 // report it is the fallback list filtered by what the accounts allow.
@@ -67,19 +72,24 @@ func (g *Gateway) offered() []modelEntry {
 			}
 		}
 	}
-	if !reported {
-		catalog = fallbackModels
-		if len(accounts) == 0 {
-			return catalog
-		}
+	if !reported && len(accounts) == 0 {
+		return fallbackModels
 	}
 	if unreported {
-		for _, e := range catalog {
+		unreportedCatalog := slices.Clone(catalog)
+		for _, e := range fallbackModels {
+			mergeEntry(&unreportedCatalog, e)
+		}
+		for _, e := range unreportedCatalog {
 			for _, account := range accounts {
-				if account.Models() == nil && account.AllowsModel(e.id) {
-					mergeEntry(&allowed, e)
-					break
+				if account.Models() != nil || !account.AllowsModel(e.id) {
+					continue
 				}
+				if reported && !inRotation(account) {
+					continue
+				}
+				mergeEntry(&allowed, e)
+				break
 			}
 		}
 	}
@@ -120,9 +130,7 @@ func (g *Gateway) refreshUnreported(ctx context.Context) {
 	}
 	var waits []chan struct{}
 	for _, account := range g.pool.Accounts() {
-		st := account.Status()
-		outOfRotation := st.Paused || st.Disabled != "" || st.Blocked != "" || st.Verify
-		if outOfRotation || account.Models() != nil {
+		if !inRotation(account) || account.Models() != nil {
 			continue
 		}
 		if done := g.startRefresh(account); done != nil {

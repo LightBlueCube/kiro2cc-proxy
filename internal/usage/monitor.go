@@ -213,7 +213,7 @@ func (m *Monitor) tryRefresh(ctx context.Context, account *pool.Account) (Accoun
 	var models []agy.ModelInfo
 	if err == nil {
 		spec := agy.SessionSpec{Cwd: account.Workspace()}
-		if account.Status().Disabled != "" {
+		if account.Status().Disabled != "" || account.Models() == nil {
 			probe, models, err = proc.ProbeLanguageServer(ctx, spec)
 		} else {
 			probe, models, err = proc.EnsureLanguageServer(ctx, spec)
