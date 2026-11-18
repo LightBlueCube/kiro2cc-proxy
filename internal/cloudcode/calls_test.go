@@ -52,7 +52,8 @@ func generationRequest(t *testing.T, requestID string) (*http.Request, []byte) {
 
 func TestGenerationCallsAreTaggedWithTheirSession(t *testing.T) {
 	r, body := generationRequest(t, "agent/5ba84978-7516-4183-bc0e-5075438a7364/1794581074285/a5cb3a84-1b53-40fd-b04d-e6f1f0682a08/1")
-	if got := callOf(r); got != (call{session: "5ba84978-7516-4183-bc0e-5075438a7364", model: "claude-sonnet-4-6"}) {
+	got := callOf(r)
+	if got.session != "5ba84978-7516-4183-bc0e-5075438a7364" || got.model != "claude-sonnet-4-6" || got.capture != nil || !bytes.Equal(got.request, body) {
 		t.Fatalf("call = %+v", got)
 	}
 	if sent, _ := io.ReadAll(r.Body); !bytes.Equal(sent, body) {
@@ -66,7 +67,7 @@ func TestGenerationCallsAreTaggedWithTheirSession(t *testing.T) {
 }
 
 func TestWatchModelCallReportsGooglesError(t *testing.T) {
-	r, _ := generationRequest(t, "agent/S1/1/x/1")
+	r, reqBody := generationRequest(t, "agent/S1/1/x/1")
 	var reports []reportedCall
 	ap := newAccountProxy(func(session, model string, err *CallError) bool {
 		if model != "claude-sonnet-4-6" {
@@ -100,26 +101,39 @@ func TestWatchModelCallReportsGooglesError(t *testing.T) {
 	noStatus.Request = r
 	ap.watchModelCall(noStatus)
 
-	hdrQuota := response("", http.StatusTooManyRequests, []byte(`{"error": {"code": 429, "message": "Slow down", "status": "RESOURCE_EXHAUSTED"}}`), "")
+	hdrQuotaBytes := []byte(`{"error": {"code": 429, "message": "Slow down", "status": "RESOURCE_EXHAUSTED"}}`)
+	hdrQuota := response("", http.StatusTooManyRequests, hdrQuotaBytes, "")
 	hdrQuota.Header.Set("Retry-After", "12")
 	hdrQuota.Request = r
 	ap.watchModelCall(hdrQuota)
 
 	want := []reportedCall{
 		{"S1", &CallError{Code: 429, RetryAfter: 502219791447777 * time.Nanosecond,
-			Message: "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 139h30m19s."}},
-		{"S1", &CallError{Code: 429, Message: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 0s."}},
-		{"S1", &CallError{Code: 503, Message: "HTTP 503 Service Unavailable"}},
+			Message:  "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 139h30m19s.",
+			Request:  reqBody,
+			Response: []byte(quotaRefusal)}},
+		{"S1", &CallError{Code: 429, Message: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 0s.",
+			Request: reqBody, Response: []byte(capacityRefusal)}},
+		{"S1", &CallError{Code: 503, Message: "HTTP 503 Service Unavailable",
+			Request: reqBody, Response: []byte("<html>busy</html>")}},
 		{"S1", nil},
-		{"S1", &CallError{Code: 400, Message: "HTTP 400: Invalid image"}},
-		{"S1", &CallError{Code: 429, RetryAfter: 12 * time.Second, Message: "RESOURCE_EXHAUSTED (code 429): Slow down"}},
+		{"S1", &CallError{Code: 400, Message: "HTTP 400: Invalid image",
+			Request: reqBody, Response: []byte(`{"error": {"code": 400, "message": "Invalid image"}}`)}},
+		{"S1", &CallError{Code: 429, RetryAfter: 12 * time.Second, Message: "RESOURCE_EXHAUSTED (code 429): Slow down",
+			Request: reqBody, Response: hdrQuotaBytes}},
 	}
 	if len(reports) != len(want) {
 		t.Fatalf("reports = %+v", reports)
 	}
 	for i, got := range reports {
-		if got.session != want[i].session || (got.err == nil) != (want[i].err == nil) || got.err != nil && *got.err != *want[i].err {
-			t.Errorf("report %d = %q %+v, want %+v", i, got.session, got.err, want[i].err)
+		w := want[i]
+		if got.session != w.session || (got.err == nil) != (w.err == nil) {
+			t.Errorf("report %d = %q %+v, want %+v", i, got.session, got.err, w.err)
+			continue
+		}
+		if got.err != nil && (got.err.Code != w.err.Code || got.err.Message != w.err.Message || got.err.RetryAfter != w.err.RetryAfter ||
+			!bytes.Equal(got.err.Request, w.err.Request) || !bytes.Equal(got.err.Response, w.err.Response)) {
+			t.Errorf("report %d = %+v, want %+v", i, got.err, w.err)
 		}
 	}
 }

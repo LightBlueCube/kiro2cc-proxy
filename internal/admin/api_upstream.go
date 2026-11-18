@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"agyrelay/internal/store"
 )
 
 // upstreamInfoView is one captured generation call of a request, without
@@ -84,6 +86,10 @@ func (h *Handler) getUpstreamCall(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, "read upstream call", err)
 		return
 	}
+	writeJSON(w, http.StatusOK, buildUpstreamCallView(c))
+}
+
+func buildUpstreamCallView(c store.UpstreamCall) upstreamCallView {
 	v := upstreamCallView{
 		upstreamInfoView: upstreamInfoView{
 			ID: c.ID, At: c.At, Account: cmp.Or(c.AccountName, c.Account), Session: c.Session, Seq: c.Seq, Model: c.Model, Status: c.Status,
@@ -96,7 +102,7 @@ func (h *Handler) getUpstreamCall(w http.ResponseWriter, r *http.Request) {
 	} else {
 		v.RequestText = string(c.Request)
 	}
-	writeJSON(w, http.StatusOK, v)
+	return v
 }
 
 // streamChunk is one chunk of a generation response; v1internal wraps the

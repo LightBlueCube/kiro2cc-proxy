@@ -646,7 +646,11 @@ func (c *Control) addToPool(id, name string, env []string, accountProxy string) 
 		if !risk || !c.cfg.Flags.Enabled() {
 			return false
 		}
-		c.cfg.Gateway.StopRiskySession(account, session)
+		var reqBody, respBody []byte
+		if callErr != nil {
+			reqBody, respBody = callErr.Request, callErr.Response
+		}
+		c.cfg.Gateway.StopRiskySession(account, session, reqBody, respBody)
 		return true
 	})
 	if err != nil {

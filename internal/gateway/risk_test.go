@@ -51,7 +51,8 @@ func TestRiskControlFlagsSystemPrompt(t *testing.T) {
 	}
 	got := flagged[0]
 	if got.Fingerprint != fingerprint || got.Text != riskSystem || got.KeyHash != "hash-alice" || got.KeyName != "alice" ||
-		got.Account == "" || got.Model != "gemini-3.8-flash" || got.Until.Sub(got.At) != flagDuration {
+		got.Account == "" || got.Session == "" || got.Model != "gemini-3.8-flash" || got.Until.Sub(got.At) != flagDuration ||
+		len(got.Request) == 0 || len(got.Response) == 0 {
 		t.Fatalf("flagged prompt = %+v", got)
 	}
 

@@ -31,6 +31,9 @@ type CallError struct {
 	Message string
 	// RetryAfter is the wait Google's RetryInfo names; 0 when none.
 	RetryAfter time.Duration
+	// Request is the body agy sent; Response is the decoded error body
+	// Google answered (empty when unreadable or the call never reached Google).
+	Request, Response []byte
 }
 
 // ModelCallFunc learns the outcome of each generation call agy makes for
@@ -50,6 +53,7 @@ type callKey struct{}
 // and the model it names.
 type call struct {
 	session, model string
+	request        []byte
 	// capture is set while the call is being recorded.
 	capture *pendingCapture
 }
@@ -81,7 +85,7 @@ func (s *Server) withSession(account string, r *http.Request) (*http.Request, er
 		return r, nil
 	}
 	session, _, _ := strings.Cut(rest, "/")
-	c := call{session: session, model: body.Model, capture: s.beginCapture(account, session, body.RequestID, body.Model, raw)}
+	c := call{session: session, model: body.Model, request: raw, capture: s.beginCapture(account, session, body.RequestID, body.Model, raw)}
 	return r.WithContext(context.WithValue(r.Context(), callKey{}, c)), nil
 }
 
@@ -110,7 +114,9 @@ func (ap *accountProxy) watchModelCall(resp *http.Response) {
 		ap.report(c, nil)
 		return
 	}
-	ap.report(c, callError(resp))
+	ce := callError(resp)
+	ce.Request = c.request
+	ap.report(c, ce)
 }
 
 // report hands a call's outcome to the account and stops the session when
@@ -149,6 +155,7 @@ func callError(resp *http.Response) *CallError {
 	if !ok {
 		return result
 	}
+	result.Response = raw
 	var body struct {
 		Error struct {
 			Message string `json:"message"`

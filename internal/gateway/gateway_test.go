@@ -139,9 +139,10 @@ func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGatew
 	stopped := &stoppedSessions{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name, path, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		raw, readErr := io.ReadAll(r.Body)
 		var call agytest.ModelCall
 		account := currentPool().Account(name)
-		if "/"+path != agytest.ModelCallPath || account == nil || json.NewDecoder(r.Body).Decode(&call) != nil {
+		if "/"+path != agytest.ModelCallPath || account == nil || readErr != nil || json.Unmarshal(raw, &call) != nil {
 			t.Errorf("unexpected Cloud Code request %s", r.URL.Path)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
@@ -163,7 +164,7 @@ func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGatew
 		}
 		if account.RecordModelCall(call.Session, call.Model, failure) {
 			stopped.add(call.Session)
-			currentGateway().StopRiskySession(account, call.Session)
+			currentGateway().StopRiskySession(account, call.Session, raw, []byte(call.Message))
 		}
 	})
 }

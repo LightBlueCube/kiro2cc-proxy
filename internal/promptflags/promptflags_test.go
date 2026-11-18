@@ -45,7 +45,11 @@ func TestFlagsSurviveRestartUntilCancelled(t *testing.T) {
 
 	now := time.Now()
 	for fingerprint, until := range map[string]time.Time{"live": now.Add(time.Hour), "over": now.Add(-time.Hour)} {
-		if err := f.Flag(ctx, gateway.FlaggedPrompt{Fingerprint: fingerprint, Text: "text " + fingerprint, At: now.Add(-2 * time.Hour), Until: until, KeyName: "alice"}); err != nil {
+		if err := f.Flag(ctx, gateway.FlaggedPrompt{
+			Fingerprint: fingerprint, Text: "text " + fingerprint,
+			Request: []byte(`{"fp":"` + fingerprint + `"}`), Response: []byte("429"),
+			At: now.Add(-2 * time.Hour), Until: until, KeyName: "alice", Session: "S1",
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -78,8 +82,8 @@ func TestFlagsSurviveRestartUntilCancelled(t *testing.T) {
 	if err != nil || len(list) != 2 {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
-	if text, err := f.Text(ctx, "live"); err != nil || text != "text live" {
-		t.Fatalf("text = %q, %v", text, err)
+	if got, err := f.Get(ctx, "live"); err != nil || got.Text != "text live" || string(got.Request) != `{"fp":"live"}` || string(got.Response) != "429" || got.Session != "S1" {
+		t.Fatalf("get = %+v, %v", got, err)
 	}
 
 	_, f = open(t, path)

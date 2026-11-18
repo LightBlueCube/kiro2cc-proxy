@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -43,19 +44,23 @@ type FlaggedPrompt struct {
 	Fingerprint string
 	// Text is the system prompt as the client sent it.
 	Text string
+	// Request and Response are the Cloud Code generation call Google
+	// refused and Google's error response body.
+	Request, Response []byte
 	// At is when it was refused; Until is when the flag ends.
 	At, Until time.Time
 	// KeyHash and KeyName name the API key whose request was refused;
-	// Account (ID), AccountName, and Model, where.
+	// Account (ID), AccountName, Session, and Model, where.
 	KeyHash, KeyName     string
 	Account, AccountName string
+	Session              string
 	Model                string
 }
 
 // StopRiskySession ends the running turn of a session whose request
 // Google's risk control refused: the turn's request fails with
 // ErrRiskControl and its system prompt is flagged.
-func (g *Gateway) StopRiskySession(account *pool.Account, sessionID string) {
+func (g *Gateway) StopRiskySession(account *pool.Account, sessionID string, request, response []byte) {
 	g.mu.Lock()
 	sess := g.sessions[sessionRef(account.ID(), sessionID)]
 	if sess == nil || sess.turn == nil || sess.turn.turn == nil {
@@ -64,6 +69,8 @@ func (g *Gateway) StopRiskySession(account *pool.Account, sessionID string) {
 		return
 	}
 	sess.turn.risky = true
+	sess.turn.riskyRequest = bytes.Clone(request)
+	sess.turn.riskyResponse = bytes.Clone(response)
 	turn := sess.turn.turn
 	g.mu.Unlock()
 	turn.Cancel()
@@ -81,11 +88,16 @@ func (g *Gateway) riskControl(at *activeTurn, r *run) *attemptFailure {
 		return failure
 	}
 
+	g.mu.Lock()
+	reqBody, respBody := at.riskyRequest, at.riskyResponse
+	g.mu.Unlock()
+
 	now := time.Now()
 	prompt := FlaggedPrompt{
 		Fingerprint: sysprompt.Fingerprint(r.t.system), Text: r.t.system,
+		Request: reqBody, Response: respBody,
 		At: now, Until: now.Add(flagDuration),
-		KeyHash: r.user, KeyName: r.keyName, Account: account, AccountName: accountName, Model: r.model.id,
+		KeyHash: r.user, KeyName: r.keyName, Account: account, AccountName: accountName, Session: at.sess.id, Model: r.model.id,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
 	defer cancel()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -11,9 +12,11 @@ import (
 type FlaggedPrompt struct {
 	// Fingerprint identifies the prompt (sysprompt.Fingerprint).
 	Fingerprint string
-	// Text is the prompt as the client sent it; FlaggedPrompts leaves it
-	// out, FlaggedPromptText returns it.
-	Text string
+	// Text is the prompt as the client sent it; Request and Response are
+	// the Cloud Code generation call and error body of its latest refusal.
+	// FlaggedPrompts leaves all three out; FlaggedPrompt returns them.
+	Text              string
+	Request, Response []byte
 	// FirstAt and LastAt are when it was first and last refused; Until is
 	// when its flag ends.
 	FirstAt, LastAt, Until time.Time
@@ -22,39 +25,51 @@ type FlaggedPrompt struct {
 	Pinned bool
 	// Hits counts the times it was refused.
 	Hits int
-	// KeyHash, KeyName, Account, AccountName, and Model are of its latest refusal.
+	// KeyHash, KeyName, Account, AccountName, Session, and Model are of
+	// its latest refusal.
 	KeyHash, KeyName     string
 	Account, AccountName string
+	Session              string
 	Model                string
 }
 
 // FlagPrompt flags a prompt until p.Until. A prompt flagged before keeps
-// its text and first time, and gets another hit.
+// its text and first time, and gets another hit with the latest refusal's
+// metadata and upstream call.
 func (s *Store) FlagPrompt(ctx context.Context, p FlaggedPrompt) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO flagged_prompts
-		(fingerprint, text, first_at, last_at, flagged_until, hits, key_hash, key_name, account, account_name, model)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+	request, err := packOptional(p.Request)
+	if err != nil {
+		return err
+	}
+	response, err := packOptional(p.Response)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO flagged_prompts
+		(fingerprint, text, first_at, last_at, flagged_until, hits, key_hash, key_name, account, account_name, session, model, request, response)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (fingerprint) DO UPDATE SET
 			last_at = excluded.last_at, flagged_until = excluded.flagged_until, hits = hits + 1,
-			key_hash = excluded.key_hash, key_name = excluded.key_name, account = excluded.account, account_name = excluded.account_name, model = excluded.model`,
+			key_hash = excluded.key_hash, key_name = excluded.key_name, account = excluded.account, account_name = excluded.account_name,
+			session = excluded.session, model = excluded.model, request = excluded.request, response = excluded.response`,
 		p.Fingerprint, p.Text, p.LastAt.UnixMilli(), p.LastAt.UnixMilli(), p.Until.UnixMilli(),
-		p.KeyHash, p.KeyName, p.Account, p.AccountName, p.Model)
+		p.KeyHash, p.KeyName, p.Account, p.AccountName, p.Session, p.Model, request, response)
 	return err
 }
 
 const flaggedAccountNameExpr = `COALESCE((SELECT name FROM accounts WHERE id = flagged_prompts.account), NULLIF(account_name, ''), account)`
 
-// FlaggedPrompts lists every flagged prompt without its text, the latest
+// FlaggedPrompts lists every flagged prompt without its bodies, the latest
 // refused first.
 func (s *Store) FlaggedPrompts(ctx context.Context) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, model
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, session, model
 		FROM flagged_prompts ORDER BY last_at DESC, fingerprint`)
 }
 
 // ActiveFlaggedPrompts lists the prompts that are pinned or whose flag has
-// not ended at now, without their text.
+// not ended at now, without their bodies.
 func (s *Store) ActiveFlaggedPrompts(ctx context.Context, now time.Time) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, model
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, session, model
 		FROM flagged_prompts WHERE pinned = 1 OR flagged_until > ? ORDER BY last_at DESC, fingerprint`, now.UnixMilli())
 }
 
@@ -68,7 +83,7 @@ func (s *Store) queryFlagged(ctx context.Context, query string, args ...any) ([]
 	for rows.Next() {
 		var p FlaggedPrompt
 		var first, last, until int64
-		if err := rows.Scan(&p.Fingerprint, &first, &last, &until, &p.Pinned, &p.Hits, &p.KeyHash, &p.KeyName, &p.Account, &p.AccountName, &p.Model); err != nil {
+		if err := rows.Scan(&p.Fingerprint, &first, &last, &until, &p.Pinned, &p.Hits, &p.KeyHash, &p.KeyName, &p.Account, &p.AccountName, &p.Session, &p.Model); err != nil {
 			return nil, err
 		}
 		p.FirstAt, p.LastAt, p.Until = time.UnixMilli(first), time.UnixMilli(last), time.UnixMilli(until)
@@ -77,14 +92,45 @@ func (s *Store) queryFlagged(ctx context.Context, query string, args ...any) ([]
 	return out, rows.Err()
 }
 
-// FlaggedPromptText returns the text of a flagged prompt.
-func (s *Store) FlaggedPromptText(ctx context.Context, fingerprint string) (string, error) {
-	var text string
-	err := s.db.QueryRowContext(ctx, `SELECT text FROM flagged_prompts WHERE fingerprint = ?`, fingerprint).Scan(&text)
+// FlaggedPrompt returns one flagged prompt with its text and captured
+// upstream call, or ErrNotFound.
+func (s *Store) FlaggedPrompt(ctx context.Context, fingerprint string) (FlaggedPrompt, error) {
+	var p FlaggedPrompt
+	var first, last, until int64
+	var request, response []byte
+	err := s.db.QueryRowContext(ctx, `SELECT fingerprint, text, first_at, last_at, flagged_until, pinned, hits,
+		key_hash, key_name, account, `+flaggedAccountNameExpr+`, session, model, request, response
+		FROM flagged_prompts WHERE fingerprint = ?`, fingerprint).
+		Scan(&p.Fingerprint, &p.Text, &first, &last, &until, &p.Pinned, &p.Hits,
+			&p.KeyHash, &p.KeyName, &p.Account, &p.AccountName, &p.Session, &p.Model, &request, &response)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
+		return FlaggedPrompt{}, ErrNotFound
 	}
-	return text, err
+	if err != nil {
+		return FlaggedPrompt{}, err
+	}
+	p.FirstAt, p.LastAt, p.Until = time.UnixMilli(first), time.UnixMilli(last), time.UnixMilli(until)
+	if p.Request, err = unpackOptional(request); err != nil {
+		return FlaggedPrompt{}, fmt.Errorf("flagged prompt %s request: %w", fingerprint, err)
+	}
+	if p.Response, err = unpackOptional(response); err != nil {
+		return FlaggedPrompt{}, fmt.Errorf("flagged prompt %s response: %w", fingerprint, err)
+	}
+	return p, nil
+}
+
+func packOptional(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return []byte{}, nil
+	}
+	return compress(raw)
+}
+
+func unpackOptional(packed []byte) ([]byte, error) {
+	if len(packed) == 0 {
+		return nil, nil
+	}
+	return decompress(packed)
 }
 
 // CancelFlaggedPrompt ends the flag of a prompt at now and unpins it; the

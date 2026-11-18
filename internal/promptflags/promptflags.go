@@ -70,19 +70,20 @@ func (f *Flags) Flag(ctx context.Context, p gateway.FlaggedPrompt) error {
 	f.flagged[p.Fingerprint] = fl
 	f.mu.Unlock()
 	return f.store.FlagPrompt(ctx, store.FlaggedPrompt{
-		Fingerprint: p.Fingerprint, Text: p.Text, LastAt: p.At, Until: p.Until,
-		KeyHash: p.KeyHash, KeyName: p.KeyName, Account: p.Account, AccountName: p.AccountName, Model: p.Model,
+		Fingerprint: p.Fingerprint, Text: p.Text, Request: p.Request, Response: p.Response,
+		LastAt: p.At, Until: p.Until,
+		KeyHash: p.KeyHash, KeyName: p.KeyName, Account: p.Account, AccountName: p.AccountName, Session: p.Session, Model: p.Model,
 	})
 }
 
-// List returns every flagged prompt without its text.
+// List returns every flagged prompt without its bodies.
 func (f *Flags) List(ctx context.Context) ([]store.FlaggedPrompt, error) {
 	return f.store.FlaggedPrompts(ctx)
 }
 
-// Text returns the text of a flagged prompt.
-func (f *Flags) Text(ctx context.Context, fingerprint string) (string, error) {
-	return f.store.FlaggedPromptText(ctx, fingerprint)
+// Get returns one flagged prompt with its text and captured upstream call.
+func (f *Flags) Get(ctx context.Context, fingerprint string) (store.FlaggedPrompt, error) {
+	return f.store.FlaggedPrompt(ctx, fingerprint)
 }
 
 // Cancel ends the prompt's flag now and unpins it; the prompt stays on

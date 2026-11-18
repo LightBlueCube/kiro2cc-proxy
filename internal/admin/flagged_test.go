@@ -23,15 +23,27 @@ func TestFlaggedPromptsAdminAPI(t *testing.T) {
 	c.login(testPassword)
 
 	now := time.Now()
-	err := e.flags.Flag(ctx, gateway.FlaggedPrompt{Fingerprint: "abc123", Text: "You are opencode.", At: now, Until: now.Add(24 * time.Hour),
-		KeyHash: "h1", KeyName: "alice", Account: "main", Model: "gemini-3.8-flash"})
+	reqJSON := `{"model":"gemini-3.8-flash","request":{"systemInstruction":{"parts":[{"text":"You are opencode."}],"role":"user"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`
+	respJSON := `{"error":{"code":429,"message":"Resource has been exhausted.","status":"RESOURCE_EXHAUSTED"}}`
+	err := e.flags.Flag(ctx, gateway.FlaggedPrompt{
+		Fingerprint: "abc123", Text: "You are opencode.",
+		Request: []byte(reqJSON), Response: []byte(respJSON),
+		At: now, Until: now.Add(24 * time.Hour),
+		KeyHash: "h1", KeyName: "alice", Account: "main", Session: "S1", Model: "gemini-3.8-flash",
+	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.flags.Flag(ctx, gateway.FlaggedPrompt{
+		Fingerprint: "legacy1", Text: "Old prompt only.",
+		At: now.Add(-time.Minute), Until: now.Add(time.Hour),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	r := c.do("GET", "/admin/api/flagged-prompts", nil, nil)
 	prompts, _ := r.body["prompts"].([]any)
-	if r.status != http.StatusOK || len(prompts) != 1 {
+	if r.status != http.StatusOK || len(prompts) != 2 {
 		t.Fatalf("list = %d %s", r.status, r.raw)
 	}
 	got := prompts[0].(map[string]any)
@@ -39,16 +51,28 @@ func TestFlaggedPromptsAdminAPI(t *testing.T) {
 		got["account"] != "main" || got["model"] != "gemini-3.8-flash" {
 		t.Fatalf("prompt = %v", got)
 	}
-	if strings.Contains(r.raw, "You are opencode") {
-		t.Fatal("the list carries the prompt text")
+	if strings.Contains(r.raw, "You are opencode") || strings.Contains(r.raw, "RESOURCE_EXHAUSTED") {
+		t.Fatal("the list carries the prompt bodies")
 	}
 
-	r = c.do("GET", "/admin/api/flagged-prompts/abc123/text", nil, nil)
-	if r.status != http.StatusOK || r.body["text"] != "You are opencode." {
-		t.Fatalf("text = %d %s", r.status, r.raw)
+	r = c.do("GET", "/admin/api/flagged-prompts/abc123", nil, nil)
+	if r.status != http.StatusOK || r.body["text"] != "You are opencode." || r.body["session"] != "S1" {
+		t.Fatalf("detail = %d %s", r.status, r.raw)
 	}
-	if r := c.do("GET", "/admin/api/flagged-prompts/nope/text", nil, nil); r.status != http.StatusNotFound {
-		t.Fatalf("text of an unknown prompt = %d", r.status)
+	call, _ := r.body["call"].(map[string]any)
+	respView, _ := call["response"].(map[string]any)
+	if call == nil || call["status"] != float64(http.StatusTooManyRequests) || call["session"] != "S1" ||
+		call["request"] == nil || respView["text"] != respJSON {
+		t.Fatalf("call view = %v", call)
+	}
+
+	// Legacy records without a captured upstream call omit call and still serve text.
+	r = c.do("GET", "/admin/api/flagged-prompts/legacy1", nil, nil)
+	if r.status != http.StatusOK || r.body["text"] != "Old prompt only." || r.body["call"] != nil {
+		t.Fatalf("legacy detail = %d %s", r.status, r.raw)
+	}
+	if r := c.do("GET", "/admin/api/flagged-prompts/nope", nil, nil); r.status != http.StatusNotFound {
+		t.Fatalf("detail of an unknown prompt = %d", r.status)
 	}
 
 	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/cancel", nil, nil); r.status != http.StatusOK {
@@ -59,7 +83,7 @@ func TestFlaggedPromptsAdminAPI(t *testing.T) {
 	}
 	r = c.do("GET", "/admin/api/flagged-prompts", nil, nil)
 	prompts, _ = r.body["prompts"].([]any)
-	if len(prompts) != 1 || prompts[0].(map[string]any)["active"] != false {
+	if len(prompts) != 2 || prompts[0].(map[string]any)["active"] != false {
 		t.Fatalf("list after cancel = %s", r.raw)
 	}
 	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/cancel", nil, nil); r.status != http.StatusNotFound {

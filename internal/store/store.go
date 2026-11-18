@@ -172,7 +172,10 @@ var migrations = []string{
 		key_name      TEXT NOT NULL DEFAULT '',
 		account       TEXT NOT NULL DEFAULT '',
 		account_name  TEXT NOT NULL DEFAULT '',
-		model         TEXT NOT NULL DEFAULT ''
+		model         TEXT NOT NULL DEFAULT '',
+		session       TEXT NOT NULL DEFAULT '',
+		request       BLOB NOT NULL DEFAULT x'',
+		response      BLOB NOT NULL DEFAULT x''
 	);
 	CREATE TABLE upstream_calls (
 		id                 INTEGER PRIMARY KEY,

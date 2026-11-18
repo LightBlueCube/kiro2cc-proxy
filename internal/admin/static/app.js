@@ -129,7 +129,7 @@ function route() {
   // "#upstream/12" opens the view "upstream" with the argument "12".
   const [name, ...args] = (location.hash || "#accounts").slice(1).split("/");
   const view = views[name] ? name : "accounts";
-  const tab = view === "upstream" ? "calls" : view;
+  const tab = view === "upstream" ? "calls" : view === "flagged" ? "settings" : view;
   for (const a of document.querySelectorAll("#tabs a")) a.classList.toggle("active", a.getAttribute("href") === "#" + tab);
   const container = document.getElementById("view");
   container.replaceChildren();
@@ -592,7 +592,40 @@ function rowEditor(fields, rows, defaults, blank, addLabel) {
   };
 }
 
-views.settings = container => {
+function flaggedTable(prompts, reload, detailMode) {
+  const cancel = (p, button) => guarded(async () => {
+    await api("POST", `flagged-prompts/${encodeURIComponent(p.fingerprint)}/cancel`);
+    toast(t("flagged.cancelled"));
+    await reload();
+  }, button);
+  // The list is drawn again afterwards, so a failed change shows the
+  // real state.
+  const setPinned = (p, pinned, box) => guarded(async () => {
+    try { await api("POST", `flagged-prompts/${encodeURIComponent(p.fingerprint)}/${pinned ? "pin" : "unpin"}`); }
+    finally { await reload(); }
+  }, box);
+  const flaggedUntil = p => {
+    if (p.pinned) return h("span", {}, t("flagged.kept"));
+    return p.active ? fmt.time(p.until) : h("span", { class: "muted" }, t("flagged.ended"));
+  };
+  const promptCell = p => detailMode
+    ? h("span", { class: "mono", title: p.fingerprint }, shortHash(p.fingerprint))
+    : h("div", {}, h("span", { class: "mono", title: p.fingerprint }, shortHash(p.fingerprint)), " ",
+        h("a", { href: "#flagged/" + encodeURIComponent(p.fingerprint) }, t("flagged.view")));
+  const where = p => joined(p.session && p.account ? `${p.account}/${p.session}` : p.account, p.model);
+  return table([
+    { title: t("flagged.prompt"), cell: promptCell },
+    { title: t("flagged.last"), cell: p => fmt.time(p.last_at) },
+    { title: t("flagged.until"), cell: flaggedUntil },
+    { title: t("flagged.keep"), cell: p => h("input", { type: "checkbox", checked: p.pinned, title: t("flagged.keep.hint"),
+      onchange: e => setPinned(p, e.target.checked, e.target) }) },
+    { title: t("flagged.hits"), num: true, cell: p => String(p.hits) },
+    { title: t("flagged.by"), cell: p => stack(keyName(p.key_name, p.key_hash), where(p)) },
+    { title: "", actions: true, cell: p => p.active ? h("button", { type: "button", class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null },
+  ], prompts);
+}
+
+views.settings = (container, openTopic) => {
   // general holds the settings form, a card per topic; the list of flagged
   // prompts sits in the form, in the card of the risk-control setting.
   const general = h("div");
@@ -606,45 +639,9 @@ views.settings = container => {
 
   container.append(h("h1", {}, t("settings.title")), general, password, sessions, audit);
 
-  // flaggedPromptCell shows a flagged prompt's fingerprint; View loads its
-  // text on demand.
-  function flaggedPromptCell(p) {
-    const text = h("pre", { class: "prompt-text", hidden: true });
-    const toggle = h("button", { type: "button", onclick: e => guarded(async () => {
-      if (!text.textContent) text.textContent = (await api("GET", `flagged-prompts/${p.fingerprint}/text`)).text;
-      text.hidden = !text.hidden;
-      e.target.textContent = text.hidden ? t("flagged.view") : t("flagged.hide");
-    }, e.target) }, t("flagged.view"));
-    return h("div", {}, h("span", { class: "mono", title: p.fingerprint }, shortHash(p.fingerprint)), " ", toggle, text);
-  }
-
   async function loadFlagged() {
     const { prompts } = await api("GET", "flagged-prompts");
-    const cancel = (p, button) => guarded(async () => {
-      await api("POST", `flagged-prompts/${p.fingerprint}/cancel`);
-      toast(t("flagged.cancelled"));
-      await loadFlagged();
-    }, button);
-    // The list is drawn again afterwards, so a failed change shows the
-    // real state.
-    const setPinned = (p, pinned, box) => guarded(async () => {
-      try { await api("POST", `flagged-prompts/${p.fingerprint}/${pinned ? "pin" : "unpin"}`); }
-      finally { await loadFlagged(); }
-    }, box);
-    const flaggedUntil = p => {
-      if (p.pinned) return h("span", {}, t("flagged.kept"));
-      return p.active ? fmt.time(p.until) : h("span", { class: "muted" }, t("flagged.ended"));
-    };
-    flaggedList.replaceChildren(table([
-      { title: t("flagged.prompt"), cell: flaggedPromptCell },
-      { title: t("flagged.last"), cell: p => fmt.time(p.last_at) },
-      { title: t("flagged.until"), cell: flaggedUntil },
-      { title: t("flagged.keep"), cell: p => h("input", { type: "checkbox", checked: p.pinned, title: t("flagged.keep.hint"),
-        onchange: e => setPinned(p, e.target.checked, e.target) }) },
-      { title: t("flagged.hits"), num: true, cell: p => String(p.hits) },
-      { title: t("flagged.by"), cell: p => stack(keyName(p.key_name, p.key_hash), joined(p.account, p.model)) },
-      { title: "", actions: true, cell: p => p.active ? h("button", { type: "button", class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null },
-    ], prompts));
+    flaggedList.replaceChildren(flaggedTable(prompts, loadFlagged, false));
   }
 
   async function loadGeneral() {
@@ -748,7 +745,8 @@ views.settings = container => {
         h("p", { class: "muted" }, t("settings.signatures.note")),
         signatures,
         h("div", { class: "row", style: "margin-top:8px" }, signaturesReset)),
-      topic(t("flagged.title"),
+      h("details", { class: "card fold topic", open: openTopic === "flagged" },
+        h("summary", {}, t("flagged.title")),
         h("div", { class: "row" },
           h("span", { class: "with-reset" }, h("label", { class: "check" }, riskControl, t("settings.risk.enable")), resetButton(riskControl, d.risk_control)),
           h("label", {}, t("settings.risk.retention"), withReset(flaggedRetention, d.flagged_prompt_retention_days))),
@@ -1936,20 +1934,23 @@ function foldToolbar(root, labels) {
     kinds.map(kind => buttons(labels[kind], `details[data-kind="${kind}"]`, root.querySelectorAll(`details[data-kind="${kind}"]`).length)));
 }
 
+function renderCapturedCall(detail, call) {
+  const labels = blockKindLabels();
+  const content = h("div", { class: "blk-list" });
+  const request = call.request ? requestBlocks(call.request, labels) : [block("other", labels.other, "", call.request_text)];
+  content.append(h("h3", {}, t("upstream.request"), " ", h("span", { class: "muted" }, fmt.bytes(call.request_bytes))), ...request,
+    h("h3", {}, t("upstream.response"), " ", h("span", { class: "muted" }, joined(String(call.status), fmt.bytes(call.response_bytes)))),
+    ...responseBlocks(call.response, call.response_truncated, labels));
+  detail.replaceChildren(foldToolbar(content, labels), content);
+}
+
 views.upstream = (container, requestId) => {
   const info = h("div", { class: "card" });
   const detail = h("div", {});
   container.append(h("h1", {}, t("upstream.title")), h("p", {}, h("a", { href: "#calls" }, t("upstream.back"))), info, detail);
 
   async function showCall(id) {
-    const labels = blockKindLabels();
-    const call = await api("GET", "upstream-calls/" + id);
-    const content = h("div", { class: "blk-list" });
-    const request = call.request ? requestBlocks(call.request, labels) : [block("other", labels.other, "", call.request_text)];
-    content.append(h("h3", {}, t("upstream.request"), " ", h("span", { class: "muted" }, fmt.bytes(call.request_bytes))), ...request,
-      h("h3", {}, t("upstream.response"), " ", h("span", { class: "muted" }, joined(String(call.status), fmt.bytes(call.response_bytes)))),
-      ...responseBlocks(call.response, call.response_truncated, labels));
-    detail.replaceChildren(foldToolbar(content, labels), content);
+    renderCapturedCall(detail, await api("GET", "upstream-calls/" + id));
   }
 
   guarded(async () => {
@@ -1966,6 +1967,32 @@ views.upstream = (container, requestId) => {
       h("div", { class: "row" }, h("label", {}, t("upstream.call"), select),
         h("div", {}, h("div", { class: "muted" }, t("upstream.sessions")), sessions.map(s => h("div", { class: "mono" }, s)))));
     await showCall(select.value);
+  });
+};
+
+views.flagged = (container, rawFingerprint) => {
+  const fingerprint = decodeURIComponent(rawFingerprint || "");
+  const info = h("div", { class: "card" });
+  const detail = h("div", {});
+  container.append(h("h1", {}, t("flagged.title")), h("p", {}, h("a", { href: "#settings/flagged" }, t("flagged.back"))), info, detail);
+
+  async function loadInfo() {
+    const p = await api("GET", "flagged-prompts/" + encodeURIComponent(fingerprint));
+    info.replaceChildren(flaggedTable([p], loadInfo, true));
+    return p;
+  }
+
+  guarded(async () => {
+    const p = await loadInfo();
+    if (p.call) {
+      renderCapturedCall(detail, p.call);
+      return;
+    }
+    const labels = blockKindLabels();
+    const sys = block("system", labels.system, preview(p.text || ""), p.text || "");
+    sys.open = true;
+    const content = h("div", { class: "blk-list" }, h("p", { class: "muted" }, t("flagged.legacy_only")), sys);
+    detail.replaceChildren(foldToolbar(content, labels), content);
   });
 };
 

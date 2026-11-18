@@ -47,13 +47,32 @@ func buildFlaggedPromptView(p store.FlaggedPrompt, now time.Time) flaggedPromptV
 	}
 }
 
-func (h *Handler) flaggedPromptText(w http.ResponseWriter, r *http.Request) {
-	text, err := h.control.FlaggedPromptText(r.Context(), r.PathValue("fingerprint"))
+type flaggedPromptDetailView struct {
+	flaggedPromptView
+	Session string            `json:"session,omitempty"`
+	Text    string            `json:"text"`
+	Call    *upstreamCallView `json:"call,omitempty"`
+}
+
+func (h *Handler) getFlaggedPrompt(w http.ResponseWriter, r *http.Request) {
+	p, err := h.control.FlaggedPrompt(r.Context(), r.PathValue("fingerprint"))
 	if err != nil {
 		h.fail(w, "read flagged prompt", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"text": text})
+	out := flaggedPromptDetailView{
+		flaggedPromptView: buildFlaggedPromptView(p, time.Now()),
+		Session:           p.Session,
+		Text:              p.Text,
+	}
+	if len(p.Request) > 0 || len(p.Response) > 0 {
+		call := buildUpstreamCallView(store.UpstreamCall{
+			At: p.LastAt, Account: p.Account, AccountName: p.AccountName, Session: p.Session, Model: p.Model,
+			Status: http.StatusTooManyRequests, Request: p.Request, Response: p.Response,
+		})
+		out.Call = &call
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) cancelFlaggedPrompt(w http.ResponseWriter, r *http.Request) {

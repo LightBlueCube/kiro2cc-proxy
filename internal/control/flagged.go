@@ -7,14 +7,15 @@ import (
 )
 
 // FlaggedPrompts lists the system prompts Google's risk control refused,
-// without their text, the latest first.
+// without their bodies, the latest first.
 func (c *Control) FlaggedPrompts(ctx context.Context) ([]store.FlaggedPrompt, error) {
 	return c.cfg.Flags.List(ctx)
 }
 
-// FlaggedPromptText returns the text of a flagged system prompt.
-func (c *Control) FlaggedPromptText(ctx context.Context, fingerprint string) (string, error) {
-	return c.cfg.Flags.Text(ctx, fingerprint)
+// FlaggedPrompt returns one flagged prompt with its text and captured
+// upstream call.
+func (c *Control) FlaggedPrompt(ctx context.Context, fingerprint string) (store.FlaggedPrompt, error) {
+	return c.cfg.Flags.Get(ctx, fingerprint)
 }
 
 // CancelFlaggedPrompt ends a system prompt's flag now and unpins it;

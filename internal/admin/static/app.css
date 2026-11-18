@@ -99,7 +99,6 @@ details.fold > summary { cursor: pointer; font-weight: 600; }
 
 .logs { font-family: var(--mono); font-size: 12px; max-height: 70vh; overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
 .logs div { padding: 1px 8px; white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid var(--line); }
-.prompt-text { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; margin: 6px 0 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
 .fold-bar { position: sticky; top: var(--header-height); z-index: 1; display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 8px 0; margin-bottom: 8px; background: var(--bg); border-bottom: 1px solid var(--line); }
 .fold-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .blk { border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 6px; background: var(--card); margin: 4px 0; padding: 4px 8px; }

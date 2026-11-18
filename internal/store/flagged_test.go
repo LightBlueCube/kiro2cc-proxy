@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -17,8 +19,10 @@ func TestFlaggedPrompts(t *testing.T) {
 	ctx := context.Background()
 
 	first := time.Now().Truncate(time.Millisecond)
-	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "f1", Text: "You are opencode", LastAt: first, Until: first.Add(24 * time.Hour),
-		KeyHash: "h1", KeyName: "alice", Account: "a1", Model: "m1"}); err != nil {
+	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "f1", Text: "You are opencode",
+		Request: []byte(`{"first":true}`), Response: []byte(`{"error":"first"}`),
+		LastAt: first, Until: first.Add(24 * time.Hour),
+		KeyHash: "h1", KeyName: "alice", Account: "a1", Session: "S1", Model: "m1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "f2", Text: "other", LastAt: first.Add(time.Minute), Until: first.Add(time.Hour)}); err != nil {
@@ -26,10 +30,15 @@ func TestFlaggedPrompts(t *testing.T) {
 	}
 
 	// Refused again later by another key: the text and the first time
-	// stay, and the latest refusal's details replace the earlier ones.
+	// stay, and the latest refusal's details and upstream call replace the
+	// earlier ones.
 	again := first.Add(2 * time.Hour)
-	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "f1", Text: "ignored", LastAt: again, Until: again.Add(24 * time.Hour),
-		KeyHash: "h2", KeyName: "bob", Account: "a2", Model: "m2"}); err != nil {
+	latestReq := bytes.Repeat([]byte(`{"request":{"contents":[]}}`), 200)
+	latestResp := []byte(`{"error":{"code":429,"message":"Resource has been exhausted"}}`)
+	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "f1", Text: "ignored",
+		Request: latestReq, Response: latestResp,
+		LastAt: again, Until: again.Add(24 * time.Hour),
+		KeyHash: "h2", KeyName: "bob", Account: "a2", Session: "S2", Model: "m2"}); err != nil {
 		t.Fatal(err)
 	}
 	list, err := st.FlaggedPrompts(ctx)
@@ -37,19 +46,26 @@ func TestFlaggedPrompts(t *testing.T) {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
 	want := FlaggedPrompt{Fingerprint: "f1", FirstAt: first, LastAt: again, Until: again.Add(24 * time.Hour), Hits: 2,
-		KeyHash: "h2", KeyName: "bob", Account: "a2", AccountName: "a2", Model: "m2"}
+		KeyHash: "h2", KeyName: "bob", Account: "a2", AccountName: "a2", Session: "S2", Model: "m2"}
 	got := list[0]
 	sameTimes := got.FirstAt.Equal(want.FirstAt) && got.LastAt.Equal(want.LastAt) && got.Until.Equal(want.Until)
 	got.FirstAt, got.LastAt, got.Until = time.Time{}, time.Time{}, time.Time{}
 	want.FirstAt, want.LastAt, want.Until = time.Time{}, time.Time{}, time.Time{}
-	if !sameTimes || got != want {
+	if !sameTimes || !reflect.DeepEqual(got, want) {
 		t.Fatalf("f1 = %+v (times equal: %v), want %+v", got, sameTimes, want)
 	}
-	if text, err := st.FlaggedPromptText(ctx, "f1"); err != nil || text != "You are opencode" {
-		t.Fatalf("text = %q, %v", text, err)
+	detail, err := st.FlaggedPrompt(ctx, "f1")
+	if err != nil || detail.Text != "You are opencode" || detail.Session != "S2" ||
+		!bytes.Equal(detail.Request, latestReq) || !bytes.Equal(detail.Response, latestResp) {
+		t.Fatalf("detail f1 = %+v, %v", detail, err)
 	}
-	if _, err := st.FlaggedPromptText(ctx, "nope"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("text of an unknown prompt: %v", err)
+	// A row without a captured upstream call (e.g. a legacy row) unpacks nil slices.
+	legacy, err := st.FlaggedPrompt(ctx, "f2")
+	if err != nil || legacy.Text != "other" || legacy.Request != nil || legacy.Response != nil {
+		t.Fatalf("detail f2 = %+v, %v", legacy, err)
+	}
+	if _, err := st.FlaggedPrompt(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown prompt: %v", err)
 	}
 
 	// At first+2h only f1 is still flagged.

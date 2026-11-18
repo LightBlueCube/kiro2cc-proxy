@@ -168,7 +168,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.log.Error("cloud code request failed", "account", name, "path", r.URL.Path, "err", err)
 			if c := callOf(r); c.session != "" {
-				ap.report(c, &CallError{Code: http.StatusBadGateway, Message: "upstream request failed"})
+				ap.report(c, &CallError{Code: http.StatusBadGateway, Message: "upstream request failed", Request: c.request})
 			}
 			if c := callOf(r); c.capture != nil {
 				c.capture.finish(http.StatusBadGateway, nil, false)

@@ -124,7 +124,7 @@
   "settings.signatures.invalid": "Harness signatures are not valid JSON: {error}",
 
   "flagged.title": "System prompts risk control",
-  "flagged.note": "Google's risk control answers a request it dislikes, usually because of its system prompt, with a 429 that names no wait while the account's other requests go through. That request fails with 403 and its system prompt is flagged for 24 hours: requests carrying it, however formatted, are refused here before they reach an account. Tick Keep refused to keep a prompt refused after its 24 hours, with no end and no deletion, until you untick it. Cancel a flag to let the prompt through again; a new refusal flags it afresh.",
+  "flagged.note": "Google's risk control answers a request it dislikes, usually because of its system prompt, with a 429 that names no wait while the account's other requests go through. That request fails with 403 and its system prompt is flagged for 24 hours: requests carrying it, however formatted, are refused here before they reach an account. View opens the refused upstream call. Tick Keep refused to keep a prompt refused after its 24 hours, with no end and no deletion, until you untick it. Cancel a flag to let the prompt through again; a new refusal flags it afresh.",
   "flagged.prompt": "System prompt",
   "flagged.last": "Last refused",
   "flagged.until": "Flagged until",
@@ -135,7 +135,8 @@
   "flagged.hits": "Refusals",
   "flagged.by": "Latest request",
   "flagged.view": "View",
-  "flagged.hide": "Hide",
+  "flagged.back": "← Settings",
+  "flagged.legacy_only": "Recorded before upstream call capture on risk control; only the client system prompt was saved.",
   "flagged.cancel": "Cancel flag",
   "flagged.cancelled": "Flag cancelled",
   "settings.context_check": "Refuse prompts over the window",

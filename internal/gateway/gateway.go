@@ -156,9 +156,11 @@ type activeTurn struct {
 	consuming        bool
 	cancelledByAdmin bool
 	// risky is set when the turn was cancelled because Google's risk
-	// control refused its request.
-	risky    bool
-	finished bool
+	// control refused its request; riskyRequest and riskyResponse are the
+	// upstream generation call that tripped it.
+	risky                       bool
+	riskyRequest, riskyResponse []byte
+	finished                    bool
 	// baseSteps is a lower bound of the session's native steps at launch.
 	baseSteps int
 	// The turn's earlier responses reported the model calls before step
