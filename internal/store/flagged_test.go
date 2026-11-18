@@ -96,6 +96,19 @@ func TestFlaggedPrompts(t *testing.T) {
 	if list, err := st.FlaggedPrompts(ctx); err != nil || len(list) != 2 {
 		t.Fatalf("list after prune = %+v, %v", list, err)
 	}
+
+	if err := st.DeleteFlaggedPrompt(ctx, "f1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteFlaggedPrompt(ctx, "f1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second delete: %v", err)
+	}
+	if _, err := st.FlaggedPrompt(ctx, "f1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted prompt still readable: %v", err)
+	}
+	if list, err := st.FlaggedPrompts(ctx); err != nil || len(list) != 1 || list[0].Fingerprint != "f2" {
+		t.Fatalf("list after delete = %+v, %v", list, err)
+	}
 }
 
 func fingerprints(t *testing.T, st *Store) []string {

@@ -592,12 +592,20 @@ function rowEditor(fields, rows, defaults, blank, addLabel) {
   };
 }
 
-function flaggedTable(prompts, reload, detailMode) {
+function flaggedTable(prompts, reload, { detailMode = false, onDeleted = reload } = {}) {
   const cancel = (p, button) => guarded(async () => {
     await api("POST", `flagged-prompts/${encodeURIComponent(p.fingerprint)}/cancel`);
     toast(t("flagged.cancelled"));
     await reload();
   }, button);
+  const remove = (p, button) => {
+    if (!confirm(t("flagged.delete.confirm", { hash: shortHash(p.fingerprint) }))) return;
+    guarded(async () => {
+      await api("DELETE", `flagged-prompts/${encodeURIComponent(p.fingerprint)}`);
+      toast(t("flagged.deleted"));
+      await onDeleted();
+    }, button);
+  };
   // The list is drawn again afterwards, so a failed change shows the
   // real state.
   const setPinned = (p, pinned, box) => guarded(async () => {
@@ -616,12 +624,14 @@ function flaggedTable(prompts, reload, detailMode) {
   return table([
     { title: t("flagged.prompt"), cell: promptCell },
     { title: t("flagged.last"), cell: p => fmt.time(p.last_at) },
-    { title: t("flagged.until"), cell: flaggedUntil },
+    { title: t("flagged.until"), cell: p => flaggedUntil(p) },
     { title: t("flagged.keep"), cell: p => h("input", { type: "checkbox", checked: p.pinned, title: t("flagged.keep.hint"),
       onchange: e => setPinned(p, e.target.checked, e.target) }) },
     { title: t("flagged.hits"), num: true, cell: p => String(p.hits) },
     { title: t("flagged.by"), cell: p => stack(keyName(p.key_name, p.key_hash), where(p)) },
-    { title: "", actions: true, cell: p => p.active ? h("button", { type: "button", class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null },
+    { title: "", actions: true, cell: p => h("div", { class: "actions" },
+      p.active ? h("button", { type: "button", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null,
+      h("button", { type: "button", class: "danger", onclick: e => remove(p, e.target) }, t("flagged.delete"))) },
   ], prompts);
 }
 
@@ -641,7 +651,7 @@ views.settings = (container, openTopic) => {
 
   async function loadFlagged() {
     const { prompts } = await api("GET", "flagged-prompts");
-    flaggedList.replaceChildren(flaggedTable(prompts, loadFlagged, false));
+    flaggedList.replaceChildren(flaggedTable(prompts, loadFlagged));
   }
 
   async function loadGeneral() {
@@ -1985,7 +1995,10 @@ views.flagged = (container, rawFingerprint) => {
 
   async function loadInfo() {
     const p = await api("GET", "flagged-prompts/" + encodeURIComponent(fingerprint));
-    info.replaceChildren(flaggedTable([p], loadInfo, true));
+    info.replaceChildren(flaggedTable([p], loadInfo, {
+      detailMode: true,
+      onDeleted: () => { location.hash = "#settings/flagged"; },
+    }));
     return p;
   }
 

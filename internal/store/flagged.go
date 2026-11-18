@@ -156,6 +156,12 @@ func (s *Store) UnpinFlaggedPrompt(ctx context.Context, fingerprint string, now 
 		now.UnixMilli(), fingerprint))
 }
 
+// DeleteFlaggedPrompt removes a flagged prompt from the store. It returns
+// ErrNotFound when there is no such prompt.
+func (s *Store) DeleteFlaggedPrompt(ctx context.Context, fingerprint string) error {
+	return affected(s.db.ExecContext(ctx, `DELETE FROM flagged_prompts WHERE fingerprint = ?`, fingerprint))
+}
+
 // PruneFlaggedPrompts deletes the unpinned prompts that were neither
 // refused nor released since before.
 func (s *Store) PruneFlaggedPrompts(ctx context.Context, before time.Time) error {

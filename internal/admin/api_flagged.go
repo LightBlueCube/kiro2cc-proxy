@@ -104,3 +104,13 @@ func (h *Handler) pinFlaggedPrompt(pin bool) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]any{})
 	}
 }
+
+func (h *Handler) deleteFlaggedPrompt(w http.ResponseWriter, r *http.Request) {
+	fingerprint := r.PathValue("fingerprint")
+	if err := h.control.DeleteFlaggedPrompt(r.Context(), fingerprint); err != nil {
+		h.fail(w, "delete flagged prompt", err)
+		return
+	}
+	h.audit(r, "flagged_prompt_deleted", fingerprint)
+	writeJSON(w, http.StatusOK, map[string]any{})
+}

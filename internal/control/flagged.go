@@ -35,3 +35,9 @@ func (c *Control) PinFlaggedPrompt(ctx context.Context, fingerprint string) erro
 func (c *Control) UnpinFlaggedPrompt(ctx context.Context, fingerprint string) error {
 	return c.cfg.Flags.Unpin(ctx, fingerprint)
 }
+
+// DeleteFlaggedPrompt removes a flagged prompt record and lifts any active
+// flag or pin on it.
+func (c *Control) DeleteFlaggedPrompt(ctx context.Context, fingerprint string) error {
+	return c.cfg.Flags.Delete(ctx, fingerprint)
+}
