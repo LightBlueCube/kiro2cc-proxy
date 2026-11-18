@@ -3,6 +3,7 @@ package admin
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -39,7 +40,10 @@ func (h *Handler) listUpstreamCalls(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []upstreamInfoView{}
 	for _, c := range calls {
-		out = append(out, upstreamInfoView(c))
+		out = append(out, upstreamInfoView{
+			ID: c.ID, At: c.At, Account: cmp.Or(c.AccountName, c.Account), Session: c.Session, Seq: c.Seq, Model: c.Model, Status: c.Status,
+			RequestBytes: c.RequestBytes, ResponseBytes: c.ResponseBytes, ResponseTruncated: c.ResponseTruncated,
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -82,7 +86,7 @@ func (h *Handler) getUpstreamCall(w http.ResponseWriter, r *http.Request) {
 	}
 	v := upstreamCallView{
 		upstreamInfoView: upstreamInfoView{
-			ID: c.ID, At: c.At, Account: c.Account, Session: c.Session, Seq: c.Seq, Model: c.Model, Status: c.Status,
+			ID: c.ID, At: c.At, Account: cmp.Or(c.AccountName, c.Account), Session: c.Session, Seq: c.Seq, Model: c.Model, Status: c.Status,
 			RequestBytes: int64(len(c.Request)), ResponseBytes: int64(len(c.Response)), ResponseTruncated: c.ResponseTruncated,
 		},
 		Response: parseResponse(c.Response, c.Status),

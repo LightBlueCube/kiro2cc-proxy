@@ -77,9 +77,11 @@ type Record struct {
 	QuotaGroup string
 	// KeyGroup is the group of the key's spend limit that the request counts in.
 	KeyGroup string
-	// Account and Mode are empty when no attempt started.
-	Account string
-	Mode    Mode
+	// Account (the account ID), AccountName, and Mode are empty when no
+	// attempt started.
+	Account     string
+	AccountName string
+	Mode        Mode
 	// ReplayReason is set when Mode is ModeReplay.
 	ReplayReason ReplayReason
 

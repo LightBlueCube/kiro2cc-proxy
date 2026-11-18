@@ -181,6 +181,8 @@
   "accounts.title": "Accounts",
   "accounts.empty": "No accounts yet. Add one above.",
   "accounts.name.placeholder": "main",
+  "accounts.rename": "Rename",
+  "accounts.rename.prompt": "New name for {name}:",
   "accounts.proxy": "HTTP proxy",
   "accounts.proxy.hint": "agy's traffic, sign-in included, goes through this HTTP proxy",
   "accounts.proxy.edit": "Proxy",

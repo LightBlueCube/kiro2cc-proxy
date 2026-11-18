@@ -71,7 +71,7 @@ func (f *Flags) Flag(ctx context.Context, p gateway.FlaggedPrompt) error {
 	f.mu.Unlock()
 	return f.store.FlagPrompt(ctx, store.FlaggedPrompt{
 		Fingerprint: p.Fingerprint, Text: p.Text, LastAt: p.At, Until: p.Until,
-		KeyHash: p.KeyHash, KeyName: p.KeyName, Account: p.Account, Model: p.Model,
+		KeyHash: p.KeyHash, KeyName: p.KeyName, Account: p.Account, AccountName: p.AccountName, Model: p.Model,
 	})
 }
 

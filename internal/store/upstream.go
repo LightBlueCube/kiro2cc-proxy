@@ -24,8 +24,9 @@ type UpstreamCall struct {
 	ID int64
 	At time.Time
 	// CallToken ties the call to the request (Request.CallToken) it served.
-	CallToken string
-	Account   string
+	CallToken   string
+	Account     string
+	AccountName string
 	// Session is the ACP session the call served.
 	Session string
 	// Seq is the call's number within its trajectory.
@@ -45,6 +46,7 @@ type UpstreamCallInfo struct {
 	ID                int64
 	At                time.Time
 	Account           string
+	AccountName       string
 	Session           string
 	Seq               int
 	Model             string
@@ -56,6 +58,8 @@ type UpstreamCallInfo struct {
 
 func upstreamCutoff() int64 { return time.Now().Add(-UpstreamRetention).UnixMilli() }
 
+const upstreamAccountNameExpr = `COALESCE((SELECT name FROM accounts WHERE id = upstream_calls.account), NULLIF(account_name, ''), account)`
+
 // AddUpstreamCall stores the call with its bodies compressed.
 func (s *Store) AddUpstreamCall(ctx context.Context, c UpstreamCall) error {
 	request, err := compress(c.Request)
@@ -66,9 +70,9 @@ func (s *Store) AddUpstreamCall(ctx context.Context, c UpstreamCall) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO upstream_calls (at, call_token, account, session, seq, model, status, request, response,
-		request_bytes, response_bytes, response_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		c.At.UnixMilli(), c.CallToken, c.Account, c.Session, c.Seq, c.Model, c.Status, request, response,
+	_, err = s.db.ExecContext(ctx, `INSERT INTO upstream_calls (at, call_token, account, account_name, session, seq, model, status, request, response,
+		request_bytes, response_bytes, response_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.At.UnixMilli(), c.CallToken, c.Account, c.AccountName, c.Session, c.Seq, c.Model, c.Status, request, response,
 		len(c.Request), len(c.Response), c.ResponseTruncated)
 	return err
 }
@@ -76,7 +80,7 @@ func (s *Store) AddUpstreamCall(ctx context.Context, c UpstreamCall) error {
 // UpstreamCalls lists the kept calls captured for the request with the
 // id, oldest first, without their bodies.
 func (s *Store) UpstreamCalls(ctx context.Context, requestID int64) ([]UpstreamCallInfo, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, at, account, session, seq, model, status, request_bytes, response_bytes, response_truncated
+	rows, err := s.db.QueryContext(ctx, `SELECT id, at, account, `+upstreamAccountNameExpr+`, session, seq, model, status, request_bytes, response_bytes, response_truncated
 		FROM upstream_calls
 		WHERE call_token != '' AND call_token = (SELECT call_token FROM requests WHERE id = ?) AND at >= ? ORDER BY id`, requestID, upstreamCutoff())
 	if err != nil {
@@ -87,7 +91,7 @@ func (s *Store) UpstreamCalls(ctx context.Context, requestID int64) ([]UpstreamC
 	for rows.Next() {
 		var c UpstreamCallInfo
 		var at int64
-		if err := rows.Scan(&c.ID, &at, &c.Account, &c.Session, &c.Seq, &c.Model, &c.Status, &c.RequestBytes, &c.ResponseBytes, &c.ResponseTruncated); err != nil {
+		if err := rows.Scan(&c.ID, &at, &c.Account, &c.AccountName, &c.Session, &c.Seq, &c.Model, &c.Status, &c.RequestBytes, &c.ResponseBytes, &c.ResponseTruncated); err != nil {
 			return nil, err
 		}
 		c.At = time.UnixMilli(at)
@@ -101,9 +105,9 @@ func (s *Store) UpstreamCall(ctx context.Context, id int64) (UpstreamCall, error
 	var c UpstreamCall
 	var at int64
 	var request, response []byte
-	err := s.db.QueryRowContext(ctx, `SELECT id, at, call_token, account, session, seq, model, status, request, response, response_truncated
+	err := s.db.QueryRowContext(ctx, `SELECT id, at, call_token, account, `+upstreamAccountNameExpr+`, session, seq, model, status, request, response, response_truncated
 		FROM upstream_calls WHERE id = ? AND at >= ?`, id, upstreamCutoff()).
-		Scan(&c.ID, &at, &c.CallToken, &c.Account, &c.Session, &c.Seq, &c.Model, &c.Status, &request, &response, &c.ResponseTruncated)
+		Scan(&c.ID, &at, &c.CallToken, &c.Account, &c.AccountName, &c.Session, &c.Seq, &c.Model, &c.Status, &request, &response, &c.ResponseTruncated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UpstreamCall{}, ErrNotFound
 	}

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"cmp"
 	"net/http"
 	"strconv"
 	"time"
@@ -104,7 +105,7 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 	out := []requestView{}
 	for _, row := range rows {
 		v := requestView{
-			ID: row.ID, At: row.At, Key: row.KeyName, KeyHash: row.KeyHash, Account: row.Account, Model: row.Model, Slug: row.Slug, Effort: row.Effort, API: row.API,
+			ID: row.ID, At: row.At, Key: row.KeyName, KeyHash: row.KeyHash, Account: cmp.Or(row.AccountName, row.Account), Model: row.Model, Slug: row.Slug, Effort: row.Effort, API: row.API,
 			Stream: row.Stream, Anchor: row.Anchor, Mode: row.Mode, ReplayReason: row.ReplayReason, Status: row.Status, Error: row.Error, Finish: row.Finish,
 			DurationMS: row.Duration.Milliseconds(), Input: row.Input, Cached: row.Cached, Output: row.Output,
 			Reasoning: row.Reasoning, CostUSD: row.CostUSD, QuotaGroup: row.QuotaGroup, QuotaUsed: row.QuotaUsed, QuotaSkip: string(row.QuotaSkip),
@@ -193,16 +194,23 @@ func (h *Handler) filterValues(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"key": keys}
 	distinctFilter := store.RequestFilter{KeyHash: f.KeyHash, Since: f.Since}
-	for _, by := range []store.SummaryBy{store.ByModel, store.ByAccount} {
-		values, err := h.store.Distinct(r.Context(), by, distinctFilter)
-		if err != nil {
-			h.internalError(w, "list filter values", err)
-			return
-		}
-		if values == nil {
-			values = []string{}
-		}
-		out[string(by)] = values
+	models, err := h.store.Distinct(r.Context(), store.ByModel, distinctFilter)
+	if err != nil {
+		h.internalError(w, "list filter values", err)
+		return
 	}
+	if models == nil {
+		models = []string{}
+	}
+	out["model"] = models
+	accounts, err := h.store.RequestAccounts(r.Context(), distinctFilter)
+	if err != nil {
+		h.internalError(w, "list filter values", err)
+		return
+	}
+	if accounts == nil {
+		accounts = []store.RequestAccount{}
+	}
+	out["account"] = accounts
 	writeJSON(w, http.StatusOK, out)
 }

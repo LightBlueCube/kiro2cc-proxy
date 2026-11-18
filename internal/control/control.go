@@ -5,6 +5,7 @@ package control
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -312,13 +313,23 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 	if err != nil {
 		return nil, err
 	}
+	nameToID := make(map[string]string, len(accounts))
 	for _, a := range accounts {
-		account, err := c.addToPool(a.Name, a.Env, a.Proxy)
+		nameToID[a.Name] = a.ID
+		if err := c.migrateAccountDir(a); err != nil {
+			return nil, err
+		}
+		account, err := c.addToPool(a.ID, a.Name, a.Env, a.Proxy)
 		if err != nil {
 			return nil, err
 		}
 		account.SetPaused(a.Paused)
 		account.SetRouting(a.Priority, a.Models)
+	}
+	if cfg.Gateway != nil {
+		if err := cfg.Gateway.MigrateAccountIDs(nameToID); err != nil {
+			return nil, err
+		}
 	}
 	if err := c.reloadKeys(ctx); err != nil {
 		return nil, err
@@ -330,7 +341,29 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 	return c, nil
 }
 
-func (c *Control) accountHome(name string) string { return filepath.Join(c.cfg.AccountsDir, name) }
+func (c *Control) accountHome(id string) string { return filepath.Join(c.cfg.AccountsDir, id) }
+
+// migrateAccountDir moves a pre-UUID account directory (<AccountsDir>/<name>)
+// to <AccountsDir>/<id> on first startup after schema upgrade.
+func (c *Control) migrateAccountDir(a store.Account) error {
+	if a.ID == a.Name || !pool.ValidAccountID(a.Name) {
+		return nil
+	}
+	newHome := c.accountHome(a.ID)
+	if _, err := os.Lstat(newHome); !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	oldHome := c.accountHome(a.Name)
+	if _, err := os.Lstat(oldHome); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := os.Rename(oldHome, newHome); err != nil {
+		return fmt.Errorf("migrate account %s directory: %w", a.Name, err)
+	}
+	return nil
+}
 
 func (c *Control) Settings() Settings {
 	c.mu.Lock()
@@ -408,15 +441,19 @@ func (c *Control) saveUpstreamCall(call cloudcode.Captured) {
 	if !c.Settings().CaptureUpstream {
 		return
 	}
+	accountName := ""
+	if account := c.cfg.Pool.Account(call.Account); account != nil {
+		accountName = account.Name()
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), saveUpstreamTimeout)
 		defer cancel()
 		err := c.cfg.Store.AddUpstreamCall(ctx, store.UpstreamCall{
-			At: call.At, CallToken: call.Tag, Account: call.Account, Session: call.Session, Seq: call.Seq, Model: call.Model,
+			At: call.At, CallToken: call.Tag, Account: call.Account, AccountName: accountName, Session: call.Session, Seq: call.Seq, Model: call.Model,
 			Status: call.Status, Request: call.Request, Response: call.Response, ResponseTruncated: call.ResponseTruncated,
 		})
 		if err != nil {
-			c.log.Error("upstream call not saved", "account", call.Account, "session", call.Session, "err", err)
+			c.log.Error("upstream call not saved", "account", cmp.Or(accountName, call.Account), "session", call.Session, "err", err)
 		}
 	}()
 }
@@ -442,7 +479,7 @@ func routeFor(accountProxy string, s Settings) egress.Route {
 // it has none.
 func (c *Control) applyRoute(account *pool.Account, accountProxy string) {
 	route := routeFor(accountProxy, c.Settings())
-	c.cfg.Egress.SetRoute(account.Name(), route)
+	c.cfg.Egress.SetRoute(account.ID(), route)
 	if route.Refused() {
 		account.SetBlocked(ErrNoRoute)
 		return
@@ -456,7 +493,7 @@ func (c *Control) applyRoutes(ctx context.Context) error {
 		return err
 	}
 	for _, account := range c.cfg.Pool.Accounts() {
-		c.applyRoute(account, records[account.Name()].Proxy)
+		c.applyRoute(account, records[account.ID()].Proxy)
 	}
 	return nil
 }
@@ -505,10 +542,21 @@ type InputError struct{ Message string }
 
 func (e *InputError) Error() string { return e.Message }
 
+func validateAccountName(name string) error {
+	if name == "" || len(name) > 64 {
+		return &InputError{"account names have 1 to 64 characters"}
+	}
+	if strings.ContainsFunc(name, unicode.IsControl) {
+		return &InputError{"account names cannot contain control characters"}
+	}
+	return nil
+}
+
 // AddAccount registers a new account; it needs a sign-in before use.
 func (c *Control) AddAccount(ctx context.Context, name string, env []string, proxy string) (*pool.Account, error) {
-	if !pool.ValidAccountName(name) {
-		return nil, &InputError{"account names use letters, digits, '.', '_', '-' and start with a letter or digit"}
+	name = strings.TrimSpace(name)
+	if err := validateAccountName(name); err != nil {
+		return nil, err
 	}
 	for _, kv := range env {
 		if k, _, ok := strings.Cut(kv, "="); !ok || k == "" {
@@ -519,16 +567,17 @@ func (c *Control) AddAccount(ctx context.Context, name string, env []string, pro
 	if err != nil {
 		return nil, err
 	}
-	err = c.cfg.Store.AddAccount(ctx, store.Account{Name: name, Env: env, Proxy: proxy, CreatedAt: time.Now()})
+	id := store.NewUUID()
+	err = c.cfg.Store.AddAccount(ctx, store.Account{ID: id, Name: name, Env: env, Proxy: proxy, CreatedAt: time.Now()})
 	if errors.Is(err, store.ErrExists) {
 		return nil, &InputError{fmt.Sprintf("account %q exists", name)}
 	}
 	if err != nil {
 		return nil, err
 	}
-	account, err := c.addToPool(name, env, proxy)
+	account, err := c.addToPool(id, name, env, proxy)
 	if err != nil {
-		if rmErr := c.cfg.Store.RemoveAccount(ctx, name); rmErr != nil {
+		if rmErr := c.cfg.Store.RemoveAccount(ctx, id); rmErr != nil {
 			c.log.Error("account half-added", "account", name, "err", rmErr)
 		}
 		return nil, err
@@ -536,15 +585,41 @@ func (c *Control) AddAccount(ctx context.Context, name string, env []string, pro
 	return account, nil
 }
 
+// RenameAccount changes the account's display name without touching its
+// directory, running agy processes, or open sessions.
+func (c *Control) RenameAccount(ctx context.Context, id, newName string) (oldName string, err error) {
+	newName = strings.TrimSpace(newName)
+	if err := validateAccountName(newName); err != nil {
+		return "", err
+	}
+	account := c.cfg.Pool.Account(id)
+	if account == nil {
+		return "", store.ErrNotFound
+	}
+	oldName = account.Name()
+	if newName == oldName {
+		return oldName, nil
+	}
+	err = c.cfg.Store.RenameAccount(ctx, id, newName)
+	if errors.Is(err, store.ErrExists) {
+		return "", &InputError{fmt.Sprintf("account %q exists", newName)}
+	}
+	if err != nil {
+		return "", err
+	}
+	account.SetName(newName)
+	return oldName, nil
+}
+
 // addToPool registers the account with the egress and Cloud Code proxies
 // and the pool; its agy talks only to them, and egress routes by
 // accountProxy.
-func (c *Control) addToPool(name string, env []string, accountProxy string) (*pool.Account, error) {
-	egressURL := c.cfg.Egress.Register(name)
+func (c *Control) addToPool(id, name string, env []string, accountProxy string) (*pool.Account, error) {
+	egressURL := c.cfg.Egress.Register(id)
 	// A report after the account left the pool (a call in flight while it
 	// was removed) has no account to go to.
-	endpoint, err := c.cfg.CloudCode.Register(name, egressURL, func(v *cloudcode.Verification) {
-		account := c.cfg.Pool.Account(name)
+	endpoint, err := c.cfg.CloudCode.Register(id, egressURL, func(v *cloudcode.Verification) {
+		account := c.cfg.Pool.Account(id)
 		if account == nil {
 			return
 		}
@@ -554,7 +629,7 @@ func (c *Control) addToPool(name string, env []string, accountProxy string) (*po
 		}
 		account.SetVerification(true, v.URL)
 	}, func(session, model string, callErr *cloudcode.CallError) bool {
-		account := c.cfg.Pool.Account(name)
+		account := c.cfg.Pool.Account(id)
 		if account == nil {
 			return false
 		}
@@ -575,25 +650,25 @@ func (c *Control) addToPool(name string, env []string, accountProxy string) (*po
 		return true
 	})
 	if err != nil {
-		c.cfg.Egress.Forget(name)
+		c.cfg.Egress.Forget(id)
 		return nil, err
 	}
-	account, err := c.cfg.Pool.Add(pool.AccountConfig{Name: name, Home: c.accountHome(name), Env: env, Proxy: egressURL, CloudCodeEndpoint: endpoint})
+	account, err := c.cfg.Pool.Add(pool.AccountConfig{ID: id, Name: name, Home: c.accountHome(id), Env: env, Proxy: egressURL, CloudCodeEndpoint: endpoint})
 	if err != nil {
-		c.cfg.CloudCode.Forget(name)
-		c.cfg.Egress.Forget(name)
+		c.cfg.CloudCode.Forget(id)
+		c.cfg.Egress.Forget(id)
 		return nil, err
 	}
 	c.applyRoute(account, accountProxy)
 	return account, nil
 }
 
-func (c *Control) SetAccountPaused(ctx context.Context, name string, paused bool) error {
-	account := c.cfg.Pool.Account(name)
+func (c *Control) SetAccountPaused(ctx context.Context, id string, paused bool) error {
+	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return store.ErrNotFound
 	}
-	if err := c.cfg.Store.SetAccountPaused(ctx, name, paused); err != nil {
+	if err := c.cfg.Store.SetAccountPaused(ctx, id, paused); err != nil {
 		return err
 	}
 	account.SetPaused(paused)
@@ -602,13 +677,13 @@ func (c *Control) SetAccountPaused(ctx context.Context, name string, paused bool
 
 // SetAccountRouting changes the account's routing priority and the
 // models it may serve (empty allows all models it offers).
-func (c *Control) SetAccountRouting(ctx context.Context, name string, priority int, models []string) error {
-	account := c.cfg.Pool.Account(name)
+func (c *Control) SetAccountRouting(ctx context.Context, id string, priority int, models []string) error {
+	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return store.ErrNotFound
 	}
 	models = cleanModels(models)
-	if err := c.cfg.Store.SetAccountRouting(ctx, name, priority, models); err != nil {
+	if err := c.cfg.Store.SetAccountRouting(ctx, id, priority, models); err != nil {
 		return err
 	}
 	account.SetRouting(priority, models)
@@ -618,8 +693,8 @@ func (c *Control) SetAccountRouting(ctx context.Context, name string, priority i
 // SetAccountProxy changes the account's own proxy ("" = use the fallback
 // route). Open connections close and agy reconnects through the new
 // route; agy keeps running.
-func (c *Control) SetAccountProxy(ctx context.Context, name, proxy string) error {
-	account := c.cfg.Pool.Account(name)
+func (c *Control) SetAccountProxy(ctx context.Context, id, proxy string) error {
+	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return store.ErrNotFound
 	}
@@ -627,7 +702,7 @@ func (c *Control) SetAccountProxy(ctx context.Context, name, proxy string) error
 	if err != nil {
 		return err
 	}
-	if err := c.cfg.Store.SetAccountProxy(ctx, name, proxy); err != nil {
+	if err := c.cfg.Store.SetAccountProxy(ctx, id, proxy); err != nil {
 		return err
 	}
 	c.applyRoute(account, proxy)
@@ -651,26 +726,31 @@ func cleanProxy(raw string) (string, error) {
 }
 
 // RemoveAccount unregisters the account and deletes its HOME directory:
-// its sign-in and agy's sessions go with it.
-func (c *Control) RemoveAccount(ctx context.Context, name string) error {
-	if err := c.cfg.Store.RemoveAccount(ctx, name); err != nil {
-		return err
+// its sign-in and agy's sessions go with it. It returns the removed
+// account's display name.
+func (c *Control) RemoveAccount(ctx context.Context, id string) (string, error) {
+	name := id
+	if account := c.cfg.Pool.Account(id); account != nil {
+		name = account.Name()
 	}
-	c.CancelLogin(name)
-	c.cfg.Monitor.Forget(name)
-	if err := c.cfg.Pool.Remove(name); err != nil {
-		return err
+	if err := c.cfg.Store.RemoveAccount(ctx, id); err != nil {
+		return "", err
 	}
-	c.cfg.CloudCode.Forget(name)
-	c.cfg.Egress.Forget(name)
-	if err := os.RemoveAll(c.accountHome(name)); err != nil {
-		return fmt.Errorf("account removed, but deleting its files failed: %w", err)
+	c.CancelLogin(id)
+	c.cfg.Monitor.Forget(id)
+	if err := c.cfg.Pool.Remove(id); err != nil {
+		return name, err
 	}
-	return nil
+	c.cfg.CloudCode.Forget(id)
+	c.cfg.Egress.Forget(id)
+	if err := os.RemoveAll(c.accountHome(id)); err != nil {
+		return name, fmt.Errorf("account removed, but deleting its files failed: %w", err)
+	}
+	return name, nil
 }
 
 // AccountRecords returns the stored side of the accounts (env, creation
-// time) by name.
+// time) by ID.
 func (c *Control) AccountRecords(ctx context.Context) (map[string]store.Account, error) {
 	accounts, err := c.cfg.Store.Accounts(ctx)
 	if err != nil {
@@ -678,7 +758,7 @@ func (c *Control) AccountRecords(ctx context.Context) (map[string]store.Account,
 	}
 	out := make(map[string]store.Account, len(accounts))
 	for _, a := range accounts {
-		out[a.Name] = a
+		out[a.ID] = a
 	}
 	return out, nil
 }
@@ -733,20 +813,20 @@ func (c *Control) UpstreamModels(account string) []cloudcode.AgentModel {
 // runs. Google's earlier refusals for a missing verification are
 // forgotten first, so the refresh checks again whether it still wants
 // one.
-func (c *Control) RefreshAccount(ctx context.Context, name string) error {
-	account := c.cfg.Pool.Account(name)
+func (c *Control) RefreshAccount(ctx context.Context, id string) error {
+	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return store.ErrNotFound
 	}
-	c.cfg.CloudCode.ClearVerification(name)
+	c.cfg.CloudCode.ClearVerification(id)
 	_, err := c.cfg.Monitor.Refresh(ctx, account)
 	return err
 }
 
 // AgyLogFiles lists the account's agy logs and crash reports, newest
 // first.
-func (c *Control) AgyLogFiles(name string) ([]agy.LogFile, error) {
-	account := c.cfg.Pool.Account(name)
+func (c *Control) AgyLogFiles(id string) ([]agy.LogFile, error) {
+	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return nil, store.ErrNotFound
 	}
@@ -754,8 +834,8 @@ func (c *Control) AgyLogFiles(name string) ([]agy.LogFile, error) {
 }
 
 // AgyLogs returns the entries of the account's agy logs that q selects.
-func (c *Control) AgyLogs(name string, q agy.LogQuery) (agy.LogResult, error) {
-	account := c.cfg.Pool.Account(name)
+func (c *Control) AgyLogs(id string, q agy.LogQuery) (agy.LogResult, error) {
+	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return agy.LogResult{}, store.ErrNotFound
 	}

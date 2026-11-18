@@ -18,12 +18,16 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"agyrelay/internal/agy"
 )
 
 // AccountConfig is one configured account.
 type AccountConfig struct {
+	// ID is the immutable identifier (used for directory, egress, and routing
+	// keys). When empty in tests, Name is used.
+	ID   string
 	Name string
 	// Home is the account's HOME directory; agy keeps its sign-in below it.
 	Home string
@@ -60,7 +64,7 @@ type Pool struct {
 // Account is one Antigravity sign-in.
 type Account struct {
 	pool      *Pool
-	name      string
+	id        string
 	home      string
 	geminiDir string
 	workspace string
@@ -70,6 +74,7 @@ type Account struct {
 	cloudCodeEndpoint string
 
 	mu    sync.Mutex
+	name  string
 	turns int
 	// runs maps the turns that make model calls to when they began; a turn
 	// waiting for tool results is not in it.
@@ -111,6 +116,7 @@ type Account struct {
 
 // Status is a point-in-time view of an account.
 type Status struct {
+	ID       string
 	Name     string
 	Paused   bool
 	Disabled string
@@ -133,7 +139,7 @@ type procSlot struct {
 	err      error
 }
 
-var accountName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+var accountID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 func New(cfg Config) (*Pool, error) {
 	p := &Pool{cfg: cfg, log: cfg.Log}
@@ -146,12 +152,24 @@ func New(cfg Config) (*Pool, error) {
 	return p, nil
 }
 
-// ValidAccountName reports whether name can name an account (and its
-// directory).
-func ValidAccountName(name string) bool { return accountName.MatchString(name) && len(name) <= 64 }
+// ValidAccountID reports whether id is safe as an account directory and proxy
+// identifier.
+func ValidAccountID(id string) bool { return accountID.MatchString(id) && len(id) <= 64 }
+
+// ValidAccountName reports whether name can be an account's display name.
+func ValidAccountName(name string) bool {
+	return name != "" && len(name) <= 64 && !strings.ContainsFunc(name, unicode.IsControl)
+}
 
 // Add registers an account and creates its directories.
 func (p *Pool) Add(ac AccountConfig) (*Account, error) {
+	id := ac.ID
+	if id == "" {
+		id = ac.Name
+	}
+	if !ValidAccountID(id) {
+		return nil, fmt.Errorf("invalid account id %q", id)
+	}
 	if !ValidAccountName(ac.Name) {
 		return nil, fmt.Errorf("invalid account name %q", ac.Name)
 	}
@@ -161,6 +179,7 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 	}
 	a := &Account{
 		pool:              p,
+		id:                id,
 		name:              ac.Name,
 		home:              home,
 		geminiDir:         filepath.Join(home, ".gemini"),
@@ -179,8 +198,8 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.accountLocked(ac.Name) != nil {
-		return nil, fmt.Errorf("duplicate account name %q", ac.Name)
+	if p.accountLocked(id) != nil {
+		return nil, fmt.Errorf("duplicate account id %q", id)
 	}
 	p.accounts = append(p.accounts, a)
 	return a, nil
@@ -188,17 +207,18 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 
 // Remove unregisters an account and kills its processes; turns running
 // there fail. Its directory stays.
-func (p *Pool) Remove(name string) error {
+func (p *Pool) Remove(id string) error {
 	p.mu.Lock()
-	a := p.accountLocked(name)
+	a := p.accountLocked(id)
 	if a == nil {
 		p.mu.Unlock()
-		return fmt.Errorf("no account %q", name)
+		return fmt.Errorf("no account %q", id)
 	}
 	p.accounts = slices.DeleteFunc(p.accounts, func(x *Account) bool { return x == a })
 	p.mu.Unlock()
 	a.mu.Lock()
 	a.removed = true
+	name := a.name
 	a.mu.Unlock()
 	// The caller deletes the account's files next; agy must be gone.
 	for _, proc := range a.killProcs() {
@@ -228,16 +248,16 @@ func (p *Pool) Accounts() []*Account {
 	return slices.Clone(p.accounts)
 }
 
-// Account finds an account by name.
-func (p *Pool) Account(name string) *Account {
+// Account finds an account by ID.
+func (p *Pool) Account(id string) *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.accountLocked(name)
+	return p.accountLocked(id)
 }
 
-func (p *Pool) accountLocked(name string) *Account {
+func (p *Pool) accountLocked(id string) *Account {
 	for _, a := range p.accounts {
-		if a.name == name {
+		if a.id == id {
 			return a
 		}
 	}
@@ -252,9 +272,9 @@ type IdleSessions struct {
 
 // Pick reserves a turn slot on the best account for user and model, by
 // the quota group each account charges the model to, skipping excluded
-// accounts. It first tries accounts with a
+// accounts (by ID). It first tries accounts with a
 // free worker slot (busy + idle < TurnsPerAccount), ranked by priority and
-// rendezvous hash of (user, account), and only falls back to accounts that
+// rendezvous hash of (user, account ID), and only falls back to accounts that
 // must evict an idle worker (oldest idle session first within the same
 // priority) when every eligible account is full. The caller must Release
 // the slot.
@@ -264,10 +284,10 @@ func (p *Pool) Pick(user, model string, exclude map[string]bool, idle map[string
 		return compareAccounts(user, a, b, nil)
 	})
 	for _, a := range ranked {
-		if exclude[a.name] {
+		if exclude[a.id] {
 			continue
 		}
-		if err := a.tryAcquire(a.PoolGroup(model), idle[a.name].Count); err == nil {
+		if err := a.tryAcquire(a.PoolGroup(model), idle[a.id].Count); err == nil {
 			return a, nil
 		}
 	}
@@ -276,11 +296,11 @@ func (p *Pool) Pick(user, model string, exclude map[string]bool, idle map[string
 	})
 	var reasons []string
 	for _, a := range ranked {
-		if exclude[a.name] {
+		if exclude[a.id] {
 			continue
 		}
 		if err := a.TryAcquire(a.PoolGroup(model)); err != nil {
-			reasons = append(reasons, fmt.Sprintf("%s: %v", a.name, err))
+			reasons = append(reasons, fmt.Sprintf("%s: %v", a.Name(), err))
 			continue
 		}
 		return a, nil
@@ -300,7 +320,7 @@ func compareAccounts(user string, a, b *Account, idle map[string]IdleSessions) i
 		return 1
 	}
 	if idle != nil {
-		ia, ib := idle[a.name], idle[b.name]
+		ia, ib := idle[a.id], idle[b.id]
 		if (ia.Count > 0) != (ib.Count > 0) {
 			if ia.Count > 0 {
 				return -1
@@ -314,14 +334,14 @@ func compareAccounts(user string, a, b *Account, idle map[string]IdleSessions) i
 			return 1
 		}
 	}
-	ra, rb := rendezvous(user, a.name), rendezvous(user, b.name)
+	ra, rb := rendezvous(user, a.id), rendezvous(user, b.id)
 	switch {
 	case ra > rb:
 		return -1
 	case ra < rb:
 		return 1
 	}
-	return strings.Compare(a.name, b.name)
+	return strings.Compare(a.id, b.id)
 }
 
 func rendezvous(user, account string) uint64 {
@@ -329,7 +349,19 @@ func rendezvous(user, account string) uint64 {
 	return binary.BigEndian.Uint64(sum[:8])
 }
 
-func (a *Account) Name() string { return a.name }
+func (a *Account) ID() string { return a.id }
+
+func (a *Account) Name() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.name
+}
+
+func (a *Account) SetName(name string) {
+	a.mu.Lock()
+	a.name = name
+	a.mu.Unlock()
+}
 
 // GeminiDir is agy's data root for this account.
 func (a *Account) GeminiDir() string { return a.geminiDir }
@@ -463,9 +495,10 @@ func (a *Account) Cool(group string, until time.Time) {
 	if until.After(a.cooldown[group]) {
 		a.cooldown[group] = until
 	}
+	name := a.name
 	a.mu.Unlock()
 	if !wasCooling {
-		a.pool.log.Warn("account quota cooling down", "account", a.name, "group", group, "until", until)
+		a.pool.log.Warn("account quota cooling down", "account", name, "group", group, "until", until)
 	}
 }
 
@@ -541,9 +574,10 @@ func (a *Account) RecordModelCall(session, model string, failure *ModelFailure) 
 	} else {
 		delete(a.streaks, session)
 	}
+	name := a.name
 	a.mu.Unlock()
 	if risk {
-		a.pool.log.Warn("request under risk control", "account", a.name, "session", session, "model", model)
+		a.pool.log.Warn("request under risk control", "account", name, "session", session, "model", model)
 	}
 	return risk
 }
@@ -608,8 +642,9 @@ func (a *Account) ForgetModelFailure(session string) {
 func (a *Account) Disable(reason error) {
 	a.mu.Lock()
 	a.disabled = reason
+	name := a.name
 	a.mu.Unlock()
-	a.pool.log.Error("account disabled", "account", a.name, "reason", reason)
+	a.pool.log.Error("account disabled", "account", name, "reason", reason)
 }
 
 // SignedIn returns a disabled account to rotation after a new sign-in.
@@ -617,9 +652,10 @@ func (a *Account) Disable(reason error) {
 func (a *Account) SignedIn() {
 	a.mu.Lock()
 	a.disabled = nil
+	name := a.name
 	a.mu.Unlock()
 	a.killProcs()
-	a.pool.log.Info("account signed in", "account", a.name)
+	a.pool.log.Info("account signed in", "account", name)
 }
 
 // Enable returns a disabled account to rotation when its sign-in works
@@ -628,9 +664,10 @@ func (a *Account) Enable() {
 	a.mu.Lock()
 	wasDisabled := a.disabled != nil
 	a.disabled = nil
+	name := a.name
 	a.mu.Unlock()
 	if wasDisabled {
-		a.pool.log.Info("account re-enabled", "account", a.name)
+		a.pool.log.Info("account re-enabled", "account", name)
 	}
 }
 
@@ -671,12 +708,13 @@ func (a *Account) SetVerification(required bool, url string) {
 	a.mu.Lock()
 	changed := a.verify != required
 	a.verify, a.verifyURL = required, url
+	name := a.name
 	a.mu.Unlock()
 	switch {
 	case changed && required:
-		a.pool.log.Warn("account needs verifying by its owner; out of rotation", "account", a.name)
+		a.pool.log.Warn("account needs verifying by its owner; out of rotation", "account", name)
 	case changed:
-		a.pool.log.Info("Google no longer asks for the account to be verified", "account", a.name)
+		a.pool.log.Info("Google no longer asks for the account to be verified", "account", name)
 	}
 }
 
@@ -690,7 +728,7 @@ func (a *Account) Blocked() error {
 func (a *Account) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	st := Status{Name: a.name, Paused: a.paused, Turns: a.turns, Cooldowns: map[string]time.Time{}}
+	st := Status{ID: a.id, Name: a.name, Paused: a.paused, Turns: a.turns, Cooldowns: map[string]time.Time{}}
 	if a.disabled != nil {
 		st.Disabled = a.disabled.Error()
 	}
@@ -761,7 +799,7 @@ func (a *Account) AllowsModel(modelID string) bool {
 // and the next request starts agy again.
 func (a *Account) Restart() {
 	a.killProcs()
-	a.pool.log.Info("account restarted", "account", a.name)
+	a.pool.log.Info("account restarted", "account", a.Name())
 }
 
 // LiveProcs returns the account's running agy processes.
@@ -868,8 +906,9 @@ func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, err
 }
 
 func (a *Account) startProc(ctx context.Context, profile agy.Profile) (*agy.Proc, error) {
+	name := a.Name()
 	if err := profile.Install(a.geminiDir); err != nil {
-		return nil, fmt.Errorf("account %s: %w", a.name, err)
+		return nil, fmt.Errorf("account %s: %w", name, err)
 	}
 	cfg := a.pool.cfg
 	proc, err := agy.StartProc(ctx, agy.ProcConfig{
@@ -880,10 +919,10 @@ func (a *Account) startProc(ctx context.Context, profile agy.Profile) (*agy.Proc
 		Agent:             profile.Name,
 		CloudCodeEndpoint: a.cloudCodeEndpoint,
 		Env:               a.Env(),
-		Log:               a.pool.log.With("account", a.name),
+		Log:               a.pool.log.With("account", name),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("account %s: %w", a.name, err)
+		return nil, fmt.Errorf("account %s: %w", name, err)
 	}
 	return proc, nil
 }

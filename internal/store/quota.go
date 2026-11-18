@@ -44,7 +44,7 @@ func (s *Store) LastQuotaSample(ctx context.Context, account, bucket string, bef
 // samples of it.
 func (s *Store) BucketAccounts(ctx context.Context) (map[string][]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT bucket, account FROM quota_samples
-		WHERE account IN (SELECT name FROM accounts) ORDER BY 1, 2`)
+		WHERE account IN (SELECT id FROM accounts) ORDER BY 1, 2`)
 	if err != nil {
 		return nil, err
 	}

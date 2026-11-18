@@ -46,9 +46,10 @@ type FlaggedPrompt struct {
 	// At is when it was refused; Until is when the flag ends.
 	At, Until time.Time
 	// KeyHash and KeyName name the API key whose request was refused;
-	// Account and Model, where.
-	KeyHash, KeyName string
-	Account, Model   string
+	// Account (ID), AccountName, and Model, where.
+	KeyHash, KeyName     string
+	Account, AccountName string
+	Model                string
 }
 
 // StopRiskySession ends the running turn of a session whose request
@@ -56,7 +57,7 @@ type FlaggedPrompt struct {
 // ErrRiskControl and its system prompt is flagged.
 func (g *Gateway) StopRiskySession(account *pool.Account, sessionID string) {
 	g.mu.Lock()
-	sess := g.sessions[sessionRef(account.Name(), sessionID)]
+	sess := g.sessions[sessionRef(account.ID(), sessionID)]
 	if sess == nil || sess.turn == nil || sess.turn.turn == nil {
 		g.mu.Unlock()
 		g.log.Warn("risk control on a session with no running turn", "account", account.Name(), "session", sessionID)
@@ -72,10 +73,10 @@ func (g *Gateway) StopRiskySession(account *pool.Account, sessionID string) {
 // control, and flags its system prompt when it has one. A request without
 // one is refused for something else, which a flag could not name.
 func (g *Gateway) riskControl(at *activeTurn, r *run) *attemptFailure {
-	account := at.account.Name()
-	failure := &attemptFailure{account: account}
+	account, accountName := at.account.ID(), at.account.Name()
+	failure := &attemptFailure{account: account, accountName: accountName}
 	if r.t.system == "" || g.flags == nil {
-		g.log.Warn("request refused by risk control", "account", account, "key", r.keyName)
+		g.log.Warn("request refused by risk control", "account", accountName, "key", r.keyName)
 		failure.err = &conv.Error{Kind: conv.ErrRiskControl, Message: "request rejected: Google's risk control refused this request"}
 		return failure
 	}
@@ -84,14 +85,14 @@ func (g *Gateway) riskControl(at *activeTurn, r *run) *attemptFailure {
 	prompt := FlaggedPrompt{
 		Fingerprint: sysprompt.Fingerprint(r.t.system), Text: r.t.system,
 		At: now, Until: now.Add(flagDuration),
-		KeyHash: r.user, KeyName: r.keyName, Account: account, Model: r.model.id,
+		KeyHash: r.user, KeyName: r.keyName, Account: account, AccountName: accountName, Model: r.model.id,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
 	defer cancel()
 	if err := g.flags.Flag(ctx, prompt); err != nil {
 		g.log.Error("flagged system prompt not saved", "fingerprint", prompt.Fingerprint, "err", err)
 	} else {
-		g.log.Warn("system prompt flagged by risk control", "account", account, "key", r.keyName, "fingerprint", prompt.Fingerprint, "until", prompt.Until)
+		g.log.Warn("system prompt flagged by risk control", "account", accountName, "key", r.keyName, "fingerprint", prompt.Fingerprint, "until", prompt.Until)
 	}
 	failure.err = &conv.Error{Kind: conv.ErrRiskControl, Message: flaggedMessage(prompt.Until)}
 	return failure

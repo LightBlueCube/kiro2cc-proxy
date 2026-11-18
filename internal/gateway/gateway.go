@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -293,6 +294,12 @@ func (g *Gateway) CallTokenOf(account, sessionID string) string {
 // SetSnapshotTTL changes how long idle sessions stay reusable.
 func (g *Gateway) SetSnapshotTTL(ttl time.Duration) { g.snaps.setTTL(ttl) }
 
+// MigrateAccountIDs rewrites legacy account names in persisted snapshots to
+// their immutable account IDs on upgrade.
+func (g *Gateway) MigrateAccountIDs(nameToID map[string]string) error {
+	return g.snaps.migrateAccounts(nameToID)
+}
+
 // Complete runs req for the caller's API key. The channel yields
 // output events and ends with exactly one Finish or Err event. An Err
 // before any output means nothing was produced, so the HTTP layer may
@@ -364,7 +371,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		at, failure := g.start(ctx, r)
 		if failure == nil {
 			g.mu.Lock()
-			rec.Account, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
+			rec.Account, rec.AccountName, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.ID(), at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
 			rec.QuotaGroup = r.poolGroup(at.account)
 			at.callToken = rec.CallToken
 			g.mu.Unlock()
@@ -381,7 +388,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		if !failure.retry || w.emitted || attempt >= attempts || ctx.Err() != nil || !g.hasCandidate(r) {
 			return g.finalizeFailure(r, failure)
 		}
-		g.log.Warn("retrying on another account", "account", failure.account, "err", failure.err.Message)
+		g.log.Warn("retrying on another account", "account", cmp.Or(failure.accountName, failure.account), "err", failure.err.Message)
 		r.reuse = false
 	}
 }
@@ -568,10 +575,11 @@ func (r *run) choice() string { return r.req.Model + "\x00" + r.req.Effort }
 // attemptFailure ends one attempt. retry means nothing reached the client
 // and another account may succeed.
 type attemptFailure struct {
-	err       *conv.Error
-	account   string
-	retry     bool
-	quotaWait time.Duration
+	err         *conv.Error
+	account     string
+	accountName string
+	retry       bool
+	quotaWait   time.Duration
 }
 
 // response writes one HTTP response's events and notes what it sent.
@@ -689,7 +697,7 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 // the final reply. release sends the output held back so far.
 func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() bool, text *strings.Builder) *attemptFailure {
 	outcome := at.turn.Outcome()
-	account := at.account.Name()
+	account, accountName := at.account.ID(), at.account.Name()
 	failure := at.account.ModelFailure(at.sess.id)
 	at.account.ForgetModelFailure(at.sess.id)
 	g.mu.Lock()
@@ -701,12 +709,12 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 		return g.riskControl(at, r)
 	}
 	if outcome.Err != nil {
-		g.log.Warn("turn failed", "account", account, "session", at.sess.id, "err", outcome.Err)
-		g.forget(at.account.Name(), at.sess.id)
+		g.log.Warn("turn failed", "account", accountName, "session", at.sess.id, "err", outcome.Err)
+		g.forget(account, at.sess.id)
 		if agy.IsAuthError(outcome.Err) {
 			at.account.Disable(outcome.Err)
 		}
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "upstream request failed"}, account: account, retry: true}
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "upstream request failed"}, account: account, accountName: accountName, retry: true}
 	}
 	if outcome.StopReason == agy.StopCancelled {
 		msg := "request cancelled by a newer request for this conversation"
@@ -843,7 +851,7 @@ func (g *Gateway) record(at *activeTurn, r *run, reply *conv.Message, steps int)
 	}
 	snap := snapshot{
 		User:      r.user,
-		Account:   at.account.Name(),
+		Account:   at.account.ID(),
 		SessionID: at.sess.id,
 		ToolsKey:  toolsKey(r.req.Tools),
 		Count:     count,
@@ -899,7 +907,7 @@ func (g *Gateway) watch(at *activeTurn) {
 	g.mu.Unlock()
 
 	if unobserved && outcome.StopReason != agy.StopCancelled {
-		g.forget(at.account.Name(), at.sess.id)
+		g.forget(at.account.ID(), at.sess.id)
 	}
 	close(at.closed)
 }
@@ -934,57 +942,47 @@ const statusSiteOverloaded = 529
 // until then and another one may serve the request. agy retries a 429
 // without one itself before it gives up.
 func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailure) *attemptFailure {
-	account := at.account.Name()
+	account, accountName := at.account.ID(), at.account.Name()
+	out := func(err *conv.Error, retry bool, quotaWait time.Duration) *attemptFailure {
+		return &attemptFailure{err: err, account: account, accountName: accountName, retry: retry, quotaWait: quotaWait}
+	}
 	switch {
 	case failure.Code == http.StatusBadRequest && contextOverflow.MatchString(failure.Message):
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrContextLength, Message: failure.Message}, account: account}
+		return out(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message}, false, 0)
 	case failure.Code == http.StatusRequestEntityTooLarge:
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrContextLength, Message: failure.Message, HTTPStatus: failure.Code}, account: account}
+		return out(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message, HTTPStatus: failure.Code}, false, 0)
 	case failure.Code == http.StatusBadRequest:
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message}, account: account}
+		return out(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message}, false, 0)
 	case failure.Code == http.StatusUnauthorized:
 		// Upstream account token failed: try another account; never pass 401
 		// downstream where it means the caller's API key is invalid.
-		return &attemptFailure{
-			err:     &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)},
-			account: account,
-			retry:   true,
-		}
+		return out(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, true, 0)
 	case failure.Code == http.StatusForbidden:
 		if at.account.Available(r.poolGroup(at.account)) != nil {
 			// VALIDATION_REQUIRED (or similar) removed this account; avoid
 			// leaking account-verification details to callers.
-			return &attemptFailure{
-				err:     &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)},
-				account: account,
-				retry:   true,
-			}
+			return out(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, true, 0)
 		}
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrForbidden, Message: failure.Message}, account: account, retry: true}
+		return out(&conv.Error{Kind: conv.ErrForbidden, Message: failure.Message}, true, 0)
 	case failure.Code == http.StatusNotFound:
 		// Map 404 to 400 model_not_found so clients like OpenCode do not retry
 		// it, after trying any other account that offers the model.
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: failure.Message}, account: account, retry: true}
+		return out(&conv.Error{Kind: conv.ErrUnknownModel, Message: failure.Message}, true, 0)
 	case failure.Code == http.StatusTooManyRequests:
 		wait := time.Until(failure.Reset)
 		if wait <= 0 {
-			return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account, retry: true}
+			return out(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, true, 0)
 		}
 		at.account.Cool(r.poolGroup(at.account), failure.Reset)
-		return &attemptFailure{
-			err:       &conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))},
-			account:   account,
-			retry:     true,
-			quotaWait: wait,
-		}
+		return out(&conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}, true, wait)
 	case failure.Code == http.StatusServiceUnavailable || failure.Code == statusSiteOverloaded:
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, account: account, retry: true}
+		return out(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, true, 0)
 	case failure.Code == http.StatusRequestTimeout || failure.Code == http.StatusConflict || failure.Code >= http.StatusInternalServerError:
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message, HTTPStatus: failure.Code}, account: account, retry: true}
+		return out(&conv.Error{Kind: conv.ErrUpstream, Message: failure.Message, HTTPStatus: failure.Code}, true, 0)
 	case failure.Code >= http.StatusBadRequest && failure.Code < http.StatusInternalServerError:
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message, HTTPStatus: failure.Code}, account: account}
+		return out(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message, HTTPStatus: failure.Code}, false, 0)
 	}
-	return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, account: account}
+	return out(&conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, false, 0)
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if

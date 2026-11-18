@@ -296,7 +296,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 		}
 		skip := func() {
 			account.Release()
-			r.exclude[account.Name()] = true
+			r.exclude[account.ID()] = true
 			lacking = append(lacking, account.Name())
 		}
 		if _, _, ok := slugOn(account, r); !ok {
@@ -311,7 +311,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			slug, tier, ok := slugOn(account, r)
 			if !ok {
 				g.releaseClaim(at)
-				r.exclude[account.Name()] = true
+				r.exclude[account.ID()] = true
 				lacking = append(lacking, account.Name())
 				continue
 			}
@@ -334,7 +334,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			account.Disable(err)
 		}
 		g.log.Warn("account could not open a session", "account", account.Name(), "err", err)
-		r.exclude[account.Name()] = true
+		r.exclude[account.ID()] = true
 		lastErr = err
 	}
 }
@@ -351,13 +351,13 @@ func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
 			g.dropSessionLocked(sess)
 			continue
 		}
-		name := sess.account.Name()
-		cur := idle[name]
+		id := sess.account.ID()
+		cur := idle[id]
 		cur.Count++
 		if cur.Count == 1 || sess.lastUsed.Before(cur.Oldest) {
 			cur.Oldest = sess.lastUsed
 		}
-		idle[name] = cur
+		idle[id] = cur
 	}
 	return g.pool.Pick(r.user, r.model.id, r.exclude, idle)
 }
@@ -391,7 +391,7 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 		return nil, err
 	}
 	account.SetModels(models)
-	sess.id, sess.ref, sess.binding = id, sessionRef(account.Name(), id), binding
+	sess.id, sess.ref, sess.binding = id, sessionRef(account.ID(), id), binding
 	at := newActiveTurn(sess)
 	at.account = account
 	g.mu.Lock()
@@ -405,7 +405,7 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 // session that has at least baseSteps native steps. The slot on account is
 // held until the turn settles.
 func (g *Gateway) launch(at *activeTurn, account *pool.Account, r *run, slug, tier string, prompt []agy.ContentBlock, baseSteps int) {
-	g.movedPast(account.Name(), at.sess.id)
+	g.movedPast(account.ID(), at.sess.id)
 	// A failure left by an earlier turn of the session is not this turn's.
 	account.ForgetModelFailure(at.sess.id)
 	g.mu.Lock()

@@ -12,8 +12,9 @@ import (
 )
 
 // Account is a registered Antigravity account. Its sign-in lives in its
-// HOME directory, not here.
+// HOME directory (<accounts>/<ID>), not here.
 type Account struct {
+	ID   string
 	Name string
 	// Env is extra environment for the account's agy.
 	Env []string
@@ -31,7 +32,7 @@ type Account struct {
 }
 
 func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, env, proxy, paused, priority, models, created_at FROM accounts ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, env, proxy, paused, priority, models, created_at FROM accounts ORDER BY name, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +42,7 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 		var a Account
 		var env, models string
 		var created int64
-		if err := rows.Scan(&a.Name, &env, &a.Proxy, &a.Paused, &a.Priority, &models, &created); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &env, &a.Proxy, &a.Paused, &a.Priority, &models, &created); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(env), &a.Env); err != nil {
@@ -57,6 +58,9 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 }
 
 func (s *Store) AddAccount(ctx context.Context, a Account) error {
+	if a.ID == "" {
+		a.ID = NewUUID()
+	}
 	env, err := json.Marshal(nonNil(a.Env))
 	if err != nil {
 		return err
@@ -65,29 +69,51 @@ func (s *Store) AddAccount(ctx context.Context, a Account) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts (name, env, proxy, paused, priority, models, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, string(env), a.Proxy, a.Paused, a.Priority, string(models), a.CreatedAt.Unix())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts (id, name, env, proxy, paused, priority, models, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.Name, string(env), a.Proxy, a.Paused, a.Priority, string(models), a.CreatedAt.Unix())
 	return uniqueErr(err)
 }
 
-func (s *Store) SetAccountProxy(ctx context.Context, name, proxy string) error {
-	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET proxy = ? WHERE name = ?`, proxy, name))
+func (s *Store) RenameAccount(ctx context.Context, id, newName string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `UPDATE accounts SET name = ? WHERE id = ?`, newName, id)
+	if err != nil {
+		return uniqueErr(err)
+	}
+	if err := affected(res, nil); err != nil {
+		return err
+	}
+	for _, table := range []string{"requests", "key_quota", "flagged_prompts", "upstream_calls"} {
+		if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET account_name = ? WHERE account = ?`, newName, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-func (s *Store) SetAccountRouting(ctx context.Context, name string, priority int, models []string) error {
+func (s *Store) SetAccountProxy(ctx context.Context, id, proxy string) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET proxy = ? WHERE id = ?`, proxy, id))
+}
+
+func (s *Store) SetAccountRouting(ctx context.Context, id string, priority int, models []string) error {
 	encoded, err := json.Marshal(nonNil(models))
 	if err != nil {
 		return err
 	}
-	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET priority = ?, models = ? WHERE name = ?`, priority, string(encoded), name))
+	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET priority = ?, models = ? WHERE id = ?`, priority, string(encoded), id))
 }
 
-func (s *Store) SetAccountPaused(ctx context.Context, name string, paused bool) error {
-	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET paused = ? WHERE name = ?`, paused, name))
+func (s *Store) SetAccountPaused(ctx context.Context, id string, paused bool) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET paused = ? WHERE id = ?`, paused, id))
 }
 
-func (s *Store) RemoveAccount(ctx context.Context, name string) error {
-	return affected(s.db.ExecContext(ctx, `DELETE FROM accounts WHERE name = ?`, name))
+func (s *Store) RemoveAccount(ctx context.Context, id string) error {
+	return affected(s.db.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, id))
 }
 
 // Key is an API key, stored as its hash.

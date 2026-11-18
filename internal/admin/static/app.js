@@ -834,25 +834,24 @@ function accountBadge(a, ready) {
 views.accounts = container => {
   const cards = h("div", { class: "grid" });
   const emptyNotice = h("p", { class: "muted" }, t("accounts.empty"));
-  const cardEntries = new Map(); // account name → {node, body, panels, actions}
-  const signins = new Map(); // account name → {code, node}
-  const imports = new Map(); // account name → {token, node}
-  const routings = new Map(); // account name → panel node
+  const cardEntries = new Map(); // account id → {node, body, panels, actions}
+  const signins = new Map(); // account id → {code, node}
+  const imports = new Map(); // account id → {token, node}
+  const routings = new Map(); // account id → panel node
 
   const setChildren = (node, ...children) => node.replaceChildren(...h("div", {}, ...children).childNodes);
 
-  const name = h("input", { required: true, maxlength: 64, placeholder: t("accounts.name.placeholder"), pattern: "[A-Za-z0-9][A-Za-z0-9_.\\-]*" });
+  const name = h("input", { required: true, maxlength: 64, placeholder: t("accounts.name.placeholder") });
   const proxy = h("input", { placeholder: "http://127.0.0.1:7890" });
   const env = h("textarea", { rows: 1, placeholder: t("accounts.env.placeholder") });
   const form = h("form", { class: "row", onsubmit: event => {
     event.preventDefault();
     const importing = event.submitter.dataset.then === "import";
     guarded(async () => {
-      await api("POST", "accounts", { name: name.value.trim(), proxy: proxy.value, env: env.value.split("\n").map(s => s.trim()).filter(Boolean) });
-      const added = name.value.trim();
+      const created = await api("POST", "accounts", { name: name.value.trim(), proxy: proxy.value, env: env.value.split("\n").map(s => s.trim()).filter(Boolean) });
       name.value = proxy.value = env.value = "";
-      if (!importing) return startSignin(added);
-      imports.set(added, makeImportPanel(added));
+      if (!importing) return startSignin(created.id);
+      imports.set(created.id, makeImportPanel(created.id));
       await load();
     }, event.submitter);
   } },
@@ -867,54 +866,69 @@ views.accounts = container => {
   window.addEventListener("wheel", onManualScroll, { passive: true });
   window.addEventListener("touchmove", onManualScroll, { passive: true });
 
-  function runCardAction(accountName, button, action) {
-    const snap = captureAnchor(accountName);
+  function runCardAction(accountID, button, action) {
+    const snap = captureAnchor(accountID);
     return guarded(async () => {
       restoreScroll(snap);
       await action(snap);
     }, button);
   }
 
+  function renameAccount(a, button) {
+    const snap = captureAnchor(a.id);
+    const value = prompt(t("accounts.rename.prompt", { name: a.name }), a.name);
+    restoreScroll(snap);
+    if (value === null) return;
+    const next = value.trim();
+    if (!next || next === a.name) return;
+    guarded(async () => {
+      restoreScroll(snap);
+      await api("PUT", `accounts/${encodeURIComponent(a.id)}/name`, { name: next });
+      toast(t("common.saved"));
+      await load(snap);
+    }, button);
+  }
+
   function editProxy(a, button) {
-    const snap = captureAnchor(a.name);
+    const snap = captureAnchor(a.id);
     const value = prompt(t("accounts.proxy.prompt", { name: a.name }), a.proxy);
     restoreScroll(snap);
     if (value === null) return;
     guarded(async () => {
       restoreScroll(snap);
-      await api("PUT", `accounts/${encodeURIComponent(a.name)}/proxy`, { proxy: value });
+      await api("PUT", `accounts/${encodeURIComponent(a.id)}/proxy`, { proxy: value });
       await load(snap);
     }, button);
   }
 
-  async function startSignin(account, button) {
-    await runCardAction(account, button, async snap => {
-      const data = await api("POST", `accounts/${encodeURIComponent(account)}/signin`);
-      signins.set(account, makeSigninPanel(account, data.url));
+  async function startSignin(accountID, button) {
+    await runCardAction(accountID, button, async snap => {
+      const data = await api("POST", `accounts/${encodeURIComponent(accountID)}/signin`);
+      signins.set(accountID, makeSigninPanel(accountID, data.url));
       await load(snap);
     });
   }
 
-  async function submitSignin(account, button) {
-    const state = signins.get(account);
-    await runCardAction(account, button, async snap => {
-      const data = await api("POST", `accounts/${encodeURIComponent(account)}/signin/code`, { code: state.code });
-      signins.delete(account);
+  async function submitSignin(accountID, button) {
+    const state = signins.get(accountID);
+    await runCardAction(accountID, button, async snap => {
+      const data = await api("POST", `accounts/${encodeURIComponent(accountID)}/signin/code`, { code: state.code });
+      signins.delete(accountID);
       toast(t("accounts.signed_in", { email: data.email }));
       await load(snap);
       setTimeout(() => { if (cards.isConnected) guarded(load); }, 8000);
     });
   }
 
-  async function cancelSignin(account, button) {
-    signins.delete(account);
-    await runCardAction(account, button, async snap => {
-      await api("DELETE", `accounts/${encodeURIComponent(account)}/signin`);
+  async function cancelSignin(accountID, button) {
+    signins.delete(accountID);
+    await runCardAction(accountID, button, async snap => {
+      await api("DELETE", `accounts/${encodeURIComponent(accountID)}/signin`);
       await load(snap);
     });
   }
 
-  function makeSigninPanel(account, url) {
+  function makeSigninPanel(accountID, url) {
     const state = { code: "", node: null };
     const code = h("input", { class: "grow", placeholder: t("accounts.signin.code"),
       oninput: e => { state.code = e.target.value; } });
@@ -925,22 +939,22 @@ views.accounts = container => {
         h("li", {}, tx("accounts.signin.step1", { link })),
         h("li", {}, t("accounts.signin.step2"))),
       h("div", { class: "row" }, code,
-        h("button", { class: "primary", onclick: e => submitSignin(account, e.target) }, t("accounts.signin.finish")),
-        h("button", { onclick: e => cancelSignin(account, e.target) }, t("common.cancel"))));
+        h("button", { class: "primary", onclick: e => submitSignin(accountID, e.target) }, t("accounts.signin.finish")),
+        h("button", { onclick: e => cancelSignin(accountID, e.target) }, t("common.cancel"))));
     return state;
   }
 
-  async function submitImport(account, button) {
-    const state = imports.get(account);
-    await runCardAction(account, button, async snap => {
-      const data = await api("POST", `accounts/${encodeURIComponent(account)}/signin/import`, { token: state.token });
-      imports.delete(account);
+  async function submitImport(accountID, button) {
+    const state = imports.get(accountID);
+    await runCardAction(accountID, button, async snap => {
+      const data = await api("POST", `accounts/${encodeURIComponent(accountID)}/signin/import`, { token: state.token });
+      imports.delete(accountID);
       toast(data.verify ? t("accounts.imported_verify") : t("accounts.imported", { email: data.email }), data.verify);
       await load(snap);
     });
   }
 
-  function makeImportPanel(account) {
+  function makeImportPanel(accountID) {
     const state = { token: "", node: null };
     const token = h("textarea", { class: "grow mono", rows: 3, autocomplete: "off", spellcheck: "false",
       placeholder: t("accounts.import.placeholder"), oninput: e => { state.token = e.target.value; } });
@@ -948,23 +962,24 @@ views.accounts = container => {
       h("h3", {}, t("accounts.import.title")),
       h("p", { class: "muted" }, t("accounts.import.hint")),
       h("div", { class: "row" }, token,
-        h("button", { class: "primary", onclick: e => submitImport(account, e.target) }, t("accounts.import.submit")),
-        h("button", { onclick: () => { imports.delete(account); refreshCard(account); } }, t("common.cancel"))));
+        h("button", { class: "primary", onclick: e => submitImport(accountID, e.target) }, t("accounts.import.submit")),
+        h("button", { onclick: () => { imports.delete(accountID); refreshCard(accountID); } }, t("common.cancel"))));
     return state;
   }
 
   function makeRoutingPanel(a) {
+    const accountID = a.id;
     const priority = h("input", { type: "number", step: 1, value: String(a.priority), style: "width:90px" });
     const choices = [...new Set([...(a.models || []).map(m => m.id), ...catalog])];
     const models = modelPicker(choices, a.allowed_models);
     const save = event => {
       event.preventDefault();
-      runCardAction(a.name, event.submitter, async snap => {
-        await api("PUT", `accounts/${encodeURIComponent(a.name)}/routing`, {
+      runCardAction(accountID, event.submitter, async snap => {
+        await api("PUT", `accounts/${encodeURIComponent(accountID)}/routing`, {
           priority: Math.trunc(Number(priority.value) || 0),
           allowed_models: models.read(),
         });
-        routings.delete(a.name);
+        routings.delete(accountID);
         toast(t("common.saved"));
         await load(snap);
       });
@@ -976,7 +991,7 @@ views.accounts = container => {
       h("div", { class: "field" }, t("accounts.routing.models"), models.node),
       h("div", { class: "row", style: "margin-top:8px" },
         h("button", { type: "submit", class: "primary" }, t("common.save")),
-        h("button", { type: "button", onclick: () => { routings.delete(a.name); refreshCard(a.name); } }, t("common.cancel"))));
+        h("button", { type: "button", onclick: () => { routings.delete(accountID); refreshCard(accountID); } }, t("common.cancel"))));
   }
 
   // verifyNotice tells what to do about Google's verification request.
@@ -1050,37 +1065,38 @@ views.accounts = container => {
       poolUsageLine(poolUsage(g))));
   }
 
-  function syncCardPanels(entry, accountName) {
-    const activePanels = [signins.get(accountName)?.node, imports.get(accountName)?.node, routings.get(accountName)].filter(Boolean);
+  function syncCardPanels(entry, accountID) {
+    const activePanels = [signins.get(accountID)?.node, imports.get(accountID)?.node, routings.get(accountID)].filter(Boolean);
     const unchanged = entry.panels.children.length === activePanels.length
       && activePanels.every((n, i) => entry.panels.children[i] === n);
     if (!unchanged) entry.panels.replaceChildren(...activePanels);
   }
 
   function removeAccount(a, button) {
-    const snap = captureAnchor(a.name);
+    const snap = captureAnchor(a.id);
     const ok = confirm(t("accounts.remove.confirm", { name: a.name }));
     restoreScroll(snap);
     if (!ok) return;
     guarded(async () => {
       restoreScroll(snap);
-      await api("DELETE", `accounts/${encodeURIComponent(a.name)}`);
+      await api("DELETE", `accounts/${encodeURIComponent(a.id)}`);
       await load(snap);
     }, button);
   }
 
   function updateCardControls(entry, a) {
-    syncCardPanels(entry, a.name);
-    const enc = encodeURIComponent(a.name);
+    syncCardPanels(entry, a.id);
+    const enc = encodeURIComponent(a.id);
     const act = (label, action, cls) => h("button", {
       class: cls || "",
-      onclick: e => runCardAction(a.name, e.target, async snap => { await action(); await load(snap); }),
+      onclick: e => runCardAction(a.id, e.target, async snap => { await action(); await load(snap); }),
     }, label);
     setChildren(entry.actions,
-      signins.has(a.name) ? null : h("button", { onclick: e => startSignin(a.name, e.target) }, a.user || a.disabled ? t("accounts.signin_again") : t("accounts.signin")),
-      imports.has(a.name) ? null : h("button", { onclick: () => { imports.set(a.name, makeImportPanel(a.name)); refreshCard(a.name); } }, t("accounts.import")),
+      signins.has(a.id) ? null : h("button", { onclick: e => startSignin(a.id, e.target) }, a.user || a.disabled ? t("accounts.signin_again") : t("accounts.signin")),
+      imports.has(a.id) ? null : h("button", { onclick: () => { imports.set(a.id, makeImportPanel(a.id)); refreshCard(a.id); } }, t("accounts.import")),
       act(t("accounts.refresh"), () => api("POST", `accounts/${enc}/refresh`)),
-      routings.has(a.name) ? null : h("button", { onclick: () => { routings.set(a.name, makeRoutingPanel(a)); refreshCard(a.name); } }, t("accounts.routing.edit")),
+      h("button", { onclick: e => renameAccount(a, e.target) }, t("accounts.rename")),
+      routings.has(a.id) ? null : h("button", { onclick: () => { routings.set(a.id, makeRoutingPanel(a)); refreshCard(a.id); } }, t("accounts.routing.edit")),
       h("button", { onclick: e => editProxy(a, e.target) }, t("accounts.proxy.edit")),
       a.paused ? act(t("accounts.resume"), () => api("POST", `accounts/${enc}/resume`)) : act(t("accounts.pause"), () => api("POST", `accounts/${enc}/pause`)),
       h("span", { class: "grow" }),
@@ -1168,7 +1184,7 @@ views.accounts = container => {
     const group = byId => {
       const groups = new Map();
       for (const m of byId.values()) {
-        const key = m.accounts.map(a => a.name).join("\n");
+        const key = m.accounts.map(a => a.id).join("\n");
         if (!groups.has(key)) groups.set(key, { accounts: m.accounts, models: [] });
         groups.get(key).models.push(m);
       }
@@ -1232,9 +1248,9 @@ views.accounts = container => {
       h("p", { class: "muted" }, t("accounts.models.hint")));
   }
 
-  function pickAnchorCard(anchorName) {
-    if (anchorName) {
-      const target = cardEntries.get(anchorName);
+  function pickAnchorCard(anchorID) {
+    if (anchorID) {
+      const target = cardEntries.get(anchorID);
       if (target && target.node.isConnected) return target.node;
     }
     const headerBottom = document.querySelector("header")?.getBoundingClientRect().bottom ?? 0;
@@ -1244,11 +1260,11 @@ views.accounts = container => {
     return null;
   }
 
-  function captureAnchor(anchorName) {
-    const anchor = pickAnchorCard(anchorName);
+  function captureAnchor(anchorID) {
+    const anchor = pickAnchorCard(anchorID);
     const prevCard = anchor ? anchor.previousElementSibling : null;
     return {
-      anchorName,
+      anchorID,
       scrollBefore: window.scrollY,
       manualAtStart: manualScrolls,
       anchor,
@@ -1275,11 +1291,11 @@ views.accounts = container => {
     if (window.scrollY !== snap.scrollBefore) window.scrollTo(0, snap.scrollBefore);
   }
 
-  function refreshCard(accountName) {
-    const a = accounts.find(x => x.name === accountName);
-    const entry = cardEntries.get(accountName);
+  function refreshCard(accountID) {
+    const a = accounts.find(x => x.id === accountID);
+    const entry = cardEntries.get(accountID);
     if (!a || !entry) return;
-    const snap = captureAnchor(accountName);
+    const snap = captureAnchor(accountID);
     updateCardControls(entry, a);
     restoreScroll(snap);
   }
@@ -1292,25 +1308,25 @@ views.accounts = container => {
     }
     emptyNotice.remove();
 
-    const activeNames = new Set(list.map(a => a.name));
-    for (const [acctName, entry] of cardEntries) {
-      if (activeNames.has(acctName)) continue;
+    const activeIDs = new Set(list.map(a => a.id));
+    for (const [acctID, entry] of cardEntries) {
+      if (activeIDs.has(acctID)) continue;
       entry.node.remove();
-      cardEntries.delete(acctName);
-      signins.delete(acctName);
-      imports.delete(acctName);
-      routings.delete(acctName);
+      cardEntries.delete(acctID);
+      signins.delete(acctID);
+      imports.delete(acctID);
+      routings.delete(acctID);
     }
 
     let cursor = cards.firstElementChild;
     for (const a of list) {
-      let entry = cardEntries.get(a.name);
+      let entry = cardEntries.get(a.id);
       if (!entry) {
         const body = h("div");
         const panels = h("div");
         const actions = h("div", { class: "row", style: "margin-top:12px" });
         entry = { node: h("div", { class: "card" }, body, panels, actions), body, panels, actions };
-        cardEntries.set(a.name, entry);
+        cardEntries.set(a.id, entry);
       }
       if (cursor !== entry.node) cards.insertBefore(entry.node, cursor);
       else cursor = cursor.nextElementSibling;
@@ -1324,10 +1340,10 @@ views.accounts = container => {
     const [list, offered] = await Promise.all([api("GET", "accounts"), api("GET", "models")]);
     accounts = list;
     catalog = offered.map(m => m.id);
-    for (const a of accounts) if (a.login_pending === false) signins.delete(a.name);
+    for (const a of accounts) if (a.login_pending === false) signins.delete(a.id);
     const snap = priorSnap && priorSnap.manualAtStart === manualScrolls
       ? priorSnap
-      : captureAnchor(priorSnap?.anchorName);
+      : captureAnchor(priorSnap?.anchorID);
     renderModels(accounts);
     renderCards(accounts);
     restoreScroll(snap);
@@ -1336,7 +1352,7 @@ views.accounts = container => {
   // refreshAll refreshes every account; the server runs them one at a time.
   function refreshAll(button) {
     guarded(async () => {
-      const results = await Promise.allSettled(accounts.map(a => api("POST", `accounts/${encodeURIComponent(a.name)}/refresh`)));
+      const results = await Promise.allSettled(accounts.map(a => api("POST", `accounts/${encodeURIComponent(a.id)}/refresh`)));
       const failed = results.flatMap((r, i) => r.status === "rejected" && r.reason.status !== 401 ? [`${accounts[i].name}: ${r.reason.message}`] : []);
       if (failed.length) toast(failed.join("; "), true);
       else toast(t("accounts.refreshed_all", { count: results.length }));
@@ -1420,21 +1436,23 @@ function agyLogViewer() {
     card,
     // setAccounts keeps the account list current; the first account is
     // shown until another is picked.
-    setAccounts(names) {
-      if (accountSelect.options.length !== names.length || names.some((n, i) => accountSelect.options[i].value !== n)) {
-        accountSelect.replaceChildren(...names.map(n => h("option", { value: n }, n)));
+    setAccounts(accounts) {
+      const changed = accountSelect.options.length !== accounts.length
+        || accounts.some((a, i) => accountSelect.options[i].value !== a.id || accountSelect.options[i].textContent !== a.name);
+      if (changed) {
+        accountSelect.replaceChildren(...accounts.map(a => h("option", { value: a.id }, a.name)));
       }
-      if (!names.includes(state.account)) {
-        state.account = names[0] || "";
+      if (!accounts.some(a => a.id === state.account)) {
+        state.account = accounts[0]?.id || "";
         state.file = "";
         guarded(reload);
       }
       accountSelect.value = state.account;
     },
-    show(name) {
-      state.account = name;
+    show(id) {
+      state.account = id;
       state.file = "";
-      accountSelect.value = name;
+      accountSelect.value = id;
       card.scrollIntoView({ behavior: "smooth" });
       guarded(reload);
     },
@@ -1478,7 +1496,7 @@ views.workers = container => {
   }
 
   function sessions(a, now) {
-    const enc = encodeURIComponent(a.name);
+    const enc = encodeURIComponent(a.id);
     const where = s => s.worker ? term(t("workers.kind.worker", { number: s.worker }), lookup("process", "worker"))
       : s.pid ? t("workers.in_process")
       : term(t("workers.closed"), t("workers.closed.hint"));
@@ -1526,9 +1544,9 @@ views.workers = container => {
     const badge = accountBadge(a, h("span", { class: "badge ok" }, t("workers.turns", { count: a.turns })));
     return h("div", { class: "card" },
       h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), badge,
-        h("button", { onclick: () => logs.show(a.name) }, t("workers.logs.open")),
+        h("button", { onclick: () => logs.show(a.id) }, t("workers.logs.open")),
         action(t("workers.restart"), "danger", t("workers.restart.confirm", { name: a.name }),
-          () => api("POST", `workers/${encodeURIComponent(a.name)}/restart`))),
+          () => api("POST", `workers/${encodeURIComponent(a.id)}/restart`))),
       h("h3", {}, t("workers.processes")), processes(a, now),
       h("h3", {}, t("workers.sessions")), sessions(a, now),
       egress(a));
@@ -1536,7 +1554,7 @@ views.workers = container => {
 
   async function load() {
     const data = await api("GET", "workers");
-    logs.setAccounts(data.accounts.map(a => a.name));
+    logs.setAccounts(data.accounts);
     cards.replaceChildren(...(data.accounts.length ? data.accounts.map(a => card(a, data.now)) : [h("p", { class: "muted" }, t("workers.empty"))]));
   }
   return polling(container, 3000, load);
@@ -1627,7 +1645,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
         Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
       ...(userMode ? [] : [h("label", {}, t("common.key"), select("key", values.key.map(k => [k.hash, keyText(k.name, k.hash)]), t("calls.all_keys")))]),
       h("label", {}, t("common.model"), select("model", plain(values.model), t("calls.all_models"))),
-      h("label", {}, t("common.account"), select("account", plain(values.account), t("calls.all_accounts"))),
+      h("label", {}, t("common.account"), select("account", values.account.map(a => [a.id, a.name]), t("calls.all_accounts"))),
       h("label", {}, t("calls.chart"), h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
         metrics.map(([v, label]) => h("option", { value: v, selected: v === state.metric }, label)))),
       h("span", { class: "grow" }),
@@ -1643,14 +1661,18 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
   // accountQuota adds up each account's shares by group; shares of
   // different accounts stay apart, since plans differ in bucket size.
   function accountQuota() {
-    const byAccount = {};
+    const byAccount = new Map();
     for (const u of quota.uses) {
-      const groups = byAccount[u.account] ||= {};
-      groups[u.group] = (groups[u.group] || 0) + u.used;
+      let entry = byAccount.get(u.account);
+      if (!entry) {
+        entry = { name: u.account_name || u.account, groups: {} };
+        byAccount.set(u.account, entry);
+      }
+      entry.groups[u.group] = (entry.groups[u.group] || 0) + u.used;
     }
-    const accounts = Object.keys(byAccount).sort();
-    if (!accounts.length) return "—";
-    return accounts.map(a => h("div", { class: "mono", style: "font-size:13px" }, `${a}: ${quotaText(byAccount[a], 2)}`));
+    const entries = [...byAccount.values()].sort((a, b) => a.name.localeCompare(b.name));
+    if (!entries.length) return "—";
+    return entries.map(e => h("div", { class: "mono", style: "font-size:13px" }, `${e.name}: ${quotaText(e.groups, 2)}`));
   }
 
   // keyQuota shows the key's average share over the accounts with each
@@ -1661,7 +1683,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
     if (!mine.length) return null;
     const average = {};
     for (const u of mine) average[u.group] = (average[u.group] || 0) + u.used / quota.accounts[u.group].length;
-    const byAccount = mine.map(u => `${u.account} · ${groupName(u.group)}: ${fmt.pct(u.used, 3)}`);
+    const byAccount = mine.map(u => `${u.account_name || u.account} · ${groupName(u.group)}: ${fmt.pct(u.used, 3)}`);
     return term(t("calls.quota_average", { quota: quotaText(average, 2) }), [t("calls.quota_average.hint"), ...byAccount].join("\n"));
   }
 

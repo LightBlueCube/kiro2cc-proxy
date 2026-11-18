@@ -84,7 +84,7 @@ func (m *Monitor) Run(ctx context.Context) {
 func (m *Monitor) SampleRunning(ctx context.Context, account *pool.Account) {
 	proc, err := withLanguageServer(account.LiveProcs())
 	if err != nil {
-		m.fail(account.Name(), err)
+		m.fail(account, err)
 		return
 	}
 	if proc == nil {
@@ -136,7 +136,7 @@ func (m *Monitor) KeepForQuota(ctx context.Context, account *pool.Account, lastU
 	if idle > maxQuotaHold {
 		return false
 	}
-	unsettled, err := m.cfg.Store.HasUnsettledQuota(ctx, account.Name())
+	unsettled, err := m.cfg.Store.HasUnsettledQuota(ctx, account.ID())
 	if err != nil {
 		m.cfg.Log.Error("checking for unsettled quota failed", "account", account.Name(), "err", err)
 		return false
@@ -150,15 +150,15 @@ var settleDelay = SettleTime + 10*time.Second
 
 // SettleSoon samples the account settleDelay after its latest call, so
 // the quota use of a burst of requests is settled once it shows.
-func (m *Monitor) SettleSoon(name string) {
+func (m *Monitor) SettleSoon(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if timer := m.settles[name]; timer != nil {
+	if timer := m.settles[id]; timer != nil {
 		timer.Reset(settleDelay)
 		return
 	}
-	m.settles[name] = time.AfterFunc(settleDelay, func() {
-		if account := m.cfg.Pool.Account(name); account != nil {
+	m.settles[id] = time.AfterFunc(settleDelay, func() {
+		if account := m.cfg.Pool.Account(id); account != nil {
 			m.SampleRunning(context.Background(), account)
 		}
 	})
@@ -224,8 +224,8 @@ func (m *Monitor) tryRefresh(ctx context.Context, account *pool.Account) (Accoun
 		defer m.closeProbe(account.Name(), proc, probe)
 	}
 	if err != nil {
-		m.fail(account.Name(), err)
-		q, _ := m.Latest(account.Name())
+		m.fail(account, err)
+		q, _ := m.Latest(account.ID())
 		return q, false, err
 	}
 	q, err := m.sample(ctx, account, proc)
@@ -247,7 +247,7 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 	defer m.sampleMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
-	name := account.Name()
+	id, name := account.ID(), account.Name()
 	oldestRun, _ := account.OldestRun()
 	user, err := proc.UserStatus(ctx)
 	var groups []agy.QuotaGroup
@@ -255,13 +255,13 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 		groups, err = proc.Quota(ctx)
 	}
 	if err != nil {
-		m.fail(name, err)
-		q, _ := m.Latest(name)
+		m.fail(account, err)
+		q, _ := m.Latest(id)
 		return q, err
 	}
 	q := AccountQuota{At: time.Now(), User: user, Groups: groups}
 	m.mu.Lock()
-	m.latest[name] = q
+	m.latest[id] = q
 	m.mu.Unlock()
 
 	var samples []store.QuotaSample
@@ -273,7 +273,7 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 			if group != "" && b.Remaining <= 0 && b.ResetAt.After(q.At) {
 				account.Cool(group, b.ResetAt)
 			}
-			samples = append(samples, store.QuotaSample{Account: name, At: q.At, Bucket: b.ID, Group: g.Name, Window: b.Window, Remaining: b.Remaining, ResetAt: b.ResetAt})
+			samples = append(samples, store.QuotaSample{Account: id, At: q.At, Bucket: b.ID, Group: g.Name, Window: b.Window, Remaining: b.Remaining, ResetAt: b.ResetAt})
 		}
 	}
 	account.SetQuotaGroups(bucketGroups)
@@ -283,35 +283,36 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 	}
 	m.expirePendingLocked(ctx)
 	if m.cfg.OnSample != nil {
-		m.cfg.OnSample(ctx, name, q.At, oldestRun)
+		m.cfg.OnSample(ctx, id, q.At, oldestRun)
 	}
 	return q, nil
 }
 
-func (m *Monitor) fail(name string, err error) {
-	m.cfg.Log.Warn("quota sample failed", "account", name, "err", err)
+func (m *Monitor) fail(account *pool.Account, err error) {
+	m.cfg.Log.Warn("quota sample failed", "account", account.Name(), "err", err)
+	id := account.ID()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	q := m.latest[name]
+	q := m.latest[id]
 	q.Err, q.ErrAt = err.Error(), time.Now()
-	m.latest[name] = q
+	m.latest[id] = q
 }
 
 // Latest is the account's newest sample, if any.
-func (m *Monitor) Latest(name string) (AccountQuota, bool) {
+func (m *Monitor) Latest(id string) (AccountQuota, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	q, ok := m.latest[name]
+	q, ok := m.latest[id]
 	return q, ok
 }
 
 // Forget drops a removed account's sample and pending settle.
-func (m *Monitor) Forget(name string) {
+func (m *Monitor) Forget(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.latest, name)
-	if timer := m.settles[name]; timer != nil {
+	delete(m.latest, id)
+	if timer := m.settles[id]; timer != nil {
 		timer.Stop()
-		delete(m.settles, name)
+		delete(m.settles, id)
 	}
 }

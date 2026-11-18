@@ -22,36 +22,39 @@ type FlaggedPrompt struct {
 	Pinned bool
 	// Hits counts the times it was refused.
 	Hits int
-	// KeyHash, KeyName, Account, and Model are of its latest refusal.
-	KeyHash, KeyName string
-	Account, Model   string
+	// KeyHash, KeyName, Account, AccountName, and Model are of its latest refusal.
+	KeyHash, KeyName     string
+	Account, AccountName string
+	Model                string
 }
 
 // FlagPrompt flags a prompt until p.Until. A prompt flagged before keeps
 // its text and first time, and gets another hit.
 func (s *Store) FlagPrompt(ctx context.Context, p FlaggedPrompt) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO flagged_prompts
-		(fingerprint, text, first_at, last_at, flagged_until, hits, key_hash, key_name, account, model)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+		(fingerprint, text, first_at, last_at, flagged_until, hits, key_hash, key_name, account, account_name, model)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
 		ON CONFLICT (fingerprint) DO UPDATE SET
 			last_at = excluded.last_at, flagged_until = excluded.flagged_until, hits = hits + 1,
-			key_hash = excluded.key_hash, key_name = excluded.key_name, account = excluded.account, model = excluded.model`,
+			key_hash = excluded.key_hash, key_name = excluded.key_name, account = excluded.account, account_name = excluded.account_name, model = excluded.model`,
 		p.Fingerprint, p.Text, p.LastAt.UnixMilli(), p.LastAt.UnixMilli(), p.Until.UnixMilli(),
-		p.KeyHash, p.KeyName, p.Account, p.Model)
+		p.KeyHash, p.KeyName, p.Account, p.AccountName, p.Model)
 	return err
 }
+
+const flaggedAccountNameExpr = `COALESCE((SELECT name FROM accounts WHERE id = flagged_prompts.account), NULLIF(account_name, ''), account)`
 
 // FlaggedPrompts lists every flagged prompt without its text, the latest
 // refused first.
 func (s *Store) FlaggedPrompts(ctx context.Context) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, model
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, model
 		FROM flagged_prompts ORDER BY last_at DESC, fingerprint`)
 }
 
 // ActiveFlaggedPrompts lists the prompts that are pinned or whose flag has
 // not ended at now, without their text.
 func (s *Store) ActiveFlaggedPrompts(ctx context.Context, now time.Time) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, model
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, model
 		FROM flagged_prompts WHERE pinned = 1 OR flagged_until > ? ORDER BY last_at DESC, fingerprint`, now.UnixMilli())
 }
 
@@ -65,7 +68,7 @@ func (s *Store) queryFlagged(ctx context.Context, query string, args ...any) ([]
 	for rows.Next() {
 		var p FlaggedPrompt
 		var first, last, until int64
-		if err := rows.Scan(&p.Fingerprint, &first, &last, &until, &p.Pinned, &p.Hits, &p.KeyHash, &p.KeyName, &p.Account, &p.Model); err != nil {
+		if err := rows.Scan(&p.Fingerprint, &first, &last, &until, &p.Pinned, &p.Hits, &p.KeyHash, &p.KeyName, &p.Account, &p.AccountName, &p.Model); err != nil {
 			return nil, err
 		}
 		p.FirstAt, p.LastAt, p.Until = time.UnixMilli(first), time.UnixMilli(last), time.UnixMilli(until)

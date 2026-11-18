@@ -117,10 +117,10 @@ func TestKeyQuotas(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []KeyQuota{
-		{KeyHash: "h1", Account: "a1", Group: "claude-gpt", Used: 0.30},
-		{KeyHash: "h1", Account: "a2", Group: "gemini", Used: 0.25},
-		{KeyHash: "h1", Account: "a1", Group: "gemini", Used: 0.10},
-		{KeyHash: "h2", Account: "a1", Group: "gemini", Used: 0.05},
+		{KeyHash: "h1", Account: "a1", AccountName: "a1", Group: "claude-gpt", Used: 0.30},
+		{KeyHash: "h1", Account: "a2", AccountName: "a2", Group: "gemini", Used: 0.25},
+		{KeyHash: "h1", Account: "a1", AccountName: "a1", Group: "gemini", Used: 0.10},
+		{KeyHash: "h2", Account: "a1", AccountName: "a1", Group: "gemini", Used: 0.05},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("quotas after prune = %+v, want %+v", got, want)
@@ -266,10 +266,11 @@ func TestAccountRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts, err := st.Accounts(ctx)
-	if err != nil || len(accounts) != 1 || accounts[0].Priority != 0 || len(accounts[0].Models) != 0 {
+	if err != nil || len(accounts) != 1 || accounts[0].ID == "" || accounts[0].Priority != 0 || len(accounts[0].Models) != 0 {
 		t.Fatalf("initial account = %+v, %v", accounts, err)
 	}
-	if err := st.SetAccountRouting(ctx, "main", 3, []string{"gemini-3.8-flash"}); err != nil {
+	id := accounts[0].ID
+	if err := st.SetAccountRouting(ctx, id, 3, []string{"gemini-3.8-flash"}); err != nil {
 		t.Fatal(err)
 	}
 	accounts, err = st.Accounts(ctx)
@@ -278,6 +279,72 @@ func TestAccountRouting(t *testing.T) {
 	}
 	if err := st.SetAccountRouting(ctx, "nobody", 1, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown account = %v", err)
+	}
+}
+
+func TestRenameAccount(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Millisecond)
+	if err := st.AddAccount(ctx, Account{ID: "id-1", Name: "main", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddAccount(ctx, Account{ID: "id-2", Name: "backup", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddRequest(ctx, Request{At: now, KeyHash: "h1", KeyName: "alice", Account: "id-1", AccountName: "main", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 10, Output: 5, CallToken: "tok1"}); err != nil {
+		t.Fatal(err)
+	}
+	reqs, _ := st.Requests(ctx, RequestFilter{}, 0, 10)
+	if err := st.AttributeQuota(ctx, "id-1", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[0].ID: 0.2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "fp1", Text: "p", LastAt: now, Until: now.Add(time.Hour), KeyHash: "h1", KeyName: "alice", Account: "id-1", AccountName: "main", Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddUpstreamCall(ctx, UpstreamCall{At: now, CallToken: "tok1", Account: "id-1", AccountName: "main", Session: "S1", Seq: 1, Model: "m", Status: 200}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.RenameAccount(ctx, "id-1", "backup"); !errors.Is(err, ErrExists) {
+		t.Fatalf("duplicate name = %v, want ErrExists", err)
+	}
+	if err := st.RenameAccount(ctx, "missing", "next"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing id = %v, want ErrNotFound", err)
+	}
+	if err := st.RenameAccount(ctx, "id-1", "Alice Pro (主力)"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Removing the account afterwards must still keep the renamed display name
+	// on historical requests, key_quota, flagged prompts, and upstream calls.
+	if err := st.RemoveAccount(ctx, "id-1"); err != nil {
+		t.Fatal(err)
+	}
+	reqs, err = st.Requests(ctx, RequestFilter{Account: "id-1"}, 0, 10)
+	if err != nil || len(reqs) != 1 || reqs[0].AccountName != "Alice Pro (主力)" {
+		t.Fatalf("requests after rename+remove = %+v, %v", reqs, err)
+	}
+	quotas, err := st.KeyQuotas(ctx, "h1")
+	if err != nil || len(quotas) != 1 || quotas[0].Account != "id-1" || quotas[0].AccountName != "Alice Pro (主力)" {
+		t.Fatalf("key_quota after rename+remove = %+v, %v", quotas, err)
+	}
+	flagged, err := st.FlaggedPrompts(ctx)
+	if err != nil || len(flagged) != 1 || flagged[0].AccountName != "Alice Pro (主力)" {
+		t.Fatalf("flagged after rename+remove = %+v, %v", flagged, err)
+	}
+	up, err := st.UpstreamCalls(ctx, reqs[0].ID)
+	if err != nil || len(up) != 1 || up[0].AccountName != "Alice Pro (主力)" {
+		t.Fatalf("upstream after rename+remove = %+v, %v", up, err)
+	}
+	filterAccounts, err := st.RequestAccounts(ctx, RequestFilter{})
+	if err != nil || !reflect.DeepEqual(filterAccounts, []RequestAccount{{ID: "id-1", Name: "Alice Pro (主力)"}}) {
+		t.Fatalf("RequestAccounts = %+v, %v", filterAccounts, err)
 	}
 }
 
@@ -451,7 +518,7 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 	ctx := context.Background()
 
 	accounts, err := st.Accounts(ctx)
-	if err != nil || len(accounts) != 1 || accounts[0].Priority != 0 || len(accounts[0].Models) != 0 || len(accounts[0].Env) != 0 {
+	if err != nil || len(accounts) != 1 || accounts[0].ID == "" || accounts[0].Name != "main" || accounts[0].Priority != 0 || len(accounts[0].Models) != 0 || len(accounts[0].Env) != 0 {
 		t.Fatalf("accounts after upgrade = %+v, %v", accounts, err)
 	}
 	keys, err := st.Keys(ctx)
@@ -465,7 +532,7 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 0 {
 		t.Fatalf("key_totals after upgrade = %+v, %v", totals, err)
 	}
-	wantQuotas := []KeyQuota{{KeyHash: "h1", Account: "main", Group: "gemini", Used: 0.25}}
+	wantQuotas := []KeyQuota{{KeyHash: "h1", Account: accounts[0].ID, AccountName: "main", Group: "gemini", Used: 0.25}}
 	if quotas, err := st.KeyQuotas(ctx, ""); err != nil || !reflect.DeepEqual(quotas, wantQuotas) {
 		t.Fatalf("key_quota after upgrade = %+v, %v; want %+v", quotas, err, wantQuotas)
 	}

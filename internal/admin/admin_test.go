@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -499,9 +500,11 @@ func TestAccountProxy(t *testing.T) {
 			t.Fatalf("proxy %q = %d %s", proxy, r.status, r.raw)
 		}
 	}
-	if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "proxy": " http://u:secret@127.0.0.1:7890 "}, nil); r.status != http.StatusOK {
-		t.Fatalf("add = %d %s", r.status, r.raw)
+	addReply := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "proxy": " http://u:secret@127.0.0.1:7890 "}, nil)
+	if addReply.status != http.StatusOK {
+		t.Fatalf("add = %d %s", addReply.status, addReply.raw)
 	}
+	id := addReply.body["id"].(string)
 	proxyOf := func() string {
 		t.Helper()
 		var accounts []accountView
@@ -515,19 +518,19 @@ func TestAccountProxy(t *testing.T) {
 		t.Fatalf("proxy = %q", got)
 	}
 	// Saving the masked value back keeps the password.
-	if r := c.do("PUT", "/admin/api/accounts/main/proxy", map[string]string{"proxy": "http://u:xxxxx@127.0.0.1:7890"}, nil); r.status != http.StatusOK {
+	if r := c.do("PUT", "/admin/api/accounts/"+id+"/proxy", map[string]string{"proxy": "http://u:xxxxx@127.0.0.1:7890"}, nil); r.status != http.StatusOK {
 		t.Fatalf("resave = %d %s", r.status, r.raw)
 	}
-	if records, _ := e.ctl.AccountRecords(context.Background()); records["main"].Proxy != "http://u:secret@127.0.0.1:7890" {
-		t.Fatalf("stored proxy = %q", records["main"].Proxy)
+	if records, _ := e.ctl.AccountRecords(context.Background()); records[id].Proxy != "http://u:secret@127.0.0.1:7890" {
+		t.Fatalf("stored proxy = %q", records[id].Proxy)
 	}
-	if r := c.do("PUT", "/admin/api/accounts/main/proxy", map[string]string{"proxy": "http://127.0.0.1:7891"}, nil); r.status != http.StatusOK {
+	if r := c.do("PUT", "/admin/api/accounts/"+id+"/proxy", map[string]string{"proxy": "http://127.0.0.1:7891"}, nil); r.status != http.StatusOK {
 		t.Fatalf("set = %d %s", r.status, r.raw)
 	}
 	if got := proxyOf(); got != "http://127.0.0.1:7891" {
 		t.Fatalf("proxy = %q", got)
 	}
-	if r := c.do("PUT", "/admin/api/accounts/main/proxy", map[string]string{"proxy": ""}, nil); r.status != http.StatusOK || proxyOf() != "" {
+	if r := c.do("PUT", "/admin/api/accounts/"+id+"/proxy", map[string]string{"proxy": ""}, nil); r.status != http.StatusOK || proxyOf() != "" {
 		t.Fatalf("clear = %d %s", r.status, r.raw)
 	}
 
@@ -557,7 +560,7 @@ func TestAccountProxy(t *testing.T) {
 	if route, blocked := routeOf(); route != "refused" || !strings.Contains(blocked, "no proxy") {
 		t.Fatalf("no route: route %q, blocked %q", route, blocked)
 	}
-	if r := c.do("POST", "/admin/api/accounts/main/signin", nil, nil); r.status != http.StatusBadRequest || !strings.Contains(r.raw, "no proxy") {
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/signin", nil, nil); r.status != http.StatusBadRequest || !strings.Contains(r.raw, "no proxy") {
 		t.Fatalf("sign-in without a route = %d %s", r.status, r.raw)
 	}
 	if r := settings("http://127.0.0.1:7899", false); r.status != http.StatusOK {
@@ -571,7 +574,7 @@ func TestAccountProxy(t *testing.T) {
 	}
 
 	// Routing priority and allowed models persist and apply to the pool.
-	if r := c.do("PUT", "/admin/api/accounts/main/routing", map[string]any{
+	if r := c.do("PUT", "/admin/api/accounts/"+id+"/routing", map[string]any{
 		"priority":       7,
 		"allowed_models": []string{" gemini-3.8-flash ", "gemini-3.8-flash", ""},
 	}, nil); r.status != http.StatusOK {
@@ -582,8 +585,8 @@ func TestAccountProxy(t *testing.T) {
 	if accounts[0].Priority != 7 || !slices.Equal(accounts[0].AllowedModels, []string{"gemini-3.8-flash"}) {
 		t.Fatalf("account routing = %+v", accounts[0])
 	}
-	if records, _ := e.ctl.AccountRecords(context.Background()); records["main"].Priority != 7 || !slices.Equal(records["main"].Models, []string{"gemini-3.8-flash"}) {
-		t.Fatalf("stored routing = %+v", records["main"])
+	if records, _ := e.ctl.AccountRecords(context.Background()); records[id].Priority != 7 || !slices.Equal(records[id].Models, []string{"gemini-3.8-flash"}) {
+		t.Fatalf("stored routing = %+v", records[id])
 	}
 	if r := c.do("PUT", "/admin/api/accounts/nobody/routing", map[string]any{"priority": 1}, nil); r.status != http.StatusNotFound {
 		t.Fatalf("unknown account routing = %d", r.status)
@@ -597,9 +600,11 @@ func TestWorkers(t *testing.T) {
 	}
 	c := e.client("203.0.113.1")
 	c.login(testPassword)
-	if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}, nil); r.status != http.StatusOK {
-		t.Fatalf("add = %d %s", r.status, r.raw)
+	addReply := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}, nil)
+	if addReply.status != http.StatusOK {
+		t.Fatalf("add = %d %s", addReply.status, addReply.raw)
 	}
+	id := addReply.body["id"].(string)
 	workers := func() accountWorkersView {
 		t.Helper()
 		var v workersView
@@ -625,7 +630,7 @@ func TestWorkers(t *testing.T) {
 		t.Fatalf("models before any session = %+v", m)
 	}
 	// A quota refresh starts agy, and its probe session reports the models.
-	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusOK {
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/refresh", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("refresh = %d %s", r.status, r.raw)
 	}
 	m := accountModels()
@@ -636,9 +641,9 @@ func TestWorkers(t *testing.T) {
 	ctx := context.Background()
 	oldCost, curCost := 9.0, 1.25
 	for _, req := range []store.Request{
-		{At: time.Now().Add(-5 * 24 * time.Hour), Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 5000, Output: 500, CostUSD: &oldCost},
-		{At: time.Now().Add(-2 * time.Hour), Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 1000, Cached: 400, Output: 100, CostUSD: &curCost},
-		{At: time.Now().Add(-time.Hour), Account: "main", QuotaGroup: "gemini", Model: "gemini-3.1-pro", Status: store.StatusOK, Input: 200, Output: 20},
+		{At: time.Now().Add(-5 * 24 * time.Hour), Account: id, AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 5000, Output: 500, CostUSD: &oldCost},
+		{At: time.Now().Add(-2 * time.Hour), Account: id, AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 1000, Cached: 400, Output: 100, CostUSD: &curCost},
+		{At: time.Now().Add(-time.Hour), Account: id, AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.1-pro", Status: store.StatusOK, Input: 200, Output: 20},
 	} {
 		if err := e.st.AddRequest(ctx, req); err != nil {
 			t.Fatal(err)
@@ -658,17 +663,17 @@ func TestWorkers(t *testing.T) {
 	if a := workers(); len(a.Procs) != 1 || a.Procs[0].PID == 0 || a.Procs[0].RSSBytes == 0 {
 		t.Fatalf("after refresh = %+v", a)
 	}
-	if r := c.do("POST", "/admin/api/workers/main/sessions/nope/cancel", nil, nil); r.status != http.StatusBadRequest {
+	if r := c.do("POST", "/admin/api/workers/"+id+"/sessions/nope/cancel", nil, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("cancel unknown = %d %s", r.status, r.raw)
 	}
-	if r := c.do("POST", "/admin/api/workers/main/restart", nil, nil); r.status != http.StatusOK {
+	if r := c.do("POST", "/admin/api/workers/"+id+"/restart", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("restart = %d %s", r.status, r.raw)
 	}
 	if a := workers(); len(a.Procs) != 0 {
 		t.Fatalf("after restart = %+v", a)
 	}
 	// Default egress rules reject play.googleapis.com and report it under workers.
-	proxyURL, err := url.Parse(e.egress.Register("main"))
+	proxyURL, err := url.Parse(e.egress.Register(id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -781,12 +786,14 @@ func TestImportSignIn(t *testing.T) {
 	c := e.client("203.0.113.1")
 	c.login(testPassword)
 	add := map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}
-	if r := c.do("POST", "/admin/api/accounts", add, nil); r.status != http.StatusOK {
-		t.Fatalf("add = %d %s", r.status, r.raw)
+	addReply := c.do("POST", "/admin/api/accounts", add, nil)
+	if addReply.status != http.StatusOK {
+		t.Fatalf("add = %d %s", addReply.status, addReply.raw)
 	}
-	tokenFile := filepath.Join(e.accounts, "main", ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	id := addReply.body["id"].(string)
+	tokenFile := filepath.Join(e.accounts, id, ".gemini", "antigravity-cli", "antigravity-oauth-token")
 	importToken := func(token string) reply {
-		return c.do("POST", "/admin/api/accounts/main/signin/import", map[string]string{"token": token}, nil)
+		return c.do("POST", "/admin/api/accounts/"+id+"/signin/import", map[string]string{"token": token}, nil)
 	}
 
 	if r := importToken("ya29.access"); r.status != http.StatusBadRequest || !strings.Contains(r.raw, "access token") {
@@ -817,7 +824,7 @@ func TestImportSignIn(t *testing.T) {
 	if restored, _ := os.ReadFile(tokenFile); string(restored) != string(installed) {
 		t.Fatalf("sign-in after a rejected import = %s, want %s", restored, installed)
 	}
-	if got := e.p.Account("main").Status().Disabled; got != "" {
+	if got := e.p.Account(id).Status().Disabled; got != "" {
 		t.Fatalf("a rejected import disabled the account whose sign-in it restored: %q", got)
 	}
 
@@ -837,10 +844,10 @@ func TestImportSignIn(t *testing.T) {
 	}
 
 	// Removing the account deletes its sign-in with its HOME.
-	if r := c.do("DELETE", "/admin/api/accounts/main", nil, nil); r.status != http.StatusOK {
+	if r := c.do("DELETE", "/admin/api/accounts/"+id, nil, nil); r.status != http.StatusOK {
 		t.Fatalf("remove = %d %s", r.status, r.raw)
 	}
-	if _, err := os.Stat(filepath.Join(e.accounts, "main")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(e.accounts, id)); !os.IsNotExist(err) {
 		t.Fatalf("HOME after removal: %v", err)
 	}
 }
@@ -853,10 +860,12 @@ func TestRefreshReenablesRecoveredAccount(t *testing.T) {
 	c := e.client("203.0.113.1")
 	c.login(testPassword)
 	add := map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}
-	if r := c.do("POST", "/admin/api/accounts", add, nil); r.status != http.StatusOK {
-		t.Fatalf("add = %d %s", r.status, r.raw)
+	addReply := c.do("POST", "/admin/api/accounts", add, nil)
+	if addReply.status != http.StatusOK {
+		t.Fatalf("add = %d %s", addReply.status, addReply.raw)
 	}
-	tokenDir := filepath.Join(e.accounts, "main", ".gemini", "antigravity-cli")
+	id := addReply.body["id"].(string)
+	tokenDir := filepath.Join(e.accounts, id, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -865,16 +874,16 @@ func TestRefreshReenablesRecoveredAccount(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusOK {
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/refresh", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("initial refresh = %d %s", r.status, r.raw)
 	}
 
 	// Simulate gateway failing session/new with Authentication required.
-	e.p.Account("main").Disable(fmt.Errorf("%w (session/new: Authentication required)", agy.ErrAuthRequired))
+	e.p.Account(id).Disable(fmt.Errorf("%w (session/new: Authentication required)", agy.ErrAuthRequired))
 	if err := os.WriteFile(tokenFile, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusBadGateway {
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/refresh", nil, nil); r.status != http.StatusBadGateway {
 		t.Fatalf("refresh with bad token = %d %s", r.status, r.raw)
 	}
 	var accounts []accountView
@@ -888,7 +897,7 @@ func TestRefreshReenablesRecoveredAccount(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := c.do("POST", "/admin/api/accounts/main/refresh", nil, nil); r.status != http.StatusOK {
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/refresh", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("refresh after recovery = %d %s", r.status, r.raw)
 	}
 	accounts = nil
@@ -898,7 +907,7 @@ func TestRefreshReenablesRecoveredAccount(t *testing.T) {
 	if len(accounts) != 1 || accounts[0].Disabled != "" || accounts[0].SampleErr != "" || accounts[0].User == nil || len(accounts[0].Groups) == 0 || len(accounts[0].Models) == 0 {
 		t.Fatalf("accounts after recovery = %+v", accounts)
 	}
-	if err := e.p.Account("main").Available("gemini"); err != nil {
+	if err := e.p.Account(id).Available("gemini"); err != nil {
 		t.Fatalf("account still unavailable after recovery: %v", err)
 	}
 }
@@ -910,10 +919,12 @@ func TestAgyLogs(t *testing.T) {
 	}
 	c := e.client("203.0.113.1")
 	c.login(testPassword)
-	if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main"}, nil); r.status != http.StatusOK {
-		t.Fatalf("add = %d %s", r.status, r.raw)
+	addReply := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main"}, nil)
+	if addReply.status != http.StatusOK {
+		t.Fatalf("add = %d %s", addReply.status, addReply.raw)
 	}
-	logDir := filepath.Join(e.accounts, "main", ".gemini", "antigravity-cli", "log")
+	id := addReply.body["id"].(string)
+	logDir := filepath.Join(e.accounts, id, ".gemini", "antigravity-cli", "log")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -928,7 +939,7 @@ func TestAgyLogs(t *testing.T) {
 	var listed struct {
 		Files []agyLogFileView `json:"files"`
 	}
-	r := c.do("GET", "/admin/api/workers/main/logs", nil, nil)
+	r := c.do("GET", "/admin/api/workers/"+id+"/logs", nil, nil)
 	if json.Unmarshal([]byte(r.raw), &listed) != nil || len(listed.Files) != 1 || listed.Files[0].Kind != "worker" {
 		t.Fatalf("list = %d %s", r.status, r.raw)
 	}
@@ -936,17 +947,17 @@ func TestAgyLogs(t *testing.T) {
 		Entries []agyLogEntryView `json:"entries"`
 		Matched int               `json:"matched"`
 	}
-	r = c.do("GET", "/admin/api/workers/main/logs/entries?q=validation_url", nil, nil)
+	r = c.do("GET", "/admin/api/workers/"+id+"/logs/entries?q=validation_url", nil, nil)
 	if json.Unmarshal([]byte(r.raw), &found) != nil || found.Matched != 1 ||
 		!strings.Contains(found.Entries[0].Text, "https://accounts.google.com/x") || found.Entries[0].File != name {
 		t.Fatalf("search = %d %s", r.status, r.raw)
 	}
-	r = c.do("GET", "/admin/api/workers/main/logs/entries?level=E&file="+name, nil, nil)
+	r = c.do("GET", "/admin/api/workers/"+id+"/logs/entries?level=E&file="+name, nil, nil)
 	if json.Unmarshal([]byte(r.raw), &found) != nil || found.Matched != 1 || found.Entries[0].Level != "E" {
 		t.Fatalf("errors only = %d %s", r.status, r.raw)
 	}
 	for _, query := range []string{"level=X", "limit=0", "file=../agyrelay.db"} {
-		if r := c.do("GET", "/admin/api/workers/main/logs/entries?"+query, nil, nil); r.status != http.StatusBadRequest {
+		if r := c.do("GET", "/admin/api/workers/"+id+"/logs/entries?"+query, nil, nil); r.status != http.StatusBadRequest {
 			t.Fatalf("%s = %d %s", query, r.status, r.raw)
 		}
 	}
@@ -962,27 +973,31 @@ func TestAccountSignIn(t *testing.T) {
 	}
 	c := e.client("203.0.113.1")
 	c.login(testPassword)
-	if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": "../x", "env": []string{}}, nil); r.status != http.StatusBadRequest {
-		t.Fatalf("bad name = %d", r.status)
+	for _, bad := range []string{"", "   ", "bad\x00name", strings.Repeat("a", 65)} {
+		if r := c.do("POST", "/admin/api/accounts", map[string]any{"name": bad, "env": []string{}}, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("bad name %q = %d", bad, r.status)
+		}
 	}
 	add := map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1", "HTTPS_PROXY=http://user:secret@proxy"}}
-	if r := c.do("POST", "/admin/api/accounts", add, nil); r.status != http.StatusOK {
-		t.Fatalf("add = %d %s", r.status, r.raw)
+	addReply := c.do("POST", "/admin/api/accounts", add, nil)
+	if addReply.status != http.StatusOK {
+		t.Fatalf("add = %d %s", addReply.status, addReply.raw)
 	}
+	id := addReply.body["id"].(string)
 
-	r := c.do("POST", "/admin/api/accounts/main/signin", nil, nil)
+	r := c.do("POST", "/admin/api/accounts/"+id+"/signin", nil, nil)
 	if r.status != http.StatusOK || !strings.HasPrefix(r.body["url"].(string), "https://accounts.google.com/o/oauth2/") {
 		t.Fatalf("start sign-in = %d %s", r.status, r.raw)
 	}
-	r = c.do("POST", "/admin/api/accounts/main/signin/code", map[string]string{"code": "4/wrong"}, nil)
+	r = c.do("POST", "/admin/api/accounts/"+id+"/signin/code", map[string]string{"code": "4/wrong"}, nil)
 	if r.status != http.StatusBadRequest || !strings.Contains(r.raw, "invalid_grant") {
 		t.Fatalf("wrong code = %d %s", r.status, r.raw)
 	}
-	if r := c.do("POST", "/admin/api/accounts/main/signin/code", map[string]string{"code": agytest.LoginCode}, nil); r.status != http.StatusBadRequest {
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/signin/code", map[string]string{"code": agytest.LoginCode}, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("code without a pending sign-in = %d", r.status)
 	}
-	c.do("POST", "/admin/api/accounts/main/signin", nil, nil)
-	r = c.do("POST", "/admin/api/accounts/main/signin/code", map[string]string{"code": agytest.LoginCode}, nil)
+	c.do("POST", "/admin/api/accounts/"+id+"/signin", nil, nil)
+	r = c.do("POST", "/admin/api/accounts/"+id+"/signin/code", map[string]string{"code": agytest.LoginCode}, nil)
 	if r.status != http.StatusOK || r.body["email"] != agytest.LoginEmail {
 		t.Fatalf("sign-in = %d %s", r.status, r.raw)
 	}
@@ -1005,13 +1020,13 @@ func TestAccountSignIn(t *testing.T) {
 		t.Fatalf("env values leak or names are missing: %s", r.raw)
 	}
 
-	if r := c.do("POST", "/admin/api/accounts/main/pause", nil, nil); r.status != http.StatusOK {
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/pause", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("pause = %d", r.status)
 	}
 	if err := e.ctl.Settings(); err.TurnsPerAccount == 0 {
 		t.Fatal("settings lost")
 	}
-	if r := c.do("DELETE", "/admin/api/accounts/main", nil, nil); r.status != http.StatusOK {
+	if r := c.do("DELETE", "/admin/api/accounts/"+id, nil, nil); r.status != http.StatusOK {
 		t.Fatalf("remove = %d", r.status)
 	}
 	if r := c.do("GET", "/admin/api/accounts", nil, nil); r.raw != "[]\n" {
@@ -1212,5 +1227,179 @@ func TestUserKeyDelayAndLockout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < minUserKeyDelay {
 		t.Fatalf("valid key elapsed = %v, want >= %v", elapsed, minUserKeyDelay)
+	}
+}
+
+func TestRenameAccount(t *testing.T) {
+	e := newEnv(t)
+	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+
+	r1 := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}, nil)
+	r2 := c.do("POST", "/admin/api/accounts", map[string]any{"name": "backup"}, nil)
+	if r1.status != http.StatusOK || r2.status != http.StatusOK {
+		t.Fatalf("add = %d / %d", r1.status, r2.status)
+	}
+	id1 := r1.body["id"].(string)
+
+	// Start agy and sample quota on id1; capture its live PID so we verify
+	// renaming does not restart agy or move its HOME directory.
+	if r := c.do("POST", "/admin/api/accounts/"+id1+"/refresh", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("refresh = %d %s", r.status, r.raw)
+	}
+	procsBefore := e.p.Account(id1).LiveProcs()
+	if len(procsBefore) != 1 {
+		t.Fatalf("live procs = %d, want 1", len(procsBefore))
+	}
+	pidBefore := procsBefore[0].PID()
+
+	// Duplicate name -> 400; missing ID -> 404; empty/control char -> 400.
+	if r := c.do("PUT", "/admin/api/accounts/"+id1+"/name", map[string]string{"name": "backup"}, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("duplicate rename = %d %s", r.status, r.raw)
+	}
+	if r := c.do("PUT", "/admin/api/accounts/missing/name", map[string]string{"name": "next"}, nil); r.status != http.StatusNotFound {
+		t.Fatalf("missing rename = %d %s", r.status, r.raw)
+	}
+	if r := c.do("PUT", "/admin/api/accounts/"+id1+"/name", map[string]string{"name": "   "}, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("empty rename = %d %s", r.status, r.raw)
+	}
+
+	// Rename to a human-readable name with spaces, @, and Unicode.
+	newName := "Alice Pro (主力) <alice@example.com>"
+	if r := c.do("PUT", "/admin/api/accounts/"+id1+"/name", map[string]string{"name": "  " + newName + "  "}, nil); r.status != http.StatusOK {
+		t.Fatalf("rename = %d %s", r.status, r.raw)
+	}
+
+	procsAfter := e.p.Account(id1).LiveProcs()
+	if len(procsAfter) != 1 || procsAfter[0].PID() != pidBefore {
+		t.Fatalf("agy restarted on rename: before pid %d, after %v", pidBefore, procsAfter)
+	}
+
+	var accounts []accountView
+	if err := json.Unmarshal([]byte(c.do("GET", "/admin/api/accounts", nil, nil).raw), &accounts); err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 || accounts[0].ID != id1 || accounts[0].Name != newName || accounts[0].User == nil || len(accounts[0].Models) == 0 {
+		t.Fatalf("accounts after rename = %+v", accounts)
+	}
+
+	entries, err := e.st.AuditLog(context.Background(), 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAudit := slices.ContainsFunc(entries, func(a store.AuditEntry) bool {
+		return a.Action == "account_renamed" && a.Detail == "main → "+newName
+	})
+	if !foundAudit {
+		t.Fatalf("audit missing account_renamed: %+v", entries)
+	}
+}
+
+func TestLegacyAccountDirAndSnapshotMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "agyrelay.db")
+	rawDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`
+		CREATE TABLE accounts (
+			name       TEXT PRIMARY KEY,
+			env        TEXT NOT NULL DEFAULT '[]',
+			proxy      TEXT NOT NULL DEFAULT '',
+			paused     INTEGER NOT NULL DEFAULT 0,
+			priority   INTEGER NOT NULL DEFAULT 2,
+			models     TEXT NOT NULL DEFAULT '[]',
+			created_at INTEGER NOT NULL DEFAULT 1000
+		);
+		INSERT INTO accounts (name, priority) VALUES ('main', 2);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	rawDB.Close()
+
+	// Legacy directory <dir>/accounts/main and snapshots.json referencing "main".
+	legacyMarker := filepath.Join(dir, "accounts", "main", ".gemini", "marker")
+	if err := os.MkdirAll(filepath.Dir(legacyMarker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyMarker, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapPath := filepath.Join(dir, "snapshots.json")
+	snapJSON := `[{"user":"h1","account":"main","sessionId":"S1","toolsKey":"","count":2,"hash":"abc","steps":2,"updatedAt":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}]`
+	if err := os.WriteFile(snapPath, []byte(snapJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	b, err := bridge.Start(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	p, err := pool.New(pool.Config{Bin: os.Args[0], TurnsPerAccount: 1, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	settings, err := control.LoadSettings(context.Background(), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.AllowDirect = true
+	recorder := usage.NewRecorder(st, settings.Prices, nil, log)
+	budget := usage.NewBudget(st, recorder)
+	flags, err := promptflags.New(context.Background(), st, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Flags: flags, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gw.Close()
+	monitor := usage.NewMonitor(usage.MonitorConfig{Store: st, Pool: p, Profile: gateway.IdleProfile(), Log: log})
+	outbound, err := egress.Start(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outbound.Close()
+	cloudCode, err := cloudcode.Start(cloudcode.DefaultUpstream, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cloudCode.Close()
+
+	if _, err := control.New(context.Background(), control.Config{
+		Store: st, Pool: p, Gateway: gw, Monitor: monitor, Recorder: recorder, Budget: budget, Flags: flags, Egress: outbound, CloudCode: cloudCode, AgyBin: os.Args[0], Level: new(slog.LevelVar),
+		AccountsDir: filepath.Join(dir, "accounts"), Settings: settings, Log: log,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	accounts := p.Accounts()
+	if len(accounts) != 1 || accounts[0].Name() != "main" || accounts[0].ID() == "main" || accounts[0].Priority() != 2 {
+		t.Fatalf("migrated pool accounts = %+v", accounts)
+	}
+	migratedID := accounts[0].ID()
+	if _, err := os.Stat(filepath.Join(dir, "accounts", "main")); !os.IsNotExist(err) {
+		t.Fatalf("legacy accounts/main dir still exists: %v", err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "accounts", migratedID, ".gemini", "marker")); err != nil || string(raw) != "ok" {
+		t.Fatalf("migrated marker = %q, %v", raw, err)
+	}
+	updatedSnaps, err := os.ReadFile(snapPath)
+	if err != nil || !strings.Contains(string(updatedSnaps), `"account":"`+migratedID+`"`) {
+		t.Fatalf("migrated snapshots.json = %s, %v", updatedSnaps, err)
 	}
 }

@@ -31,8 +31,8 @@ type Imported struct {
 // token JSON holding one, instead of the Google sign-in. A quota refresh
 // checks the token; when it fails for another reason than a missing
 // verification, the previous sign-in is put back.
-func (c *Control) ImportSignIn(ctx context.Context, name, pasted string) (Imported, error) {
-	account := c.cfg.Pool.Account(name)
+func (c *Control) ImportSignIn(ctx context.Context, id, pasted string) (Imported, error) {
+	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return Imported{}, store.ErrNotFound
 	}
@@ -44,7 +44,7 @@ func (c *Control) ImportSignIn(ctx context.Context, name, pasted string) (Import
 		return Imported{}, &InputError{err.Error()}
 	}
 
-	c.CancelLogin(name)
+	c.CancelLogin(id)
 	undo, err := agy.ImportSignIn(account.GeminiDir(), refreshToken)
 	if err != nil {
 		return Imported{}, err
@@ -52,7 +52,7 @@ func (c *Control) ImportSignIn(ctx context.Context, name, pasted string) (Import
 	// agy reads the sign-in when it starts; what Google said about the
 	// old one no longer holds.
 	account.Restart()
-	c.cfg.CloudCode.ClearVerification(name)
+	c.cfg.CloudCode.ClearVerification(id)
 	q, err := c.cfg.Monitor.TryRefresh(ctx, account)
 	switch {
 	case err != nil && account.Status().Verify:

@@ -37,7 +37,7 @@ func TestFlaggedPrompts(t *testing.T) {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
 	want := FlaggedPrompt{Fingerprint: "f1", FirstAt: first, LastAt: again, Until: again.Add(24 * time.Hour), Hits: 2,
-		KeyHash: "h2", KeyName: "bob", Account: "a2", Model: "m2"}
+		KeyHash: "h2", KeyName: "bob", Account: "a2", AccountName: "a2", Model: "m2"}
 	got := list[0]
 	sameTimes := got.FirstAt.Equal(want.FirstAt) && got.LastAt.Equal(want.LastAt) && got.Until.Equal(want.Until)
 	got.FirstAt, got.LastAt, got.Until = time.Time{}, time.Time{}, time.Time{}

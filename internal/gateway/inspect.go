@@ -52,7 +52,7 @@ func (g *Gateway) Sessions() []SessionInfo {
 	defer g.mu.Unlock()
 	out := make([]SessionInfo, 0, len(g.sessions))
 	for _, sess := range g.sessions {
-		info := SessionInfo{Account: sess.account.Name(), ID: sess.id, KeyHash: sess.user, LastUsed: sess.lastUsed}
+		info := SessionInfo{Account: sess.account.ID(), ID: sess.id, KeyHash: sess.user, LastUsed: sess.lastUsed}
 		if sess.proc != nil && sess.proc.Alive() && sess.proc.HasSession(sess.id) {
 			info.PID = sess.proc.PID()
 		}
@@ -107,9 +107,10 @@ func (g *Gateway) CancelTurn(account, sessionID string) error {
 	}
 	sess.turn.cancelledByAdmin = true
 	turn := sess.turn.turn
+	acct := sess.account
 	g.mu.Unlock()
 	turn.Cancel()
-	g.log.Info("turn cancelled by the admin", "account", account, "session", sessionID)
+	g.log.Info("turn cancelled by the admin", "account", acct.Name(), "session", sessionID)
 	return nil
 }
 
@@ -123,11 +124,12 @@ func (g *Gateway) CloseSession(ctx context.Context, account, sessionID string) e
 		g.mu.Unlock()
 		return fmt.Errorf("%w that is open and idle", ErrNoSession)
 	}
+	acct := sess.account
 	claim := g.claimClosingLocked(sess)
 	g.mu.Unlock()
 	if err := g.closeClaimed(ctx, claim); err != nil {
 		return err
 	}
-	g.log.Info("session closed by the admin", "account", account, "session", sessionID)
+	g.log.Info("session closed by the admin", "account", acct.Name(), "session", sessionID)
 	return nil
 }

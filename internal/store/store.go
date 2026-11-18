@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,17 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// NewUUID returns a random RFC 4122 version 4 UUID in lowercase hex.
+func NewUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // migrations[i] moves the schema from version i to i+1.
 var migrations = []string{
@@ -37,7 +49,8 @@ var migrations = []string{
 		value TEXT NOT NULL DEFAULT ''
 	);
 	CREATE TABLE accounts (
-		name       TEXT PRIMARY KEY,
+		id         TEXT PRIMARY KEY,
+		name       TEXT NOT NULL UNIQUE,
 		env        TEXT NOT NULL DEFAULT '[]',
 		proxy      TEXT NOT NULL DEFAULT '',
 		paused     INTEGER NOT NULL DEFAULT 0,
@@ -97,6 +110,7 @@ var migrations = []string{
 		key_hash      TEXT NOT NULL DEFAULT '',
 		key_name      TEXT NOT NULL DEFAULT '',
 		account       TEXT NOT NULL DEFAULT '',
+		account_name  TEXT NOT NULL DEFAULT '',
 		model         TEXT NOT NULL DEFAULT '',
 		slug          TEXT NOT NULL DEFAULT '',
 		effort        TEXT NOT NULL DEFAULT '',
@@ -138,10 +152,11 @@ var migrations = []string{
 		PRIMARY KEY (key_hash, model)
 	);
 	CREATE TABLE key_quota (
-		key_hash TEXT NOT NULL,
-		account  TEXT NOT NULL,
-		grp      TEXT NOT NULL,
-		used     REAL NOT NULL DEFAULT 0,
+		key_hash     TEXT NOT NULL,
+		account      TEXT NOT NULL,
+		account_name TEXT NOT NULL DEFAULT '',
+		grp          TEXT NOT NULL,
+		used         REAL NOT NULL DEFAULT 0,
 		PRIMARY KEY (key_hash, account, grp)
 	);
 	CREATE TABLE flagged_prompts (
@@ -156,6 +171,7 @@ var migrations = []string{
 		key_hash      TEXT NOT NULL DEFAULT '',
 		key_name      TEXT NOT NULL DEFAULT '',
 		account       TEXT NOT NULL DEFAULT '',
+		account_name  TEXT NOT NULL DEFAULT '',
 		model         TEXT NOT NULL DEFAULT ''
 	);
 	CREATE TABLE upstream_calls (
@@ -163,6 +179,7 @@ var migrations = []string{
 		at                 INTEGER NOT NULL DEFAULT 0,
 		call_token         TEXT NOT NULL DEFAULT '',
 		account            TEXT NOT NULL DEFAULT '',
+		account_name       TEXT NOT NULL DEFAULT '',
 		session            TEXT NOT NULL DEFAULT '',
 		seq                INTEGER NOT NULL DEFAULT 0,
 		model              TEXT NOT NULL DEFAULT '',
@@ -207,6 +224,48 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+type legacyAccount struct {
+	id, name, env, proxy, models string
+	paused, priority, created    int64
+}
+
+func readLegacyAccounts(tx *sql.Tx) ([]legacyAccount, error) {
+	cols, err := tableColumns(tx, "accounts")
+	if err != nil || len(cols) == 0 || cols["id"] {
+		return nil, err
+	}
+	priorityExpr := "0"
+	if cols["priority"] {
+		priorityExpr = "priority"
+	}
+	modelsExpr := "'[]'"
+	if cols["models"] {
+		modelsExpr = "models"
+	}
+	rows, err := tx.Query(`SELECT name, env, proxy, paused, ` + priorityExpr + `, ` + modelsExpr + `, created_at FROM accounts ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []legacyAccount
+	for rows.Next() {
+		var a legacyAccount
+		if err := rows.Scan(&a.name, &a.env, &a.proxy, &a.paused, &a.priority, &a.models, &a.created); err != nil {
+			return nil, err
+		}
+		a.id = NewUUID()
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if _, err := tx.Exec(`DROP TABLE accounts`); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) migrate() error {
 	var version int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
@@ -231,6 +290,27 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	reqCols, err := tableColumns(tx, "requests")
+	if err != nil {
+		return err
+	}
+	kqCols, err := tableColumns(tx, "key_quota")
+	if err != nil {
+		return err
+	}
+	flagCols, err := tableColumns(tx, "flagged_prompts")
+	if err != nil {
+		return err
+	}
+	upCols, err := tableColumns(tx, "upstream_calls")
+	if err != nil {
+		return err
+	}
+	legacyAccounts, err := readLegacyAccounts(tx)
+	if err != nil {
+		return err
+	}
+
 	for i, m := range migrations {
 		if err := applySchema(tx, m); err != nil {
 			return fmt.Errorf("migration %d: %w", i+1, err)
@@ -246,6 +326,49 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	for _, backfill := range []struct {
+		had  bool
+		stmt string
+	}{
+		{len(reqCols) > 0 && !reqCols["account_name"], `UPDATE requests SET account_name = account WHERE account_name = '' AND account != ''`},
+		{len(kqCols) > 0 && !kqCols["account_name"], `UPDATE key_quota SET account_name = account WHERE account_name = '' AND account != ''`},
+		{len(flagCols) > 0 && !flagCols["account_name"], `UPDATE flagged_prompts SET account_name = account WHERE account_name = '' AND account != ''`},
+		{len(upCols) > 0 && !upCols["account_name"], `UPDATE upstream_calls SET account_name = account WHERE account_name = '' AND account != ''`},
+	} {
+		if backfill.had {
+			if _, err := tx.Exec(backfill.stmt); err != nil {
+				return err
+			}
+		}
+	}
+	for _, a := range legacyAccounts {
+		env, models := a.env, a.models
+		if env == "" {
+			env = "[]"
+		}
+		if models == "" {
+			models = "[]"
+		}
+		if _, err := tx.Exec(`INSERT INTO accounts (id, name, env, proxy, paused, priority, models, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			a.id, a.name, env, a.proxy, a.paused, a.priority, models, a.created); err != nil {
+			return err
+		}
+		for _, stmt := range []struct {
+			sql  string
+			args []any
+		}{
+			{`UPDATE requests SET account = ?, account_name = ? WHERE account = ?`, []any{a.id, a.name, a.name}},
+			{`UPDATE quota_samples SET account = ? WHERE account = ?`, []any{a.id, a.name}},
+			{`UPDATE quota_cursors SET account = ? WHERE account = ?`, []any{a.id, a.name}},
+			{`UPDATE key_quota SET account = ?, account_name = ? WHERE account = ?`, []any{a.id, a.name, a.name}},
+			{`UPDATE flagged_prompts SET account = ?, account_name = ? WHERE account = ?`, []any{a.id, a.name, a.name}},
+			{`UPDATE upstream_calls SET account = ?, account_name = ? WHERE account = ?`, []any{a.id, a.name, a.name}},
+		} {
+			if _, err := tx.Exec(stmt.sql, stmt.args...); err != nil {
+				return err
+			}
+		}
+	}
 	// Before merge_argon, a key with an Argon limit counted Argon apart
 	// from Gemini; keep it so.
 	if hadMergeArgon == 0 {
@@ -254,8 +377,8 @@ func (s *Store) migrate() error {
 		}
 	}
 	if hadKeyQuota == 0 {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO key_quota (key_hash, account, grp, used)
-			SELECT key_hash, account, quota_group, SUM(quota_used)
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO key_quota (key_hash, account, account_name, grp, used)
+			SELECT key_hash, account, MAX(account_name), quota_group, SUM(quota_used)
 			FROM requests
 			WHERE quota_used > 0 AND account != '' AND quota_group != '' AND key_hash IN (SELECT hash FROM api_keys)
 			GROUP BY key_hash, account, quota_group`); err != nil {

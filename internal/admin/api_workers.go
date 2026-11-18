@@ -17,6 +17,7 @@ type workersView struct {
 }
 
 type accountWorkersView struct {
+	ID       string        `json:"id"`
 	Name     string        `json:"name"`
 	Paused   bool          `json:"paused"`
 	Disabled string        `json:"disabled"`
@@ -116,8 +117,8 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 	out := workersView{Accounts: []accountWorkersView{}, Now: time.Now()}
 	for _, account := range h.pool.Accounts() {
 		st := account.Status()
-		v := accountWorkersView{Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, Turns: st.Turns,
-			Procs: []procView{}, Sessions: sessionsByAccount[st.Name]}
+		v := accountWorkersView{ID: st.ID, Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, Turns: st.Turns,
+			Procs: []procView{}, Sessions: sessionsByAccount[st.ID]}
 		workerOf := map[string]int{}
 		for _, proc := range account.LiveProcs() {
 			info, err := proc.Inspect()
@@ -145,7 +146,7 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 		for i := range v.Sessions {
 			v.Sessions[i].Worker = workerOf[v.Sessions[i].ID]
 		}
-		if traffic, ok := h.control.Egress(st.Name); ok {
+		if traffic, ok := h.control.Egress(st.ID); ok {
 			ev := &egressView{Route: traffic.Route, Open: traffic.Open, Connections: traffic.Connections, BytesOut: traffic.BytesOut,
 				BytesIn: traffic.BytesIn, Rejected: traffic.Rejected, Refused: traffic.Refused, LastError: traffic.LastError, LastErrorAt: optionalTime(traffic.LastErrorAt),
 				Hosts: []hostStatView{}}
@@ -156,7 +157,12 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Accounts = append(out.Accounts, v)
 	}
-	sort.Slice(out.Accounts, func(i, j int) bool { return out.Accounts[i].Name < out.Accounts[j].Name })
+	sort.Slice(out.Accounts, func(i, j int) bool {
+		if out.Accounts[i].Name != out.Accounts[j].Name {
+			return out.Accounts[i].Name < out.Accounts[j].Name
+		}
+		return out.Accounts[i].ID < out.Accounts[j].ID
+	})
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -166,7 +172,7 @@ func (h *Handler) cancelTurn(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, "cancel turn", err)
 		return
 	}
-	h.audit(r, "turn_cancelled", account+"/"+id)
+	h.audit(r, "turn_cancelled", h.accountName(account)+"/"+id)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
@@ -176,7 +182,7 @@ func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, "close session", err)
 		return
 	}
-	h.audit(r, "session_closed", account+"/"+id)
+	h.audit(r, "session_closed", h.accountName(account)+"/"+id)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
@@ -239,11 +245,11 @@ func (h *Handler) agyLogEntries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) restartAccount(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("account")
-	if err := h.control.RestartAccount(name); err != nil {
+	id := r.PathValue("account")
+	if err := h.control.RestartAccount(id); err != nil {
 		h.fail(w, "restart account", err)
 		return
 	}
-	h.audit(r, "account_restarted", name)
+	h.audit(r, "account_restarted", h.accountName(id))
 	writeJSON(w, http.StatusOK, map[string]any{})
 }

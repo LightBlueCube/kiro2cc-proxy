@@ -200,6 +200,41 @@ func (s *snapshotStore) live(margin time.Duration) (map[string]bool, error) {
 	return refs, s.save()
 }
 
+// migrateAccounts rewrites legacy account names in persisted snapshots to
+// their immutable account IDs on upgrade.
+func (s *snapshotStore) migrateAccounts(nameToID map[string]string) error {
+	if len(nameToID) == 0 {
+		return nil
+	}
+	changed := false
+	s.mu.Lock()
+	nextBySession := make(map[string][]snapshot, len(s.bySession))
+	for _, positions := range s.bySession {
+		for i := range positions {
+			if id, ok := nameToID[positions[i].Account]; ok && id != positions[i].Account {
+				positions[i].Account = id
+				changed = true
+			}
+		}
+		ref := sessionRef(positions[0].Account, positions[0].SessionID)
+		nextBySession[ref] = positions
+	}
+	if changed {
+		s.bySession = nextBySession
+		clear(s.byPrefix)
+		for ref, positions := range s.bySession {
+			for _, snap := range positions {
+				s.byPrefix[prefixRef(snap.User, snap.Hash)] = ref
+			}
+		}
+	}
+	s.mu.Unlock()
+	if !changed {
+		return nil
+	}
+	return s.save()
+}
+
 // keepLocked removes the session's positions that keep rejects.
 func (s *snapshotStore) keepLocked(ref string, keep func(snapshot) bool) {
 	var kept []snapshot

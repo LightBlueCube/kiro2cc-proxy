@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"cmp"
 	"net/http"
 	"time"
 
@@ -42,7 +43,7 @@ func (h *Handler) listFlaggedPrompts(w http.ResponseWriter, r *http.Request) {
 func buildFlaggedPromptView(p store.FlaggedPrompt, now time.Time) flaggedPromptView {
 	return flaggedPromptView{
 		Fingerprint: p.Fingerprint, FirstAt: p.FirstAt, LastAt: p.LastAt, Until: p.Until, Active: p.Pinned || now.Before(p.Until), Pinned: p.Pinned,
-		Hits: p.Hits, KeyHash: p.KeyHash, KeyName: p.KeyName, Account: p.Account, Model: p.Model,
+		Hits: p.Hits, KeyHash: p.KeyHash, KeyName: p.KeyName, Account: cmp.Or(p.AccountName, p.Account), Model: p.Model,
 	}
 }
 

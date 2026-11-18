@@ -39,7 +39,7 @@ func (g *Gateway) pruneConversations() {
 		}
 		removed := 0
 		for id, changed := range stored {
-			if keep[sessionRef(account.Name(), id)] || time.Since(changed) < conversationGrace {
+			if keep[sessionRef(account.ID(), id)] || time.Since(changed) < conversationGrace {
 				continue
 			}
 			if err := agy.DeleteConversation(account.GeminiDir(), id); err != nil {

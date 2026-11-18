@@ -141,10 +141,10 @@ func (g *Gateway) refreshUnreported(ctx context.Context) {
 // startRefresh returns the account's running refresh, starting one unless
 // the last left it without a catalog less than refreshRetry ago (nil).
 func (g *Gateway) startRefresh(account *pool.Account) chan struct{} {
-	name := account.Name()
+	id := account.ID()
 	g.refreshMu.Lock()
 	defer g.refreshMu.Unlock()
-	if call := g.refreshes[name]; call != nil {
+	if call := g.refreshes[id]; call != nil {
 		if call.failedAt.IsZero() {
 			return call.done
 		}
@@ -153,7 +153,7 @@ func (g *Gateway) startRefresh(account *pool.Account) chan struct{} {
 		}
 	}
 	call := &refreshCall{done: make(chan struct{})}
-	g.refreshes[name] = call
+	g.refreshes[id] = call
 	go func() {
 		// Not the request's context: other requests may wait on it.
 		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
@@ -164,10 +164,10 @@ func (g *Gateway) startRefresh(account *pool.Account) chan struct{} {
 		}
 		g.refreshMu.Lock()
 		if err != nil {
-			g.log.Warn("account refresh before routing failed", "account", name, "err", err)
+			g.log.Warn("account refresh before routing failed", "account", account.Name(), "err", err)
 			call.failedAt = time.Now()
 		} else {
-			delete(g.refreshes, name)
+			delete(g.refreshes, id)
 		}
 		close(call.done)
 		g.refreshMu.Unlock()
@@ -278,7 +278,7 @@ func slugOn(account *pool.Account, r *run) (slug, tier string, ok bool) {
 // model and is available for its quota group.
 func (g *Gateway) hasCandidate(r *run) bool {
 	for _, account := range g.pool.Accounts() {
-		if r.exclude[account.Name()] {
+		if r.exclude[account.ID()] {
 			continue
 		}
 		if _, _, ok := slugOn(account, r); ok && account.Available(r.poolGroup(account)) == nil {

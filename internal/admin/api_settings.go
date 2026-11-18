@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"cmp"
 	"net/http"
 	"strconv"
 	"time"
@@ -94,7 +95,7 @@ func keyQuotasByHash(quotas []store.KeyQuota) map[string]map[string]keyQuotaView
 		}
 		v := byGroup[q.Group]
 		v.Used += q.Used
-		v.Accounts = append(v.Accounts, accountQuotaView{Account: q.Account, Used: q.Used})
+		v.Accounts = append(v.Accounts, accountQuotaView{Account: cmp.Or(q.AccountName, q.Account), Used: q.Used})
 		byGroup[q.Group] = v
 	}
 	return out
