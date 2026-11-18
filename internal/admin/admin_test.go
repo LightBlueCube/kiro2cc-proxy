@@ -547,7 +547,7 @@ func TestAccountProxy(t *testing.T) {
 	}
 	settings := func(fallback string, direct bool) reply {
 		t.Helper()
-		s := map[string]any{"turns_per_account": 1, "snapshot_ttl": "24h", "session_idle_close": "5m", "log_level": "info", "retention_days": 90, "capture_response_mib": 4, "flagged_prompt_retention_days": 30,
+		s := map[string]any{"turns_per_account": 1, "snapshot_ttl": "24h", "session_idle_close": "5m", "park_ttl": "5m", "log_level": "info", "retention_days": 90, "capture_response_mib": 4, "flagged_prompt_retention_days": 30,
 			"prices": []any{}, "fallback_proxy": fallback, "allow_direct": direct}
 		return c.do("PUT", "/admin/api/settings", s, nil)
 	}
@@ -743,33 +743,38 @@ func TestSettingsValidation(t *testing.T) {
 	if r := c.do("PUT", "/admin/api/settings", bad, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad settings = %d %s", r.status, r.raw)
 	}
-	good := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14, "risk_control": false,
+	good := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "park_ttl": "10m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14, "risk_control": false,
 		"egress_rules": []string{"  DOMAIN-SUFFIX,telemetry.example.com,REJECT  ", ""},
 		"prices":       []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
-	badRule := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
+	badPark := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "park_ttl": "30s", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
+		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
+	if r := c.do("PUT", "/admin/api/settings", badPark, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("bad park_ttl = %d %s", r.status, r.raw)
+	}
+	badRule := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "park_ttl": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
 		"egress_rules": []string{"DOMAIN,play.googleapis.com,INVALID_ACTION"},
 		"prices":       []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}}}
 	if r := c.do("PUT", "/admin/api/settings", badRule, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad egress rule = %d %s", r.status, r.raw)
 	}
-	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
+	badPrice := map[string]any{"turns_per_account": 3, "snapshot_ttl": "2h", "session_idle_close": "5m", "park_ttl": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
 		"prices": []map[string]any{{"model": "m", "input": 1, "cached": 0.1, "output": 2}, {"model": "m", "input": 2, "cached": 0.1, "output": 2}}}
 	if r := c.do("PUT", "/admin/api/settings", badPrice, nil); r.status != http.StatusBadRequest {
 		t.Fatalf("bad price = %d %s", r.status, r.raw)
 	}
-	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK || r.body["turns_per_account"] != float64(3) || r.body["max_workers"] != float64(10) {
+	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK || r.body["turns_per_account"] != float64(3) || r.body["max_workers"] != float64(10) || r.body["park_ttl"] != "10m" {
 		t.Fatalf("good settings = %d %s", r.status, r.raw)
 	}
-	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.TurnsPerAccount != 3 || got.MaxWorkers != 10 || !slices.Equal(got.EgressRules, []string{"DOMAIN-SUFFIX,telemetry.example.com,REJECT"}) {
+	if got := e.ctl.Settings(); got.SnapshotTTL != "2h" || got.ParkTTL != "10m" || got.TurnsPerAccount != 3 || got.MaxWorkers != 10 || !slices.Equal(got.EgressRules, []string{"DOMAIN-SUFFIX,telemetry.example.com,REJECT"}) {
 		t.Fatalf("applied = %+v", got)
 	}
 	// An update from an older tab that omits egress_rules keeps the active rules;
 	// an explicit empty array clears them.
-	omitRules := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14}
+	omitRules := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "park_ttl": "10m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14}
 	if r := c.do("PUT", "/admin/api/settings", omitRules, nil); r.status != http.StatusOK || !slices.Equal(e.ctl.Settings().EgressRules, []string{"DOMAIN-SUFFIX,telemetry.example.com,REJECT"}) {
 		t.Fatalf("omitted egress_rules = %d %+v", r.status, e.ctl.Settings().EgressRules)
 	}
-	clearRules := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14, "egress_rules": []string{}}
+	clearRules := map[string]any{"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h", "session_idle_close": "5m", "park_ttl": "10m", "log_level": "debug", "retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14, "egress_rules": []string{}}
 	if r := c.do("PUT", "/admin/api/settings", clearRules, nil); r.status != http.StatusOK || len(e.ctl.Settings().EgressRules) != 0 {
 		t.Fatalf("cleared egress_rules = %d %+v", r.status, e.ctl.Settings().EgressRules)
 	}

@@ -661,6 +661,7 @@ views.settings = (container, openTopic) => {
     const maxWorkers = h("input", { type: "number", min: 0, max: 1024, value: s.max_workers });
     const ttl = h("input", { value: s.snapshot_ttl, pattern: "[0-9hms.]+" });
     const idleClose = h("input", { value: s.session_idle_close, pattern: "[0-9hms.]+" });
+    const parkTTL = h("input", { value: s.park_ttl, pattern: "[0-9hms.]+" });
     const level = h("select", {}, ["debug", "info", "warn", "error"].map(l => h("option", { value: l, selected: l === s.log_level }, l)));
     const retention = h("input", { type: "number", min: 1, max: 3650, value: s.retention_days });
     const fallback = h("input", { value: s.fallback_proxy, placeholder: "http://127.0.0.1:7890" });
@@ -711,7 +712,7 @@ views.settings = (container, openTopic) => {
       event.preventDefault();
       guarded(async () => {
         await api("PUT", "settings", {
-          turns_per_account: Number(turns.value), max_workers: Number(maxWorkers.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, log_level: level.value,
+          turns_per_account: Number(turns.value), max_workers: Number(maxWorkers.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, park_ttl: parkTTL.value, log_level: level.value,
           retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
           refuse_harness_prompts: refuseHarness.checked, harness_signatures: readSignatures(),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, egress_rules: ruleLines(egressRules.value),
@@ -728,7 +729,8 @@ views.settings = (container, openTopic) => {
           h("label", {}, t("settings.turns"), withReset(turns, d.turns_per_account)),
           h("label", {}, t("settings.max_workers"), withReset(maxWorkers, d.max_workers)),
           h("label", {}, t("settings.ttl"), withReset(ttl, d.snapshot_ttl)),
-          h("label", { title: t("settings.idle_close.hint") }, t("settings.idle_close"), withReset(idleClose, d.session_idle_close)))),
+          h("label", { title: t("settings.idle_close.hint") }, t("settings.idle_close"), withReset(idleClose, d.session_idle_close)),
+          h("label", { title: t("settings.park_ttl.hint") }, t("settings.park_ttl"), withReset(parkTTL, d.park_ttl)))),
       h("div", { class: "card" }, h("h2", {}, t("settings.outbound")),
         h("div", { class: "row" },
           h("label", { class: "grow" }, t("settings.fallback"), withReset(fallback, d.fallback_proxy)),

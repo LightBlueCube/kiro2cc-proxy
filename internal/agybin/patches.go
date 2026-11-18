@@ -9,7 +9,7 @@ import (
 )
 
 // mcpCallTimeout replaces agy's default 180 s MCP tool-call timeout. The
-// relay's own wait (parkTTL) ends a call long before this.
+// relay's own wait (ParkTTL) ends a call long before this.
 const mcpCallTimeout = 24 * time.Hour
 
 // Function names as recorded in agy's Go function table.

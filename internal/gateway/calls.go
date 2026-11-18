@@ -161,7 +161,7 @@ func (h sessionTools) Call(ctx context.Context, name string, args json.RawMessag
 }
 
 // await blocks an MCP call until the client answers the group or the turn
-// ends; parkTTL ends a turn whose client never answers, well inside the
+// ends; ParkTTL ends a turn whose client never answers, well inside the
 // patched agy's 24 h MCP timeout. The turn's inactivity guard pauses
 // meanwhile: the model produces nothing while it waits for a tool.
 func await(ctx context.Context, at *activeTurn, group *callGroup) (bridge.Result, error) {

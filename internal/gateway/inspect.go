@@ -50,6 +50,7 @@ type TurnInfo struct {
 func (g *Gateway) Sessions() []SessionInfo {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	parkTTL := time.Duration(g.parkTTL.Load())
 	out := make([]SessionInfo, 0, len(g.sessions))
 	for _, sess := range g.sessions {
 		info := SessionInfo{Account: sess.account.ID(), ID: sess.id, KeyHash: sess.user, LastUsed: sess.lastUsed}
@@ -57,7 +58,7 @@ func (g *Gateway) Sessions() []SessionInfo {
 			info.PID = sess.proc.PID()
 		}
 		if at := sess.turn; at != nil {
-			info.Turn = turnInfo(at)
+			info.Turn = turnInfo(at, parkTTL)
 		}
 		out = append(out, info)
 	}
@@ -74,7 +75,7 @@ func (g *Gateway) Sessions() []SessionInfo {
 }
 
 // turnInfo needs g.mu.
-func turnInfo(at *activeTurn) *TurnInfo {
+func turnInfo(at *activeTurn, parkTTL time.Duration) *TurnInfo {
 	model, _, _ := strings.Cut(at.choice, "\x00")
 	info := &TurnInfo{Model: model, Started: at.started}
 	switch {

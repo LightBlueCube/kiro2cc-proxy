@@ -31,8 +31,9 @@ import (
 )
 
 const (
-	// parkTTL cancels a turn whose client never returns its tool results.
-	parkTTL               = 30 * time.Minute
+	// defaultParkTTL cancels a turn whose client never returns its tool
+	// results, when Config.ParkTTL is zero.
+	defaultParkTTL        = 5 * time.Minute
 	maxAttempts           = 3
 	janitorInterval       = 30 * time.Second
 	maxRetryableQuotaWait = time.Minute
@@ -49,6 +50,9 @@ type Config struct {
 	// then it is closed (under --process-per-session its worker exits) and
 	// the next request of the conversation reopens it from disk.
 	IdleClose time.Duration
+	// ParkTTL bounds how long a turn waits for the client's tool results
+	// before it is cancelled (0 = defaultParkTTL).
+	ParkTTL time.Duration
 	// MaxWorkers caps open session workers across all accounts (0 =
 	// unlimited); excess idle sessions are closed first.
 	MaxWorkers int
@@ -100,8 +104,9 @@ type Gateway struct {
 	refreshMu sync.Mutex
 	refreshes map[string]*refreshCall
 	stop      chan struct{}
-	// idleClose is a time.Duration.
+	// idleClose and parkTTL are time.Durations.
 	idleClose  atomic.Int64
+	parkTTL    atomic.Int64
 	maxWorkers atomic.Int64
 	// limits is the context-window check, nil while it is off; limitsMu
 	// serializes its changes.
@@ -204,7 +209,12 @@ func New(cfg Config) (*Gateway, error) {
 		sessions:     map[string]*session{},
 		busyByKey:    map[string]int{},
 	}
+	parkTTL := cfg.ParkTTL
+	if parkTTL <= 0 {
+		parkTTL = defaultParkTTL
+	}
 	g.idleClose.Store(int64(cfg.IdleClose))
+	g.parkTTL.Store(int64(parkTTL))
 	g.maxWorkers.Store(int64(cfg.MaxWorkers))
 	g.SetHarnessPrompts(cfg.HarnessSignatures, cfg.RefuseHarnessPrompts)
 	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
@@ -216,6 +226,24 @@ func New(cfg Config) (*Gateway, error) {
 
 // SetIdleClose changes how long an idle session stays open in agy.
 func (g *Gateway) SetIdleClose(d time.Duration) { g.idleClose.Store(int64(d)) }
+
+// SetParkTTL changes how long a parked turn waits for tool results and
+// reschedules any turns already waiting.
+func (g *Gateway) SetParkTTL(d time.Duration) {
+	if d <= 0 {
+		d = defaultParkTTL
+	}
+	g.mu.Lock()
+	g.parkTTL.Store(int64(d))
+	for _, sess := range g.sessions {
+		at := sess.turn
+		if at == nil || at.parked == nil || at.finished || at.parkTimer == nil {
+			continue
+		}
+		at.parkTimer.Reset(max(0, time.Until(at.parkedAt.Add(d))))
+	}
+	g.mu.Unlock()
+}
 
 // SetHarnessPrompts replaces the signatures of harnesses' default system
 // prompts and turns their refusal on or off.
@@ -774,12 +802,14 @@ func (g *Gateway) abandon(at *activeTurn, r *run) *attemptFailure {
 func (g *Gateway) park(at *activeTurn, group *callGroup) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	ttl := time.Duration(g.parkTTL.Load())
 	at.consuming = false
 	at.parked, at.parkedAt = group, time.Now()
 	at.account.EndRun(at)
-	at.parkTimer = time.AfterFunc(parkTTL, func() {
+	at.parkTimer = time.AfterFunc(ttl, func() {
 		g.mu.Lock()
-		expired := at.parked == group && !at.finished
+		due := at.parkedAt.Add(time.Duration(g.parkTTL.Load()))
+		expired := at.parked == group && !at.finished && !time.Now().Before(due)
 		g.mu.Unlock()
 		if expired {
 			g.log.Info("client never returned tool results; cancelling turn", "session", at.sess.id)

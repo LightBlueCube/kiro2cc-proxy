@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"agyrelay/internal/egress"
 	"agyrelay/internal/gateway"
@@ -147,6 +148,7 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if err := st.SetSetting(ctx, settingsKey, map[string]any{
 		"allow_direct":       true,
 		"session_idle_close": "",
+		"park_ttl":           "",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +156,7 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.AllowDirect || s.SessionIdleClose != DefaultSettings().SessionIdleClose || s.TurnsPerAccount != DefaultSettings().TurnsPerAccount {
+	if !s.AllowDirect || s.SessionIdleClose != DefaultSettings().SessionIdleClose || s.ParkTTL != "5m" || s.ParkTTLDuration() != 5*time.Minute || s.TurnsPerAccount != DefaultSettings().TurnsPerAccount {
 		t.Fatalf("loaded settings = %+v", s)
 	}
 	// Risk control is on, keeping prompts for 30 days, unless stored otherwise.
@@ -172,11 +174,18 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if err := bad.validate(); err == nil {
 		t.Fatal("zero days of flagged prompt retention passed")
 	}
+	for _, badPark := range []string{"", "30s", "25h", "nope"} {
+		bad := DefaultSettings()
+		bad.ParkTTL = badPark
+		if err := bad.validate(); err == nil {
+			t.Fatalf("invalid park_ttl %q passed", badPark)
+		}
+	}
 	stored = nil
 	if _, err := st.Setting(ctx, settingsKey, &stored); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "egress_rules", "risk_control", "flagged_prompt_retention_days"} {
+	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "park_ttl", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "egress_rules", "risk_control", "flagged_prompt_retention_days"} {
 		if _, ok := stored[key]; !ok {
 			t.Errorf("persisted settings still missing key %q: %+v", key, stored)
 		}

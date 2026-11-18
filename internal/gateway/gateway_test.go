@@ -2585,3 +2585,54 @@ func TestAuthErrorDisablingLastAccountIsNonRetryable(t *testing.T) {
 		t.Fatalf("err = %+v, want ErrUnknownModel (400 non-retryable)", r.err)
 	}
 }
+
+func TestParkTTLExpiresAndReschedulesParkedTurns(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+
+	// Default ParkTTL is 5m; lowering it reschedules an already-parked turn
+	// and updates its reported ParkTimeout.
+	first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: []conv.Message{user(`@tool read {}`)}, Tools: tools})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	sessions := h.gw.Sessions()
+	if len(sessions) != 1 || sessions[0].Turn == nil || sessions[0].Turn.State != TurnParked {
+		t.Fatalf("sessions = %+v, want one parked turn", sessions)
+	}
+	if got := sessions[0].Turn.ParkTimeout.Sub(sessions[0].Turn.ParkedAt); got != defaultParkTTL {
+		t.Fatalf("initial park timeout span = %v, want %v", got, defaultParkTTL)
+	}
+
+	h.gw.SetParkTTL(20 * time.Millisecond)
+	sessions = h.gw.Sessions()
+	if len(sessions) == 1 && sessions[0].Turn != nil {
+		if got := sessions[0].Turn.ParkTimeout.Sub(sessions[0].Turn.ParkedAt); got != 20*time.Millisecond {
+			t.Fatalf("updated park timeout span = %v, want 20ms", got)
+		}
+	}
+	h.waitRun(0, false)
+
+	// The session stays reusable via warm delta if the client returns later.
+	resumed := h.complete(ctx, "alice", conv.Request{
+		Model: model,
+		Tools: tools,
+		Messages: []conv.Message{
+			user(`@tool read {}`),
+			{Role: conv.RoleAssistant, ToolCalls: first.calls},
+			{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, Text: "late result"},
+		},
+	})
+	if resumed.err != nil || resumed.finish != conv.FinishStop {
+		t.Fatalf("resumed after park timeout = %+v", resumed)
+	}
+	prompts := h.requests("session/prompt")
+	if len(prompts) != 2 || prompts[0].Params.SessionID != prompts[1].Params.SessionID || prompts[1].Params.Prompt[0].Resource == nil || !strings.Contains(prompts[1].Params.Prompt[0].Resource.Text, "late result") {
+		t.Fatalf("delta prompts = %+v", prompts)
+	}
+	if got := h.records.all(t, 2)[1]; got.Mode != ModeWarm {
+		t.Fatalf("mode after park timeout = %q, want %q", got.Mode, ModeWarm)
+	}
+}

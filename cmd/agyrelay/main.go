@@ -160,6 +160,7 @@ func runServe(args []string) error {
 		DataDir:     cfg.DataDir,
 		SnapshotTTL: settings.SnapshotTTLDuration(),
 		IdleClose:   settings.SessionIdleCloseDuration(),
+		ParkTTL:     settings.ParkTTLDuration(),
 		MaxWorkers:  settings.MaxWorkers,
 		Recorder:    recorder,
 		Budget:      budget,

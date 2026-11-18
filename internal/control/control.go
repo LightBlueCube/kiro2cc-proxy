@@ -55,6 +55,9 @@ type Settings struct {
 	// open in agy without a turn. Closing it frees its worker (~250 MiB);
 	// the conversation's next request reopens it in a few seconds.
 	SessionIdleClose string `json:"session_idle_close"`
+	// ParkTTL is a Go duration ("5m"): how long a turn waiting for the
+	// client's tool results stays parked before it is cancelled.
+	ParkTTL string `json:"park_ttl"`
 	// LogLevel is debug, info, warn, or error.
 	LogLevel string `json:"log_level"`
 	// RetentionDays bounds how long request records, quota samples, and
@@ -99,13 +102,15 @@ type Settings struct {
 
 // DefaultSettings are the settings before the admin changes any.
 func DefaultSettings() Settings {
-	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", LogLevel: "info", RetentionDays: 90, CaptureResponseMiB: 4,
+	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", ParkTTL: "5m", LogLevel: "info", RetentionDays: 90, CaptureResponseMiB: 4,
 		RiskControl: true, FlaggedPromptRetentionDays: 30, EgressRules: slices.Clone(egress.DefaultRules),
 		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows),
 		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures)}
 }
 
 var logLevels = map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError}
+
+const maxParkTTL = 24 * time.Hour
 
 func (s Settings) validate() error {
 	if s.TurnsPerAccount < 1 || s.TurnsPerAccount > 64 {
@@ -121,6 +126,10 @@ func (s Settings) validate() error {
 	idle, err := time.ParseDuration(s.SessionIdleClose)
 	if err != nil || idle < time.Minute {
 		return errors.New("session_idle_close must be a duration of at least 1m, e.g. 5m")
+	}
+	park, err := time.ParseDuration(s.ParkTTL)
+	if err != nil || park < time.Minute || park > maxParkTTL {
+		return errors.New("park_ttl must be a duration between 1m and 24h, e.g. 5m")
 	}
 	if _, ok := logLevels[s.LogLevel]; !ok {
 		return errors.New("log_level must be debug, info, warn, or error")
@@ -161,6 +170,12 @@ func (s Settings) SnapshotTTLDuration() time.Duration {
 func (s Settings) SessionIdleCloseDuration() time.Duration {
 	idle, _ := time.ParseDuration(s.SessionIdleClose)
 	return idle
+}
+
+// ParkTTLDuration is ParkTTL parsed (validated like SnapshotTTL).
+func (s Settings) ParkTTLDuration() time.Duration {
+	park, _ := time.ParseDuration(s.ParkTTL)
+	return park
 }
 
 // LoadSettings reads the stored settings over the defaults and persists
@@ -235,6 +250,9 @@ func decodeSettings(raw []byte, s *Settings) error {
 	}
 	if s.SessionIdleClose == "" {
 		s.SessionIdleClose = defaults.SessionIdleClose
+	}
+	if s.ParkTTL == "" {
+		s.ParkTTL = defaults.ParkTTL
 	}
 	if s.LogLevel == "" {
 		s.LogLevel = defaults.LogLevel
@@ -396,6 +414,7 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Gateway.SetMaxWorkers(s.MaxWorkers)
 	c.cfg.Gateway.SetSnapshotTTL(s.SnapshotTTLDuration())
 	c.cfg.Gateway.SetIdleClose(s.SessionIdleCloseDuration())
+	c.cfg.Gateway.SetParkTTL(s.ParkTTLDuration())
 	c.cfg.Gateway.SetHarnessPrompts(s.HarnessSignatures, s.RefuseHarnessPrompts)
 	c.cfg.Flags.SetEnabled(s.RiskControl)
 	c.cfg.Level.Set(s.Level())
