@@ -352,7 +352,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	}
 
 	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, exclude: map[string]bool{}, reuse: true}
-	keys := g.conversationKeys(caller.KeyHash, t)
+	keys := g.conversationKeys(caller.KeyHash, r.choice(), t)
 	g.applyConversation(r, keys)
 
 	at, failure := g.start(ctx, r)

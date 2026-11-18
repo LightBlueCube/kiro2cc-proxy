@@ -1284,6 +1284,41 @@ func TestSuccessResetsTheFailureCount(t *testing.T) {
 	}
 }
 
+// The error of a model the conversation's account lacks is about that
+// model: going back to the model, the client continues on the account
+// with the session and its reasoning, as if nothing happened.
+func TestChangingBackAfterAModelErrorKeepsTheAccount(t *testing.T) {
+	h := newHarness(t, 2, map[int][]string{
+		0: {"FAKE_AGY_MODELS=gemini-3.8-flash-low,gemini-3.8-flash-high"},
+		1: {"FAKE_AGY_MODELS=gemini-3.8-flash-medium,claude-opus-5-5-high"},
+	})
+	ctx := context.Background()
+	alice := userPreferring(t, h.p, "acct0")
+	request := func(model string, messages ...conv.Message) result {
+		return h.complete(ctx, alice, conv.Request{Model: model, Messages: messages})
+	}
+	// Both accounts report their catalogs.
+	if r := request("claude-opus-5-5", user("c")); r.err != nil {
+		t.Fatalf("claude = %+v", r.err)
+	}
+	first := request("gemini-3.8-flash", user("one"))
+	if first.err != nil {
+		t.Fatalf("first = %+v", first.err)
+	}
+	messages := []conv.Message{user("one"), {Role: conv.RoleAssistant, Text: first.text}, user("two")}
+
+	if r := request("claude-opus-5-5", messages...); r.err == nil {
+		t.Fatal("claude on the conversation's account, which lacks it, did not fail")
+	}
+	if r := request("gemini-3.8-flash", messages...); r.err != nil {
+		t.Fatalf("back to gemini = %+v", r.err)
+	}
+	records := h.records.all(t, 4)
+	if got := records[3]; got.Account != "acct0" || got.Mode == ModeReplay {
+		t.Fatalf("back to gemini ran on %s as %s, want acct0 continuing its session", got.Account, got.Mode)
+	}
+}
+
 // With history, the request that switches accounts says why it replays.
 func TestSwitchedRequestNamesItsReplayReason(t *testing.T) {
 	h := newHarness(t, 2, nil)

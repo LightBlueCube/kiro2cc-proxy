@@ -100,21 +100,24 @@ func (c *conversations) clear(keys []string) {
 	}
 }
 
-// conversationKeys name the conversation a request belongs to. The session
-// its anchor (else its longest snapshot prefix) names comes first: it
-// survives edits of the last messages. The request's whole content is the
-// fallback: a retry sends it again unchanged, even when the failure
-// dropped the snapshot.
-func (g *Gateway) conversationKeys(user string, t *transcript) []string {
+// conversationKeys name the conversation a request belongs to, for the
+// model choice it asks for: a failure is about that model (its account may
+// lack it, its capacity may be gone), so a client that goes back to the
+// earlier model continues as before. The session its anchor (else its
+// longest snapshot prefix) names comes first: it survives edits of the last
+// messages. The request's whole content is the fallback: a retry sends it
+// again unchanged, even when the failure dropped the snapshot.
+func (g *Gateway) conversationKeys(user, choice string, t *transcript) []string {
+	prefix := user + "\x00" + choice + "\x00"
 	var keys []string
 	snap, ok := g.anchoredSnapshot(t)
 	if !ok {
 		snap, ok = g.snaps.lookup(user, t)
 	}
 	if ok {
-		keys = append(keys, user+"\x00session\x00"+sessionRef(snap.Account, snap.SessionID))
+		keys = append(keys, prefix+"session\x00"+sessionRef(snap.Account, snap.SessionID))
 	}
-	return append(keys, user+"\x00content\x00"+t.hashes[len(t.body)])
+	return append(keys, prefix+"content\x00"+t.hashes[len(t.body)])
 }
 
 // applyConversation plans r from its conversation's failures: a retry
