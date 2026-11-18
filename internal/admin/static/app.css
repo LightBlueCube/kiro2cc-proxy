@@ -26,7 +26,12 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .login-card { width: 320px; margin: 15vh auto; display: flex; flex-direction: column; gap: 12px; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .grow { flex: 1; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 16px; margin-bottom: 16px; }
+.grid > .card { margin-bottom: 0; }
+.worker-grid { grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr)); }
+.account-card { display: flex; flex-direction: column; }
+.account-actions { gap: 8px; margin-top: auto; padding-top: 12px; }
+.account-remove { margin-left: auto; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 12px; }
 .error { color: var(--bad); min-height: 1em; margin: 0; }

@@ -1129,8 +1129,7 @@ views.accounts = container => {
       routings.has(a.id) ? null : h("button", { onclick: () => { routings.set(a.id, makeRoutingPanel(a)); refreshCard(a.id); } }, t("accounts.routing.edit")),
       h("button", { onclick: e => editProxy(a, e.target) }, t("accounts.proxy.edit")),
       a.paused ? act(t("accounts.resume"), () => api("POST", `accounts/${enc}/resume`)) : act(t("accounts.pause"), () => api("POST", `accounts/${enc}/pause`)),
-      h("span", { class: "grow" }),
-      h("button", { class: "danger", onclick: e => removeAccount(a, e.target) }, t("common.remove")));
+      h("button", { class: "danger account-remove", onclick: e => removeAccount(a, e.target) }, t("common.remove")));
   }
 
   function updateCardEntry(entry, a) {
@@ -1357,8 +1356,8 @@ views.accounts = container => {
       if (!entry) {
         const body = h("div");
         const panels = h("div");
-        const actions = h("div", { class: "row", style: "margin-top:12px" });
-        entry = { node: h("div", { class: "card" }, body, panels, actions), body, panels, actions };
+        const actions = h("div", { class: "row account-actions" });
+        entry = { node: h("div", { class: "card account-card" }, body, panels, actions), body, panels, actions };
         cardEntries.set(a.id, entry);
       }
       if (cursor !== entry.node) cards.insertBefore(entry.node, cursor);
@@ -1490,7 +1489,7 @@ function agyLogViewer() {
 }
 
 views.workers = container => {
-  const cards = h("div");
+  const cards = h("div", { class: "grid worker-grid" });
   const logs = agyLogViewer();
   container.append(h("h1", {}, t("workers.title")), cards, logs.card);
 
@@ -1512,10 +1511,10 @@ views.workers = container => {
     const total = rows.reduce((sum, r) => sum + r.rss, 0);
     return [
       table([
-        { title: t("workers.process"), cell: r => term(r.label, lookup("process", r.kind)) },
+        { title: t("workers.process"), cell: r => h("span", { class: "nowrap" }, term(r.label, lookup("process", r.kind))) },
         { title: t("workers.pid"), num: true, cell: r => r.pid },
         { title: t("workers.profile"), cell: r => h("span", { class: "mono" }, r.agent) },
-        { title: t("workers.up"), cell: r => r.up },
+        { title: t("workers.up"), cell: r => h("span", { class: "nowrap" }, r.up) },
         { title: t("workers.memory"), num: true, cell: r => fmt.bytes(r.rss) },
         { title: t("workers.cpu"), num: true, cell: r => fmt.seconds(r.cpu) },
         { title: t("workers.sessions"), cell: r => h("span", { class: "mono" }, r.sessions) },
@@ -1539,11 +1538,11 @@ views.workers = container => {
       { title: t("workers.state"), cell: s => !s.turn ? stack(term(t("workers.idle"), lookup("turn_state", "idle")), t("workers.last_used", { time: fmt.span(s.last_used, now) }))
           : stack(h("span", { class: s.turn.state.startsWith("waiting") ? "warn" : "ok", title: lookup("turn_state", s.turn.state) }, s.turn.state),
             joined(s.turn.model, turnTime(s))) },
-      { title: "", cell: s => {
+      { title: "", fit: true, cell: s => {
           const path = `workers/${enc}/sessions/${encodeURIComponent(s.id)}`;
-          if (s.turn) return action(t("workers.cancel_turn"), "danger", t("workers.cancel_turn.confirm", { key: keyText(s.key, s.key_hash) }), () => api("POST", path + "/cancel"));
+          if (s.turn) return action(t("workers.cancel_turn"), "danger nowrap", t("workers.cancel_turn.confirm", { key: keyText(s.key, s.key_hash) }), () => api("POST", path + "/cancel"));
           if (!s.pid) return "";
-          return action(t("workers.close"), "", "", () => api("POST", path + "/close"));
+          return action(t("workers.close"), "nowrap", "", () => api("POST", path + "/close"));
         } },
     ], a.sessions);
   }
