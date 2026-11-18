@@ -1788,6 +1788,14 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
     return [" ", h("span", { class: glyph[1], title: lookup("anchor", status) || status }, glyph[0])];
   }
 
+  function modeLine(r) {
+    if (!r.mode) return null;
+    if (r.mode === "rewind") {
+      return [term("warm", lookup("mode", "warm")), " · ", term("rewind", lookup("mode", "rewind"))];
+    }
+    return [term(r.mode, lookup("mode", r.mode)), r.replay_reason ? [" · ", term(r.replay_reason, lookup("replay", r.replay_reason))] : ""];
+  }
+
   let rows = [];
   async function loadRows(more) {
     const before = more && rows.length ? { before: String(rows[rows.length - 1].id) } : {};
@@ -1800,7 +1808,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
           [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : "", anchorBadge(r.anchor)]) },
       { title: t("calls.model_mode"), cell: r => stack(
           [h("span", { title: r.slug }, r.model), r.effort ? term(" · " + r.effort, t("calls.effort.hint")) : ""],
-          r.mode ? [term(r.mode, lookup("mode", r.mode)), r.replay_reason ? [" · ", term(r.replay_reason, lookup("replay", r.replay_reason))] : ""] : null) },
+          modeLine(r)) },
       { title: t("calls.status"), cell: r => r.status === "ok" ? term(r.finish || "ok", lookup("status", r.finish || "ok"))
           : h("span", { class: r.status === "cancelled" ? "cancelled" : "bad", title: joined(lookup("status", r.status), r.error) }, r.status) },
       { title: t("calls.tokens"), num: true, cell: r => tokensCell(r) },
