@@ -1140,7 +1140,7 @@ views.accounts = container => {
       ? a.allowed_models.filter(id => a.models.some(m => m.id === id))
       : a.allowed_models;
     setChildren(entry.body,
-      h("div", { class: "row" }, h("h2", { class: "grow" }, a.name), status(a)),
+      h("div", { class: "row" }, h("h2", { class: "grow" }, a.name, " ", hashText(a.id)), status(a)),
       a.user ? h("p", {}, `${a.user.email} · ${a.user.tier || a.user.plan}`) : null,
       a.disabled ? h("p", { class: "bad" }, a.disabled) : null,
       a.blocked ? h("p", { class: "bad" }, a.blocked) : null,
