@@ -35,7 +35,7 @@ func TestDetectWords(t *testing.T) {
 		"The REST API returns JSON; sign in as root in the room, then compile it.",
 		"Run the sample, optimized: decline, mongoose, Traefik, 3 kilobytes, &amp; zeds.",
 		"Amp, Cursor, Crush, Goose, Augment and Kilo are common words: move the cursor, crush it.",
-		"See ~/.config/opencode/agent, /work/opencode/out, opencode.json and tools.opencode.list.",
+		"See ~/.config/opencode/agent and /work/opencode/out.",
 		"You are xopencode",
 	} {
 		if matches := defaults.Detect(system); len(matches) > 0 {
@@ -46,8 +46,10 @@ func TestDetectWords(t *testing.T) {
 	for _, tc := range []struct{ system, want string }{
 		{"用opencode写代码", "OpenCode"},
 		{"- opencode (8 tools) // Tools for managing OpenCode itself", "OpenCode"},
+		{"See opencode.json and tools.opencode.list.", "OpenCode"},
 		{"You are opencodes", "OpenCode"},
 		{"inside pi now", "pi"},
+		{"pi-coding-agent", "pi"},
 		{"Run omp now", "oh-my-pi"},
 		{"Kilo Code and the Claude Code CLI", "Kilo Code"},
 		{"Ask Cline or Roo or Zed now", "Cline"},

@@ -6,10 +6,11 @@ package sysprompt
 // so a name is listed bare as a phrase when it is no common word and no
 // part of one. OpenCode, Zed, Roo, Cline, Trae, pi and omp appear inside
 // other words or in paths (optimized, root, decline, Traefik, api, compile,
-// /opencode/, opencode.json), so they are Words. Amp, Cursor, Crush, Goose,
+// /opencode/), so they are Words. Amp, Cursor, Crush, Goose,
 // Augment and Kilo are common words themselves; they are not listed bare.
 var DefaultSignatures = []Signature{
 	{Name: "OpenCode", Phrases: []string{
+		"opencode.",
 		"You are opencode",
 		"Your name is opencode",
 		"You are an AI agent running in OpenCode, a coding agent harness",
@@ -102,6 +103,7 @@ var DefaultSignatures = []Signature{
 		"You are Grok released by xAI",
 	}},
 	{Name: "pi", Phrases: []string{
+		"pi-coding-agent",
 		"operating inside pi, a coding agent harness",
 	}, Words: []string{
 		"pi",
