@@ -1319,6 +1319,44 @@ func TestChangingBackAfterAModelErrorKeepsTheAccount(t *testing.T) {
 	}
 }
 
+// Leaving an account is allowed, not forced: when no other account can
+// serve the request, a conversation that is due to switch stays where its
+// session is.
+func TestDueConversationStaysWhenNoOtherAccountCanServe(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	name := userPreferring(t, h.p, "acct0")
+	ctx := context.Background()
+	first := h.complete(ctx, name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one")}})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first.err)
+	}
+	messages := []conv.Message{user("one"), {Role: conv.RoleAssistant, Text: first.text}, user("two")}
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: messages}
+
+	// The conversation used up its retries on acct0.
+	r := &run{req: req, model: modelChoice{id: "gemini-3.8-flash"}}
+	keys := h.gw.conversationKeys(testCaller(name).KeyHash, r.choice(), newTranscript(messages))
+	h.gw.conversations.put(keys, conversationState{account: h.p.Account("acct0").ID(), failures: failuresBeforeSwitch})
+
+	h.p.Account("acct1").SetPaused(true)
+	if got := h.complete(ctx, name, req); got.err != nil {
+		t.Fatalf("with no other account = %+v, want to stay on acct0", got.err)
+	}
+	if rec := h.records.all(t, 2)[1]; rec.Account != "acct0" || rec.Mode == ModeReplay {
+		t.Fatalf("stayed request = %s %s, want acct0 continuing its session", rec.Account, rec.Mode)
+	}
+
+	// Once another account can serve, the next request leaves.
+	h.gw.conversations.put(keys, conversationState{account: h.p.Account("acct0").ID(), failures: failuresBeforeSwitch})
+	h.p.Account("acct1").SetPaused(false)
+	if got := h.complete(ctx, name, req); got.err != nil {
+		t.Fatalf("with acct1 back = %+v", got.err)
+	}
+	if rec := h.records.all(t, 3)[2]; rec.Account != "acct1" || rec.ReplayReason != ReplaySwitchFailures {
+		t.Fatalf("switched request = %s %s, want acct1 %s", rec.Account, rec.ReplayReason, ReplaySwitchFailures)
+	}
+}
+
 // With history, the request that switches accounts says why it replays.
 func TestSwitchedRequestNamesItsReplayReason(t *testing.T) {
 	h := newHarness(t, 2, nil)

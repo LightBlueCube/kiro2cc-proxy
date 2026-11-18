@@ -122,13 +122,15 @@ func (g *Gateway) conversationKeys(user, choice string, t *transcript) []string 
 
 // applyConversation plans r from its conversation's failures: a retry
 // stays on the account that failed, and the request after the allowed
-// failures leaves it.
+// failures leaves it. Leaving is allowed, not forced: with no other
+// account that can serve the request, the conversation stays, as it keeps
+// its session and reasoning there.
 func (g *Gateway) applyConversation(r *run, keys []string) {
 	state, ok := g.conversations.get(keys)
 	if !ok {
 		return
 	}
-	if state.switchDue() {
+	if state.switchDue() && g.hasOtherAccount(r, state.account) {
 		r.exclude[state.account] = true
 		r.reuse, r.moving = false, true
 		r.moveReason = state.switchReason()
