@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"agyrelay/internal/egress"
-	"agyrelay/internal/gateway"
 	"agyrelay/internal/store"
 	"agyrelay/internal/sysprompt"
 )
@@ -49,37 +48,6 @@ func TestLoadSettingsPrices(t *testing.T) {
 		if got[model] != w {
 			t.Errorf("%s cache_write = %v, want %v", model, got[model], w)
 		}
-	}
-	if len(s.ContextWindows) != len(gateway.DefaultContextWindows) || s.ContextCheck {
-		t.Fatalf("context check %v with windows %+v, want it off with the default windows when none are stored", s.ContextCheck, s.ContextWindows)
-	}
-}
-
-func TestLoadSettingsContextWindows(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "agyrelay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	// Stored windows replace the defaults whole, including an empty list.
-	for _, stored := range [][]gateway.ContextWindow{{{Model: "test-model", Tokens: 5000}}, {}} {
-		if err := st.SetSetting(context.Background(), settingsKey, map[string]any{"context_windows": stored}); err != nil {
-			t.Fatal(err)
-		}
-		s, err := LoadSettings(context.Background(), st)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !slices.Equal(s.ContextWindows, stored) {
-			t.Fatalf("context windows = %+v, want %+v", s.ContextWindows, stored)
-		}
-	}
-
-	bad := DefaultSettings()
-	bad.ContextWindows = []gateway.ContextWindow{{Model: "m", Tokens: 0}}
-	if err := bad.validate(); err == nil {
-		t.Fatal("a zero window passed")
 	}
 }
 
@@ -185,7 +153,7 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if _, err := st.Setting(ctx, settingsKey, &stored); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "park_ttl", "log_level", "retention_days", "prices", "context_check", "context_windows", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "egress_rules", "risk_control", "flagged_prompt_retention_days"} {
+	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "park_ttl", "log_level", "retention_days", "prices", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "egress_rules", "risk_control", "flagged_prompt_retention_days"} {
 		if _, ok := stored[key]; !ok {
 			t.Errorf("persisted settings still missing key %q: %+v", key, stored)
 		}

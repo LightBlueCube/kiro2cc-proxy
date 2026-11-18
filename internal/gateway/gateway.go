@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -27,7 +26,6 @@ import (
 	"agyrelay/internal/conv"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/sysprompt"
-	"agyrelay/internal/tokens"
 )
 
 const (
@@ -68,9 +66,6 @@ type Config struct {
 	// running, until the quota shows the account's use. Asked again on
 	// every janitor pass.
 	KeepForQuota func(ctx context.Context, account *pool.Account, lastUsed time.Time) bool
-	// ContextCheck turns on the check of prompts against ContextWindows.
-	ContextCheck   bool
-	ContextWindows []ContextWindow
 	// RefuseHarnessPrompts refuses requests whose system prompt is still a
 	// harness's default, as HarnessSignatures recognize it.
 	RefuseHarnessPrompts bool
@@ -108,10 +103,6 @@ type Gateway struct {
 	idleClose  atomic.Int64
 	parkTTL    atomic.Int64
 	maxWorkers atomic.Int64
-	// limits is the context-window check, nil while it is off; limitsMu
-	// serializes its changes.
-	limits   atomic.Pointer[contextLimits]
-	limitsMu sync.Mutex
 	// harnessPrompts recognizes harnesses' default system prompts; nil while
 	// their refusal is off.
 	harnessPrompts atomic.Pointer[sysprompt.Detector]
@@ -217,9 +208,6 @@ func New(cfg Config) (*Gateway, error) {
 	g.parkTTL.Store(int64(parkTTL))
 	g.maxWorkers.Store(int64(cfg.MaxWorkers))
 	g.SetHarnessPrompts(cfg.HarnessSignatures, cfg.RefuseHarnessPrompts)
-	if err := g.SetContextWindows(cfg.ContextWindows, cfg.ContextCheck); err != nil {
-		return nil, err
-	}
 	go g.janitor()
 	return g, nil
 }
@@ -275,35 +263,6 @@ func (g *Gateway) TrimKeyIdle(keyHash string, maxWorkers *int) {
 	evicted := g.evictIdleLocked(keyHash, maxWorkers, nil)
 	g.mu.Unlock()
 	g.closeEvicted(evicted)
-}
-
-// SetContextWindows replaces the context windows and turns their check on
-// or off; models without a window are left to upstream's limit. Turning
-// the check on loads the tokenizers (about 0.2 s and 55 MiB of heap),
-// turning it off drops them.
-func (g *Gateway) SetContextWindows(windows []ContextWindow, check bool) error {
-	g.limitsMu.Lock()
-	defer g.limitsMu.Unlock()
-	if !check {
-		if g.limits.Swap(nil) != nil {
-			// The check is turned off to save memory; hand the tokenizers'
-			// heap back to the OS now instead of over minutes.
-			debug.FreeOSMemory()
-		}
-		return nil
-	}
-	var prompts *promptEstimator
-	if current := g.limits.Load(); current != nil {
-		prompts = current.prompts
-	} else {
-		set, err := tokens.Load()
-		if err != nil {
-			return fmt.Errorf("load tokenizers: %w", err)
-		}
-		prompts = newPromptEstimator(set)
-	}
-	g.limits.Store(&contextLimits{windows: windowMap(windows), prompts: prompts})
-	return nil
 }
 
 // Close stops background work. Running turns end with their processes.
@@ -390,10 +349,6 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	if err := g.checkLimit(ctx, caller, modelID, rec.KeyGroup); err != nil {
 		return err
 	}
-	estimate, err := g.checkContextWindow(req, t, modelID)
-	if err != nil {
-		return err
-	}
 
 	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, exclude: map[string]bool{}, reuse: true}
 	attempts := min(maxAttempts, len(g.pool.Accounts()))
@@ -408,10 +363,6 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 			failure = g.consume(ctx, at, r, w)
 		}
 		if failure == nil {
-			if w.usage != nil && estimate > 0 {
-				// A turn of one model call reports its prompt; compare.
-				g.log.Debug("prompt estimate vs usage", "model", modelID, "mode", r.mode, "estimate", estimate, "prompt_tokens", w.usage.PromptTokens)
-			}
 			return nil
 		}
 		r.exclude[failure.account] = true
@@ -533,33 +484,6 @@ func usd(v float64) string {
 		return fmt.Sprintf("$%.2f", v)
 	}
 	return fmt.Sprintf("$%.4f", v)
-}
-
-// checkContextWindow refuses a request whose estimated prompt exceeds the
-// model's context window. The message matches the overflow patterns of
-// OpenAI clients (opencode, pi), which then compact the conversation.
-// It returns the estimate, 0 when the check is off or the model has no
-// window.
-func (g *Gateway) checkContextWindow(req conv.Request, t *transcript, modelID string) (int, *conv.Error) {
-	limits := g.limits.Load()
-	if limits == nil {
-		return 0, nil
-	}
-	window, limited := limits.windows[modelID]
-	if !limited {
-		return 0, nil
-	}
-	estimate, err := limits.prompts.estimate(modelID, req, t)
-	if err != nil {
-		g.log.Error("prompt token count failed", "model", modelID, "err", err)
-		return 0, &conv.Error{Kind: conv.ErrUnavailable, Message: "could not count the prompt's tokens"}
-	}
-	if estimate <= window {
-		return estimate, nil
-	}
-	return estimate, &conv.Error{Kind: conv.ErrContextLength, Message: fmt.Sprintf(
-		"This model's maximum context length is %d tokens. However, your messages resulted in about %d tokens (estimated). Please reduce the length of the messages.",
-		window, estimate)}
 }
 
 func validate(req conv.Request, t *transcript) *conv.Error {

@@ -674,7 +674,6 @@ views.settings = (container, openTopic) => {
     egressRulesReset.addEventListener("click", () => { egressRules.value = d.egress_rules.join("\n"); syncEgressRules(); });
     egressRules.addEventListener("input", syncEgressRules);
     syncEgressRules();
-    const contextCheck = h("input", { type: "checkbox", checked: s.context_check });
     const capture = h("input", { type: "checkbox", checked: s.capture_upstream });
     const captureLimit = h("input", { type: "number", min: 1, max: 256, value: s.capture_response_mib });
     const riskControl = h("input", { type: "checkbox", checked: s.risk_control });
@@ -703,17 +702,13 @@ views.settings = (container, openTopic) => {
       { key: "cached", title: t("settings.prices.cached"), input: number(0, "any"), read: i => Number(i.value) },
       { key: "cache_write", title: t("settings.prices.cache_write"), input: number(0, "any"), read: i => Number(i.value) },
     ], s.prices, d.prices, { model: "", input: 0, cached: 0, cache_write: 0, output: 0 }, t("settings.prices.add"));
-    const windows = rowEditor([
-      { key: "model", title: t("common.model"), input: modelInput, read: i => i.value.trim() },
-      { key: "tokens", title: t("settings.windows.tokens"), input: number(1, 1), read: i => Number(i.value) },
-    ], s.context_windows, d.context_windows, { model: "", tokens: 200000 }, t("settings.windows.add"));
 
     const form = h("form", { onsubmit: event => {
       event.preventDefault();
       guarded(async () => {
         await api("PUT", "settings", {
           turns_per_account: Number(turns.value), max_workers: Number(maxWorkers.value), snapshot_ttl: ttl.value, session_idle_close: idleClose.value, park_ttl: parkTTL.value, log_level: level.value,
-          retention_days: Number(retention.value), prices: prices.read(), context_check: contextCheck.checked, context_windows: windows.read(),
+          retention_days: Number(retention.value), prices: prices.read(),
           refuse_harness_prompts: refuseHarness.checked, harness_signatures: readSignatures(),
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, egress_rules: ruleLines(egressRules.value),
           capture_upstream: capture.checked, capture_response_mib: Number(captureLimit.value),
@@ -765,12 +760,6 @@ views.settings = (container, openTopic) => {
         h("p", { class: "muted" }, t("flagged.note")),
         h("p", { class: "muted" }, t("settings.risk.note")),
         flaggedList),
-      topic(t("settings.windows"),
-        h("div", { class: "field" }, h("span", { class: "with-reset" },
-          h("label", { class: "check", title: t("settings.context_check.hint") }, contextCheck, t("settings.context_check")),
-          resetButton(contextCheck, d.context_check))),
-        h("p", { class: "muted" }, t("settings.windows.note")),
-        windows.node),
       topic(t("settings.prices"),
         h("p", { class: "muted" }, t("settings.prices.note")),
         prices.node),

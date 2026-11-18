@@ -65,10 +65,6 @@ type Settings struct {
 	RetentionDays int `json:"retention_days"`
 	// Prices are the list prices that estimate each request's API cost.
 	Prices []usage.Price `json:"prices"`
-	// ContextCheck turns on the check of each prompt's estimate against
-	// ContextWindows; it costs the tokenizers' memory and counting time.
-	ContextCheck   bool                    `json:"context_check"`
-	ContextWindows []gateway.ContextWindow `json:"context_windows"`
 	// RefuseHarnessPrompts refuses requests whose system prompt is still a
 	// harness's default (OpenCode's, Claude Code's, ...), as
 	// HarnessSignatures recognize it.
@@ -104,7 +100,7 @@ type Settings struct {
 func DefaultSettings() Settings {
 	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", ParkTTL: "5m", LogLevel: "info", RetentionDays: 90, CaptureResponseMiB: 4,
 		RiskControl: true, FlaggedPromptRetentionDays: 30, EgressRules: slices.Clone(egress.DefaultRules),
-		Prices: slices.Clone(usage.DefaultPrices), ContextWindows: slices.Clone(gateway.DefaultContextWindows),
+		Prices:            slices.Clone(usage.DefaultPrices),
 		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures)}
 }
 
@@ -147,9 +143,6 @@ func (s Settings) validate() error {
 		return errors.New("fallback_proxy must be empty or an http:// URL with a host and port, e.g. http://127.0.0.1:7890")
 	}
 	if _, err := egress.ParseRules(s.EgressRules); err != nil {
-		return err
-	}
-	if err := gateway.ValidateContextWindows(s.ContextWindows); err != nil {
 		return err
 	}
 	if err := sysprompt.ValidateSignatures(s.HarnessSignatures); err != nil {
@@ -216,7 +209,6 @@ func decodeSettings(raw []byte, s *Settings) error {
 	defaults := *s
 	var stored struct {
 		Prices            []map[string]json.RawMessage `json:"prices"`
-		ContextWindows    json.RawMessage              `json:"context_windows"`
 		HarnessSignatures json.RawMessage              `json:"harness_signatures"`
 		EgressRules       json.RawMessage              `json:"egress_rules"`
 	}
@@ -225,9 +217,6 @@ func decodeSettings(raw []byte, s *Settings) error {
 	}
 	if stored.Prices != nil {
 		s.Prices = nil
-	}
-	if stored.ContextWindows != nil {
-		s.ContextWindows = nil
 	}
 	if stored.HarnessSignatures != nil {
 		s.HarnessSignatures = nil
@@ -419,9 +408,6 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 	c.cfg.Flags.SetEnabled(s.RiskControl)
 	c.cfg.Level.Set(s.Level())
 	c.cfg.Recorder.SetPrices(s.Prices)
-	if err := c.cfg.Gateway.SetContextWindows(s.ContextWindows, s.ContextCheck); err != nil {
-		return err
-	}
 	if err := c.applyCapture(ctx, s); err != nil {
 		return err
 	}

@@ -26,7 +26,6 @@ import (
 	"agyrelay/internal/conv"
 	"agyrelay/internal/pool"
 	"agyrelay/internal/sysprompt"
-	"agyrelay/internal/tokens"
 )
 
 func TestMain(m *testing.M) {
@@ -737,84 +736,6 @@ func TestArgonCarbonLimitGroup(t *testing.T) {
 		if group != c.wantGroup || spentUnder(c.caller, spent, group) != c.wantSpent {
 			t.Errorf("%s: limit group %s spent %v, want %s %v", c.name, group, spentUnder(c.caller, spent, group), c.wantGroup, c.wantSpent)
 		}
-	}
-}
-
-func TestContextWindow(t *testing.T) {
-	h := newHarness(t, 1, nil)
-	ctx := context.Background()
-	long := strings.Repeat("word ", 2000)
-	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(long)}}
-
-	small := []ContextWindow{{Model: "gemini-3.8-flash", Tokens: 2000}}
-	set := func(windows []ContextWindow, check bool) {
-		t.Helper()
-		if err := h.gw.SetContextWindows(windows, check); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// The check is off by default.
-	if r := h.complete(ctx, "carol", req); r.err != nil {
-		t.Fatalf("check off: %+v", r.err)
-	}
-
-	set(small, true)
-	r := h.complete(ctx, "alice", req)
-	if r.err == nil || r.err.Kind != conv.ErrContextLength || !strings.Contains(r.err.Message, "maximum context length is 2000 tokens") {
-		t.Fatalf("over the window: %+v", r.err)
-	}
-	if n := len(h.requests("session/prompt")); n != 1 {
-		t.Fatalf("prompts = %d, want 1 (the refused request reaches no agy)", n)
-	}
-
-	// Under the window, without one, and with the check off, the request runs.
-	set([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 10000}}, true)
-	if r := h.complete(ctx, "alice", req); r.err != nil {
-		t.Fatalf("under the window: %+v", r.err)
-	}
-	set(nil, true)
-	if r := h.complete(ctx, "bob", req); r.err != nil {
-		t.Fatalf("no window: %+v", r.err)
-	}
-	set(small, false)
-	if r := h.complete(ctx, "dave", req); r.err != nil {
-		t.Fatalf("check turned off: %+v", r.err)
-	}
-}
-
-func TestPromptEstimate(t *testing.T) {
-	set, err := tokens.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := newPromptEstimator(set)
-	messages := []conv.Message{{Role: conv.RoleSystem, Text: "be brief"}, user("hello"),
-		{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "read", Arguments: json.RawMessage(`{"path":"a.go"}`)}}},
-		{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "read", Text: strings.Repeat("package main\n", 100)},
-		{Role: conv.RoleUser, Text: "look", Images: []conv.Image{{Data: "AAAA", MimeType: "image/png"}}}}
-	req := conv.Request{Messages: messages, Tools: []conv.ToolSpec{{Name: "read", Description: "Read a file", Parameters: json.RawMessage(`{"type":"object"}`)}}}
-	tr := newTranscript(messages)
-
-	gemma := set.For("gemini-3.8-flash")
-	want := agyPromptTokens + gemma.Image("AAAA") + toolsetTokens + toolDeclarationTokens
-	for _, text := range []string{"be brief", renderMessage(messages[1], -1), renderMessage(messages[2], -1),
-		renderMessage(messages[3], -1), renderMessage(messages[4], -1), "read\nRead a file\n{\"type\":\"object\"}"} {
-		n, err := gemma.Count(text)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want += n
-	}
-	for range 2 { // the second estimate comes from the cache
-		got, err := e.estimate("gemini-3.8-flash", req, tr)
-		if err != nil || got != want {
-			t.Fatalf("estimate = %d, %v; want %d", got, err, want)
-		}
-	}
-	claude, err := e.estimate("claude-opus-5-5", req, tr)
-	if err != nil || claude <= want {
-		t.Fatalf("claude estimate = %d, %v; want above gemini's %d", claude, err, want)
 	}
 }
 
@@ -2411,21 +2332,8 @@ func TestDownstreamErrorsHideInternalInfo(t *testing.T) {
 	}
 	assertClean(t, r.err.Message)
 
-	// Context window check error message has no internal software name.
-	h.p.Account("acct0").SetPaused(false)
-	if err := h.gw.SetContextWindows([]ContextWindow{{Model: "gemini-3.8-flash", Tokens: 5}}, true); err != nil {
-		t.Fatal(err)
-	}
-	r = h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(strings.Repeat("word ", 50))}})
-	if r.err == nil || r.err.Kind != conv.ErrContextLength {
-		t.Fatalf("context window = %+v", r)
-	}
-	assertClean(t, r.err.Message)
-	if err := h.gw.SetContextWindows(nil, false); err != nil {
-		t.Fatal(err)
-	}
-
 	// Process killed mid-turn: outcome.Err does not leak process/stderr details.
+	h.p.Account("acct0").SetPaused(false)
 	h.p.Account("acct1").SetBlocked(nil)
 	h.p.Account("acct1").SetPaused(true)
 	done := make(chan result, 1)

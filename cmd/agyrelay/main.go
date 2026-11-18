@@ -170,8 +170,6 @@ func runServe(args []string) error {
 			return err
 		},
 		KeepForQuota:         monitor.KeepForQuota,
-		ContextCheck:         settings.ContextCheck,
-		ContextWindows:       settings.ContextWindows,
 		RefuseHarnessPrompts: settings.RefuseHarnessPrompts,
 		HarnessSignatures:    settings.HarnessSignatures,
 		Log:                  log.With("component", "gateway"),
