@@ -146,7 +146,7 @@ func (s *Server) Bind(tools []Tool, handler Handler) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := mcp.NewServer(&mcp.Implementation{Name: "agyrelay", Version: "0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "client", Version: "0.1.0"}, nil)
 	for _, tool := range tools {
 		server.AddTool(&mcp.Tool{
 			Name:        tool.Name,

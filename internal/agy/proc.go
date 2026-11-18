@@ -264,7 +264,7 @@ func (p *Proc) initialize(ctx context.Context) error {
 			"terminal": false,
 		},
 		// Without a Zed-family clientInfo agy filters its catalog to Gemini.
-		"clientInfo": map[string]string{"name": "zed", "title": "agyrelay", "version": "0.1.0"},
+		"clientInfo": map[string]string{"name": "zed", "title": "Zed", "version": "0.1.0"},
 	}, &result)
 	if err != nil {
 		return fmt.Errorf("agy initialize: %w", err)

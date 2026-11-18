@@ -173,7 +173,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 			if c := callOf(r); c.capture != nil {
 				c.capture.finish(http.StatusBadGateway, nil, false)
 			}
-			http.Error(w, "agyrelay: Cloud Code upstream request failed", http.StatusBadGateway)
+			http.Error(w, "Cloud Code upstream request failed", http.StatusBadGateway)
 		},
 	}
 	s.mu.Lock()
@@ -213,20 +213,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ap := s.accounts[name]
 	s.mu.Unlock()
 	if ap == nil {
-		http.Error(w, "agyrelay: unknown account", http.StatusNotFound)
+		http.Error(w, "unknown account", http.StatusNotFound)
 		return
 	}
 	if isGeneration(r) {
 		tagged, err := s.withSession(name, r)
 		if err != nil {
 			s.log.Warn("generation call unreadable", "account", name, "err", err)
-			http.Error(w, "agyrelay: request body unreadable", http.StatusBadRequest)
+			http.Error(w, "request body unreadable", http.StatusBadRequest)
 			return
 		}
 		r = tagged
 		if c := callOf(r); c.session != "" && ap.isStopped(c.session) {
 			s.log.Warn("generation call refused: its session was stopped", "account", name, "session", c.session)
-			http.Error(w, "agyrelay: this session was stopped by risk control", http.StatusForbidden)
+			http.Error(w, "this session was stopped by risk control", http.StatusForbidden)
 			return
 		}
 	}

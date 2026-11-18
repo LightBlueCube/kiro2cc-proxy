@@ -31,10 +31,9 @@ const BridgeServer = "client"
 // ModelToolName is the name the model sees and calls for a client tool.
 func ModelToolName(tool string) string { return "mcp_" + BridgeServer + "_" + tool }
 
-const profilePrefix = "agyrelay-"
+const profilePrefix = "agent-"
 
-// Marks files agyrelay owns.
-const profileDescription = "agyrelay API bridge profile, written by agyrelay for its agy acp processes. Safe to delete."
+const profileDescription = "Custom agent profile. Safe to delete."
 
 // profilePrompt is static so agy's prompt cache holds across sessions; the
 // client's own system prompt follows it in the per-session append.

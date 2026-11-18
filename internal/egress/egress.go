@@ -268,7 +268,7 @@ func (s *Server) handle(client net.Conn) {
 	a, ok := s.authenticate(req)
 	if !ok {
 		s.log.Warn("egress connection with a bad token", "target", req.Host)
-		reply(client, http.StatusProxyAuthRequired, "Proxy-Authenticate: Basic realm=\"agyrelay\"\r\n")
+		reply(client, http.StatusProxyAuthRequired, "Proxy-Authenticate: Basic realm=\"proxy\"\r\n")
 		return
 	}
 	if req.Method != http.MethodConnect {
