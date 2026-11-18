@@ -571,7 +571,8 @@ function rowEditor(fields, rows, defaults, blank, addLabel) {
   const body = h("tbody");
   const read = () => [...body.children].map(tr => tr.read());
   const reset = h("button", { type: "button", class: "reset" }, t("settings.defaults"));
-  const sync = () => { reset.disabled = JSON.stringify(read()) === JSON.stringify(defaults); };
+  const defaultJSON = JSON.stringify(defaults.map(r => Object.fromEntries(fields.map(f => [f.key, r[f.key]]))));
+  const sync = () => { reset.disabled = JSON.stringify(read()) === defaultJSON; };
   const add = row => {
     const inputs = fields.map(f => f.input(row[f.key]));
     const tr = h("tr", {}, inputs.map(i => h("td", {}, i)),
