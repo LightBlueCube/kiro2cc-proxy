@@ -911,12 +911,14 @@ const statusSiteOverloaded = 529
 // modelFailure maps the failed model call that ended the turn. Messages
 // pass through: clients recognize overflow by their text as well. A 429
 // that names a retry time is the account's quota: the account cools down
-// until then and the conversation moves to another account. agy retries a
-// 429 without one itself before it gives up.
+// until then. Up to maxRetryableQuotaWait the 429 goes to the client as it
+// is, which waits and retries on the same account; a longer wait moves the
+// conversation to another account with the next request. agy retries a
+// 429 without a retry time itself before it gives up.
 //
 // Failures that belong to the account count toward the conversation's
-// switch (see failConversation); definite ones (quota, sign-in, a model
-// the account lacks) switch it with the next request.
+// switch (see failConversation); definite ones (long quota, sign-in, a
+// model the account lacks) switch it with the next request.
 func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailure) *attemptFailure {
 	account, accountName := at.account.ID(), at.account.Name()
 	counted := func(err *conv.Error) *attemptFailure {
@@ -956,7 +958,13 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 			return counted(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message})
 		}
 		at.account.Cool(r.poolGroup(at.account), failure.Reset)
-		return definite(&conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}, wait)
+		quota := &conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}
+		if wait <= maxRetryableQuotaWait {
+			// A wait the client can sit out: pass Google's 429 on as it is,
+			// and the conversation stays on the account.
+			return rejected(quota)
+		}
+		return definite(quota, wait)
 	case failure.Code == http.StatusServiceUnavailable || failure.Code == statusSiteOverloaded:
 		return counted(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message})
 	case failure.Code == http.StatusRequestTimeout || failure.Code == http.StatusConflict || failure.Code >= http.StatusInternalServerError:

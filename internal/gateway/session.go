@@ -85,7 +85,15 @@ func (g *Gateway) accountFailure(id string, err *accountError) *attemptFailure {
 	if account := g.pool.Account(id); account != nil {
 		name = account.Name()
 	}
-	g.log.Warn("account could not serve the conversation", "account", name, "definite", err.definite, "err", err)
+	g.log.Warn("account could not serve the conversation", "account", name, "definite", err.definite, "wait", err.wait, "err", err)
+	if err.wait > 0 {
+		secs := int(math.Ceil(err.wait.Seconds()))
+		return &attemptFailure{
+			err:         &conv.Error{Kind: conv.ErrQuota, Message: fmt.Sprintf("rate limit exceeded; retry in %d s", secs), RetryAfterSeconds: secs},
+			account:     id,
+			accountName: name,
+		}
+	}
 	return &attemptFailure{
 		err:         &conv.Error{Kind: conv.ErrUpstream, Message: err.reason},
 		account:     id,
@@ -134,7 +142,7 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 		return nil, newAccountError("the account holding this conversation was removed", true, fmt.Errorf("account %s is no longer configured", snap.Account))
 	}
 	if err := account.Available(r.poolGroup(account)); err != nil {
-		return nil, newAccountError("the account holding this conversation is unavailable", true, err)
+		return nil, unavailableError(account, r, err)
 	}
 	slug, tier, ok := slugOn(account, r)
 	if !ok {
@@ -405,9 +413,22 @@ func (g *Gateway) pinnedFailure(r *run) *attemptFailure {
 		return g.accountFailure(r.pin, newAccountError(fmt.Sprintf("the account holding this conversation does not offer model %q", r.req.Model), true, nil))
 	}
 	if err := account.Available(r.poolGroup(account)); err != nil {
-		return g.accountFailure(r.pin, newAccountError("the account holding this conversation is unavailable", true, err))
+		return g.accountFailure(r.pin, unavailableError(account, r, err))
 	}
 	return nil
+}
+
+// unavailableError is why the account holding a conversation cannot serve
+// it now. A cooldown that ends soon is a rate limit the client waits out
+// on the account; anything else is the account's, and the conversation
+// leaves it.
+func unavailableError(account *pool.Account, r *run, cause error) *accountError {
+	if wait := account.CooldownRemaining(r.poolGroup(account)); wait > 0 && wait <= maxRetryableQuotaWait {
+		err := newAccountError("rate limit exceeded", false, cause)
+		err.wait = wait
+		return err
+	}
+	return newAccountError("the account holding this conversation is unavailable", true, cause)
 }
 
 func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {

@@ -194,7 +194,11 @@ func switchNotice(err *conv.Error, state conversationState) *conv.Error {
 type accountError struct {
 	reason   string
 	definite bool
-	err      error
+	// wait is set when the account only has to cool down for a short time:
+	// the client gets that as a 429 and waits, instead of the conversation
+	// leaving the account.
+	wait time.Duration
+	err  error
 }
 
 func (e *accountError) Error() string { return e.reason + ": " + e.err.Error() }

@@ -1203,6 +1203,57 @@ func TestQuotaFailureSwitchesAccountOnTheNextRequest(t *testing.T) {
 	}
 }
 
+// A 429 that names a short wait is passed on as Google sent it: no switch
+// notice, no count, and the conversation stays on its account.
+func TestShortQuotaWaitIsPassedThrough(t *testing.T) {
+	h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_QUOTA=1", "FAKE_AGY_QUOTA_WAIT=15s"}})
+	name := userPreferring(t, h.p, "acct0")
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}
+
+	limited := h.complete(context.Background(), name, req)
+	if limited.err == nil || limited.err.Kind != conv.ErrQuota || limited.err.HTTPStatus != 0 || limited.err.RetryAfterSeconds != 15 || limited.err.Message != agytest.QuotaError {
+		t.Fatalf("limited = %+v, want Google's 429 with its 15 s and no notice", limited.err)
+	}
+	keys := h.gw.conversationKeys(testCaller(name).KeyHash, req.Model+"\x00", newTranscript(req.Messages))
+	if _, ok := h.gw.conversations.get(keys); ok {
+		t.Fatal("a passed-through 429 left a failure state")
+	}
+}
+
+// An account that only cools down for a short time is waited for, not left:
+// the conversation holding a session there gets the 429 with the time left.
+func TestShortCooldownOnTheConversationsAccountIsAWait(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	name := userPreferring(t, h.p, "acct0")
+	ctx := context.Background()
+	first := h.complete(ctx, name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one")}})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first.err)
+	}
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one"), {Role: conv.RoleAssistant, Text: first.text}, user("two")}}
+
+	h.p.Account("acct0").Cool("gemini", time.Now().Add(15*time.Second))
+	waiting := h.complete(ctx, name, req)
+	if waiting.err == nil || waiting.err.Kind != conv.ErrQuota || waiting.err.RetryAfterSeconds <= 0 || waiting.err.RetryAfterSeconds > 15 ||
+		strings.Contains(waiting.err.Message, "[agyrelay]") {
+		t.Fatalf("while cooling = %+v, want a plain 429 with the time left", waiting.err)
+	}
+
+	// A cooldown no client waits out moves the conversation: told once,
+	// then served by the other account.
+	h.p.Account("acct0").Cool("gemini", time.Now().Add(2*time.Hour))
+	long := h.complete(ctx, name, req)
+	if long.err == nil || long.err.RetryAfterSeconds != switchRetryAfterSeconds || !strings.Contains(long.err.Message, "account holding this conversation is unavailable") {
+		t.Fatalf("long cooldown = %+v, want the account-unavailable error with a %d s Retry-After", long.err, switchRetryAfterSeconds)
+	}
+	if moved := h.complete(ctx, name, req); moved.err != nil {
+		t.Fatalf("after the switch notice = %+v", moved.err)
+	}
+	if rec := h.records.all(t, 4)[3]; rec.Account != "acct1" || rec.ReplayReason != ReplaySwitchDefinite {
+		t.Fatalf("moved request = %s %s, want acct1 %s", rec.Account, rec.ReplayReason, ReplaySwitchDefinite)
+	}
+}
+
 // A failure that may pass counts down the retries left on the account;
 // the request after the last one switches accounts, and the conversation's
 // history replays there.
