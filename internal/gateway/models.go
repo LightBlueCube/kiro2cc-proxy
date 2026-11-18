@@ -282,11 +282,11 @@ func slugOn(account *pool.Account, r *run) (slug, tier string, ok bool) {
 	return r.model.slugIn(entriesFromACP(models))
 }
 
-// hasCandidate reports whether any account not in r.exclude offers the
-// model and is available for its quota group.
-func (g *Gateway) hasCandidate(r *run) bool {
+// hasOtherAccount reports whether an account other than the given one
+// offers the model and is available for its quota group.
+func (g *Gateway) hasOtherAccount(r *run, id string) bool {
 	for _, account := range g.pool.Accounts() {
-		if r.exclude[account.ID()] {
+		if account.ID() == id {
 			continue
 		}
 		if _, _, ok := slugOn(account, r); ok && account.Available(r.poolGroup(account)) == nil {

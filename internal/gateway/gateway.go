@@ -32,7 +32,6 @@ const (
 	// defaultParkTTL cancels a turn whose client never returns its tool
 	// results, when Config.ParkTTL is zero.
 	defaultParkTTL        = 5 * time.Minute
-	maxAttempts           = 3
 	janitorInterval       = 30 * time.Second
 	maxRetryableQuotaWait = time.Minute
 )
@@ -85,15 +84,16 @@ type Budget interface {
 }
 
 type Gateway struct {
-	log          *slog.Logger
-	pool         *pool.Pool
-	bridge       *bridge.Server
-	snaps        *snapshotStore
-	recorder     Recorder
-	budget       Budget
-	flags        PromptFlags
-	refresh      func(ctx context.Context, account *pool.Account) error
-	keepForQuota func(ctx context.Context, account *pool.Account, lastUsed time.Time) bool
+	log           *slog.Logger
+	pool          *pool.Pool
+	bridge        *bridge.Server
+	snaps         *snapshotStore
+	conversations *conversations
+	recorder      Recorder
+	budget        Budget
+	flags         PromptFlags
+	refresh       func(ctx context.Context, account *pool.Account) error
+	keepForQuota  func(ctx context.Context, account *pool.Account, lastUsed time.Time) bool
 	// refreshes holds, by account name, a running refresh or the last one
 	// that left the account without a catalog.
 	refreshMu sync.Mutex
@@ -186,19 +186,20 @@ func New(cfg Config) (*Gateway, error) {
 		return nil, err
 	}
 	g := &Gateway{
-		log:          cfg.Log,
-		pool:         cfg.Pool,
-		bridge:       cfg.Bridge,
-		snaps:        snaps,
-		recorder:     cfg.Recorder,
-		budget:       cfg.Budget,
-		flags:        cfg.Flags,
-		refresh:      cfg.Refresh,
-		keepForQuota: cfg.KeepForQuota,
-		refreshes:    map[string]*refreshCall{},
-		stop:         make(chan struct{}),
-		sessions:     map[string]*session{},
-		busyByKey:    map[string]int{},
+		log:           cfg.Log,
+		pool:          cfg.Pool,
+		bridge:        cfg.Bridge,
+		snaps:         snaps,
+		recorder:      cfg.Recorder,
+		budget:        cfg.Budget,
+		flags:         cfg.Flags,
+		refresh:       cfg.Refresh,
+		keepForQuota:  cfg.KeepForQuota,
+		refreshes:     map[string]*refreshCall{},
+		stop:          make(chan struct{}),
+		sessions:      map[string]*session{},
+		conversations: newConversations(),
+		busyByKey:     map[string]int{},
 	}
 	parkTTL := cfg.ParkTTL
 	if parkTTL <= 0 {
@@ -351,27 +352,30 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 	}
 
 	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, exclude: map[string]bool{}, reuse: true}
-	attempts := min(maxAttempts, len(g.pool.Accounts()))
-	for attempt := 1; ; attempt++ {
-		at, failure := g.start(ctx, r)
-		if failure == nil {
-			g.mu.Lock()
-			rec.Account, rec.AccountName, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.ID(), at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
-			rec.QuotaGroup = r.poolGroup(at.account)
-			at.callToken = rec.CallToken
-			g.mu.Unlock()
-			failure = g.consume(ctx, at, r, w)
+	keys := g.conversationKeys(caller.KeyHash, t)
+	g.applyConversation(r, keys)
+
+	at, failure := g.start(ctx, r)
+	if failure == nil {
+		if r.moving {
+			g.log.Warn("conversation switches accounts", "to", at.account.Name(), "reason", r.moveReason)
+			g.conversations.put(keys, conversationState{account: at.account.ID(), moved: r.moveReason})
 		}
-		if failure == nil {
-			return nil
-		}
-		r.exclude[failure.account] = true
-		if !failure.retry || w.emitted || attempt >= attempts || ctx.Err() != nil || !g.hasCandidate(r) {
-			return g.finalizeFailure(r, failure)
-		}
-		g.log.Warn("retrying on another account", "account", cmp.Or(failure.accountName, failure.account), "err", failure.err.Message)
-		r.reuse = false
+		g.mu.Lock()
+		rec.Account, rec.AccountName, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.ID(), at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
+		rec.QuotaGroup = r.poolGroup(at.account)
+		at.callToken = rec.CallToken
+		g.mu.Unlock()
+		failure = g.consume(ctx, at, r, w)
 	}
+	if failure != nil {
+		if failure.retry {
+			g.log.Warn("request failed on its account", "account", cmp.Or(failure.accountName, failure.account), "definite", failure.definite, "err", failure.err.Message)
+		}
+		return g.failConversation(r, keys, failure)
+	}
+	g.conversations.clear(keys)
+	return nil
 }
 
 func (g *Gateway) finalizeFailure(r *run, failure *attemptFailure) *conv.Error {
@@ -516,8 +520,16 @@ type run struct {
 	// offered is the merged catalog the model was found in.
 	offered []modelEntry
 	exclude map[string]bool
-	// reuse allows continuing or warming a session; a retry replays fresh.
+	// pin is the account the conversation stays on (empty = any): the one
+	// its earlier requests failed on, until its failures are due.
+	pin string
+	// reuse allows continuing or warming a session; a conversation that
+	// left its account replays fresh.
 	reuse bool
+	// moving is set while the conversation leaves the account it failed
+	// on; moveReason says why it replays, as ReplayReason.
+	moving     bool
+	moveReason ReplayReason
 	// mode is how the last attempt started; replayReason is set with
 	// ModeReplay.
 	mode         Mode
@@ -526,13 +538,15 @@ type run struct {
 
 func (r *run) choice() string { return r.req.Model + "\x00" + r.req.Effort }
 
-// attemptFailure ends one attempt. retry means nothing reached the client
-// and another account may succeed.
+// attemptFailure ends the request's attempt. retry means the account's
+// failure counts toward switching the conversation to another account;
+// definite means no retry can fix it there, so the next request switches.
 type attemptFailure struct {
 	err         *conv.Error
 	account     string
 	accountName string
 	retry       bool
+	definite    bool
 	quotaWait   time.Duration
 }
 
@@ -668,7 +682,7 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 		if agy.IsAuthError(outcome.Err) {
 			at.account.Disable(outcome.Err)
 		}
-		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "upstream request failed"}, account: account, accountName: accountName, retry: true}
+		return &attemptFailure{err: &conv.Error{Kind: conv.ErrUpstream, Message: "upstream request failed"}, account: account, accountName: accountName, retry: true, definite: agy.IsAuthError(outcome.Err)}
 	}
 	if outcome.StopReason == agy.StopCancelled {
 		msg := "request cancelled by a newer request for this conversation"
@@ -683,8 +697,10 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 	// agy ends a turn whose model call failed for good with end_turn and
 	// a line about the error as the reply.
 	if failure != nil {
-		// The session holds the failed input now.
-		g.forget(account, at.sess.id)
+		// The session holds the failed input now. Its positions that
+		// cannot be rewound to are gone (launch drops them); the others
+		// stay, so a retry rewinds past the failed input and keeps the
+		// reasoning.
 		return g.modelFailure(at, r, failure)
 	}
 
@@ -895,50 +911,60 @@ const statusSiteOverloaded = 529
 // modelFailure maps the failed model call that ended the turn. Messages
 // pass through: clients recognize overflow by their text as well. A 429
 // that names a retry time is the account's quota: the account cools down
-// until then and another one may serve the request. agy retries a 429
-// without one itself before it gives up.
+// until then and the conversation moves to another account. agy retries a
+// 429 without one itself before it gives up.
+//
+// Failures that belong to the account count toward the conversation's
+// switch (see failConversation); definite ones (quota, sign-in, a model
+// the account lacks) switch it with the next request.
 func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailure) *attemptFailure {
 	account, accountName := at.account.ID(), at.account.Name()
-	out := func(err *conv.Error, retry bool, quotaWait time.Duration) *attemptFailure {
-		return &attemptFailure{err: err, account: account, accountName: accountName, retry: retry, quotaWait: quotaWait}
+	counted := func(err *conv.Error) *attemptFailure {
+		return &attemptFailure{err: err, account: account, accountName: accountName, retry: true}
+	}
+	definite := func(err *conv.Error, quotaWait time.Duration) *attemptFailure {
+		return &attemptFailure{err: err, account: account, accountName: accountName, retry: true, definite: true, quotaWait: quotaWait}
+	}
+	rejected := func(err *conv.Error) *attemptFailure {
+		return &attemptFailure{err: err, account: account, accountName: accountName}
 	}
 	switch {
 	case failure.Code == http.StatusBadRequest && contextOverflow.MatchString(failure.Message):
-		return out(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message}, false, 0)
+		return rejected(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message})
 	case failure.Code == http.StatusRequestEntityTooLarge:
-		return out(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message, HTTPStatus: failure.Code}, false, 0)
+		return rejected(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message, HTTPStatus: failure.Code})
 	case failure.Code == http.StatusBadRequest:
-		return out(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message}, false, 0)
+		return rejected(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message})
 	case failure.Code == http.StatusUnauthorized:
-		// Upstream account token failed: try another account; never pass 401
-		// downstream where it means the caller's API key is invalid.
-		return out(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, true, 0)
+		// Upstream account token failed: never pass 401 downstream where it
+		// means the caller's API key is invalid.
+		return definite(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, 0)
 	case failure.Code == http.StatusForbidden:
 		if at.account.Available(r.poolGroup(at.account)) != nil {
 			// VALIDATION_REQUIRED (or similar) removed this account; avoid
 			// leaking account-verification details to callers.
-			return out(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, true, 0)
+			return definite(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, 0)
 		}
-		return out(&conv.Error{Kind: conv.ErrForbidden, Message: failure.Message}, true, 0)
+		return definite(&conv.Error{Kind: conv.ErrForbidden, Message: failure.Message}, 0)
 	case failure.Code == http.StatusNotFound:
 		// Map 404 to 400 model_not_found so clients like OpenCode do not retry
-		// it, after trying any other account that offers the model.
-		return out(&conv.Error{Kind: conv.ErrUnknownModel, Message: failure.Message}, true, 0)
+		// it, when no other account can take the conversation.
+		return definite(&conv.Error{Kind: conv.ErrUnknownModel, Message: failure.Message}, 0)
 	case failure.Code == http.StatusTooManyRequests:
 		wait := time.Until(failure.Reset)
 		if wait <= 0 {
-			return out(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, true, 0)
+			return counted(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message})
 		}
 		at.account.Cool(r.poolGroup(at.account), failure.Reset)
-		return out(&conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}, true, wait)
+		return definite(&conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}, wait)
 	case failure.Code == http.StatusServiceUnavailable || failure.Code == statusSiteOverloaded:
-		return out(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message}, true, 0)
+		return counted(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message})
 	case failure.Code == http.StatusRequestTimeout || failure.Code == http.StatusConflict || failure.Code >= http.StatusInternalServerError:
-		return out(&conv.Error{Kind: conv.ErrUpstream, Message: failure.Message, HTTPStatus: failure.Code}, true, 0)
+		return counted(&conv.Error{Kind: conv.ErrUpstream, Message: failure.Message, HTTPStatus: failure.Code})
 	case failure.Code >= http.StatusBadRequest && failure.Code < http.StatusInternalServerError:
-		return out(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message, HTTPStatus: failure.Code}, false, 0)
+		return rejected(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message, HTTPStatus: failure.Code})
 	}
-	return out(&conv.Error{Kind: conv.ErrUpstream, Message: failure.Message}, false, 0)
+	return rejected(&conv.Error{Kind: conv.ErrUpstream, Message: failure.Message})
 }
 
 // janitor closes sessions idle past IdleClose (or the snapshot TTL, if

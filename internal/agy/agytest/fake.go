@@ -16,6 +16,9 @@
 //	@ok                  report a model call that succeeded, reply "ok"
 //	@risk429             risk control: report RiskError (a 429 naming no
 //	                     wait) up to RiskAttempts times, then end the turn
+//	@failonce            fail the model call with FailOnceError the first
+//	                     time this process sees this input; later ones get
+//	                     the usual reply
 //
 // Anything else gets a thought and "reply to: <input>".
 //
@@ -107,6 +110,12 @@ const (
 	QuotaError      = "RESOURCE_EXHAUSTED (code 429): " + QuotaUserError
 	QuotaRetryAfter = 2 * time.Hour
 )
+
+// FailOnceError is the model error of "@failonce".
+const FailOnceError = "UNAVAILABLE (code 503): No capacity available for model on the server"
+
+// failedOnce holds the inputs "@failonce" already failed in this process.
+var failedOnce sync.Map
 
 // CapacityError is the model error of "@retry429"; RetryNotice is the
 // line agy streams before it retries.
@@ -642,6 +651,11 @@ func scriptedFailure(input string) (*ModelCall, string) {
 		}
 		// An error with a user message: agy shows that message.
 		return &ModelCall{Code: http.StatusTooManyRequests, Message: QuotaError, RetryAfter: wait}, "⚠ " + QuotaUserError
+	}
+	if strings.Contains(input, "@failonce") {
+		if _, seen := failedOnce.LoadOrStore(input, true); !seen {
+			return &ModelCall{Code: http.StatusServiceUnavailable, Message: FailOnceError}, "⚠ " + FailOnceError
+		}
 	}
 	if rawCode := os.Getenv("FAKE_AGY_FAIL_CODE"); rawCode != "" {
 		code, err := strconv.Atoi(rawCode)

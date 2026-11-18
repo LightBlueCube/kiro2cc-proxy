@@ -72,6 +72,21 @@ func readSSE(t *testing.T, body string) (events []sseEvent, done bool) {
 	return events, done
 }
 
+// An error after the stream began (output sent, or a keepalive committed
+// the 200) is an error event followed by [DONE], like a finished stream.
+func TestChatStreamErrorAfterOutputEndsTheStream(t *testing.T) {
+	backend := &stubBackend{events: []conv.Event{{Text: "partial"}, {Err: &conv.Error{Kind: conv.ErrOverloaded, Message: "backend down"}}}}
+	rec := post(t, NewHandler(backend).Chat, `{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}]}`)
+	events, done := readSSE(t, rec.Body.String())
+	if rec.Code != http.StatusOK || !done || len(events) != 2 {
+		t.Fatalf("status=%d done=%v events=%v", rec.Code, done, events)
+	}
+	failure, ok := events[1].data["error"].(map[string]any)
+	if !ok || failure["message"] != "backend down" || failure["code"] != "service_unavailable" {
+		t.Fatalf("error event = %v", events[1].data)
+	}
+}
+
 func choiceDelta(chunk map[string]any) map[string]any {
 	return chunk["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
 }

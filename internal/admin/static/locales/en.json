@@ -331,6 +331,8 @@
   "replay.tools_changed": "The client's tool set differs from the session's",
   "replay.warm_failed": "The session could not be reopened or rewound",
   "replay.retry": "An earlier attempt failed on another account",
+  "replay.switch_failures": "The account failed too many requests, so the conversation moved to another account",
+  "replay.switch_definite": "The account could not serve the conversation (quota, sign-in or model), so it moved to another account",
 
   "status.tool_calls": "The reply ended on tool calls; the turn waits for their results",
   "status.length": "The reply hit the output token limit",

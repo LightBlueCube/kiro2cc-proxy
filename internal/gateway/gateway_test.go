@@ -1177,15 +1177,135 @@ func TestEditedToolResultsWarmDelta(t *testing.T) {
 	}
 }
 
-func TestQuotaFailureRetriesOnAnotherAccount(t *testing.T) {
+// A quota failure is the account's: the client gets the error once, with a
+// short Retry-After, and its retry is served by another account.
+func TestQuotaFailureSwitchesAccountOnTheNextRequest(t *testing.T) {
 	h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}})
 	name := userPreferring(t, h.p, "acct0")
-	r := h.complete(context.Background(), name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
-	if r.err != nil || r.text != "reply to: hi" {
-		t.Fatalf("result = %+v", r)
+	ctx := context.Background()
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}
+
+	first := h.complete(ctx, name, req)
+	if first.err == nil || first.err.Kind != conv.ErrQuota || first.err.HTTPStatus != 0 || first.err.RetryAfterSeconds != switchRetryAfterSeconds ||
+		!strings.Contains(first.err.Message, agytest.QuotaError) || !strings.Contains(first.err.Message, "next request switches to another account") {
+		t.Fatalf("first = %+v, want the quota error, a %ds Retry-After, and the switch notice", first.err, switchRetryAfterSeconds)
 	}
 	if err := h.p.Account("acct0").Available("gemini"); err == nil {
 		t.Fatal("acct0 is not cooling down")
+	}
+
+	second := h.complete(ctx, name, req)
+	if second.err != nil || second.text != "reply to: hi" {
+		t.Fatalf("retry = %+v", second)
+	}
+	if records := h.records.all(t, 2); records[0].Account != "acct0" || records[1].Account != "acct1" {
+		t.Fatalf("accounts = %s, %s; want acct0 then acct1", records[0].Account, records[1].Account)
+	}
+}
+
+// A failure that may pass counts down the retries left on the account;
+// the request after the last one switches accounts, and the conversation's
+// history replays there.
+func TestRepeatedFailuresSwitchAccountAfterThreeRetries(t *testing.T) {
+	h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=503", "FAKE_AGY_FAIL_MSG=UNAVAILABLE (code 503): backend down"}})
+	name := userPreferring(t, h.p, "acct0")
+	ctx := context.Background()
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}}
+
+	for failures := 1; failures <= failuresBeforeSwitch; failures++ {
+		r := h.complete(ctx, name, req)
+		want := fmt.Sprintf("Retries left before switching accounts: %d", failuresBeforeSwitch-failures)
+		if failures == failuresBeforeSwitch {
+			want = fmt.Sprintf("(%d of %d). %s", failures, failuresBeforeSwitch, switchWarning)
+		}
+		if r.err == nil || r.err.Kind != conv.ErrOverloaded || !strings.Contains(r.err.Message, "backend down") || !strings.Contains(r.err.Message, want) {
+			t.Fatalf("failure %d = %+v, want a 503 saying %q", failures, r.err, want)
+		}
+	}
+	if r := h.complete(ctx, name, req); r.err != nil || r.text != "reply to: hi" {
+		t.Fatalf("request after the retries = %+v", r)
+	}
+	records := h.records.all(t, failuresBeforeSwitch+1)
+	for i, rec := range records[:failuresBeforeSwitch] {
+		if rec.Account != "acct0" {
+			t.Fatalf("failure %d ran on %s, want acct0: the conversation stays until its retries are used", i+1, rec.Account)
+		}
+	}
+	if last := records[failuresBeforeSwitch]; last.Account != "acct1" {
+		t.Fatalf("switched request ran on %s, want acct1", last.Account)
+	}
+}
+
+// A retry of a failed model call stays on the account and rewinds past
+// the failed input, so the session keeps the conversation's reasoning.
+func TestRetryAfterModelFailureRewindsTheSession(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	name := userPreferring(t, h.p, "acct0")
+	ctx := context.Background()
+	first := h.complete(ctx, name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one")}})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first.err)
+	}
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one"), {Role: conv.RoleAssistant, Text: first.text}, user("two @failonce")}}
+
+	failed := h.complete(ctx, name, req)
+	if failed.err == nil || !strings.Contains(failed.err.Message, agytest.FailOnceError) || !strings.Contains(failed.err.Message, "Retries left before switching accounts: 2") {
+		t.Fatalf("failed = %+v", failed.err)
+	}
+	retried := h.complete(ctx, name, req)
+	if retried.err != nil || retried.text != "reply to: two @failonce" {
+		t.Fatalf("retry = %+v", retried)
+	}
+	records := h.records.all(t, 3)
+	if got := records[2]; got.Account != records[0].Account || got.Mode != ModeRewind {
+		t.Fatalf("retry = %s %s, want %s rewind", got.Account, got.Mode, records[0].Account)
+	}
+}
+
+// A success ends the run of failures: the next failure counts from one.
+func TestSuccessResetsTheFailureCount(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	name := userPreferring(t, h.p, "acct0")
+	ctx := context.Background()
+	left := func(r result, n int) bool {
+		return r.err != nil && strings.Contains(r.err.Message, fmt.Sprintf("Retries left before switching accounts: %d", n))
+	}
+	firstReq := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one @failonce")}}
+	if r := h.complete(ctx, name, firstReq); !left(r, failuresBeforeSwitch-1) {
+		t.Fatalf("first failure = %+v", r.err)
+	}
+	ok := h.complete(ctx, name, firstReq)
+	if ok.err != nil {
+		t.Fatalf("retry = %+v", ok.err)
+	}
+	secondReq := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one @failonce"), {Role: conv.RoleAssistant, Text: ok.text}, user("two @failonce")}}
+	if r := h.complete(ctx, name, secondReq); !left(r, failuresBeforeSwitch-1) {
+		t.Fatalf("failure after a success = %+v, want the count to start again", r.err)
+	}
+}
+
+// With history, the request that switches accounts says why it replays.
+func TestSwitchedRequestNamesItsReplayReason(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	name := userPreferring(t, h.p, "acct0")
+	ctx := context.Background()
+	first := h.complete(ctx, name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello")}})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first.err)
+	}
+	h.p.Account("acct0").SetPaused(true)
+	req := conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: first.text}, user("again")}}
+
+	refused := h.complete(ctx, name, req)
+	if refused.err == nil || !strings.Contains(refused.err.Message, "account holding this conversation is unavailable") {
+		t.Fatalf("paused account = %+v, want an error naming why the session cannot be resumed", refused.err)
+	}
+	if r := h.complete(ctx, name, req); r.err != nil {
+		t.Fatalf("retry = %+v", r.err)
+	}
+	got := h.records.all(t, 3)[2]
+	if got.Account != "acct1" || got.Mode != ModeReplay || got.ReplayReason != ReplaySwitchDefinite {
+		t.Fatalf("retry = %s %s %s, want acct1 replay %s", got.Account, got.Mode, got.ReplayReason, ReplaySwitchDefinite)
 	}
 }
 
@@ -1246,21 +1366,24 @@ func TestModelsRouteToAccountsOfferingThem(t *testing.T) {
 		t.Fatalf("pinned medium = %+v", r.err)
 	}
 
-	// The conversation lives on acct0; switching it to claude replays it
-	// on acct1 instead of failing there.
+	// The conversation lives on acct0, which lacks claude: the client is
+	// told, and its retry replays the conversation on acct1.
 	messages := []conv.Message{user("one"), {Role: conv.RoleAssistant, Text: first.text}, user("two")}
+	if r := request("claude-opus-5-5", messages...); r.err == nil || !strings.Contains(r.err.Message, `does not offer model "claude-opus-5-5"`) {
+		t.Fatalf("model the conversation's account lacks = %+v, want an error", r.err)
+	}
 	if r := request("claude-opus-5-5", messages...); r.err != nil {
 		t.Fatalf("switch = %+v", r.err)
 	}
-	records := h.records.all(t, 4)
-	want := []struct{ account, slug string }{{"acct1", "claude-opus-5-5-high"}, {"acct0", "gemini-3.8-flash-low"}, {"acct1", "gemini-3.8-flash-medium"}, {"acct1", "claude-opus-5-5-high"}}
+	records := h.records.all(t, 5)
+	want := []struct{ account, slug string }{{"acct1", "claude-opus-5-5-high"}, {"acct0", "gemini-3.8-flash-low"}, {"acct1", "gemini-3.8-flash-medium"}, {"", ""}, {"acct1", "claude-opus-5-5-high"}}
 	for i, w := range want {
 		if records[i].Account != w.account || records[i].Slug != w.slug {
 			t.Errorf("record %d = %s %s, want %s %s", i, records[i].Account, records[i].Slug, w.account, w.slug)
 		}
 	}
-	if records[3].Mode != ModeReplay {
-		t.Errorf("switch mode = %q, want replay", records[3].Mode)
+	if records[4].Mode != ModeReplay || records[4].ReplayReason != ReplaySwitchDefinite {
+		t.Errorf("switch = %q %q, want replay %s", records[4].Mode, records[4].ReplayReason, ReplaySwitchDefinite)
 	}
 
 	if r := request("gpt-oss-120b", user("x")); r.err == nil || r.err.Kind != conv.ErrUnknownModel {
@@ -2094,16 +2217,20 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	}
 
 	// Disallow gemini-3.8-flash on acct1: alice's warm session on acct1
-	// replays on acct0 instead.
+	// cannot continue there. The client is told, and its retry replays on
+	// acct0.
 	acct1.SetRouting(5, []string{"claude-opus-5-5"})
-	cont := h.complete(ctx, alice, conv.Request{
+	continued := conv.Request{
 		Model:    "gemini-3.8-flash",
 		Messages: []conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: first.text}, user("again")},
-	})
-	if cont.err != nil {
+	}
+	if cont := h.complete(ctx, alice, continued); cont.err == nil {
+		t.Fatal("a conversation whose account no longer offers the model continued anyway")
+	}
+	if cont := h.complete(ctx, alice, continued); cont.err != nil {
 		t.Fatalf("continue = %+v", cont.err)
 	}
-	if got := h.records.all(t, 7)[6]; got.Account != "acct0" || got.Mode != ModeReplay {
+	if got := h.records.all(t, 8)[7]; got.Account != "acct0" || got.Mode != ModeReplay {
 		t.Fatalf("disallowed warm = %s %s, want acct0 replay", got.Account, got.Mode)
 	}
 
@@ -2455,7 +2582,9 @@ func TestUpstreamErrorsPassThrough(t *testing.T) {
 		})
 	}
 
-	// Retryable / account-scoped failures fall back to a healthy second account.
+	// Failures of the account itself that no retry fixes: the client gets
+	// a retryable error with a short Retry-After, and its retry is served
+	// by the second account.
 	for _, tc := range []struct {
 		name string
 		code string
@@ -2465,15 +2594,48 @@ func TestUpstreamErrorsPassThrough(t *testing.T) {
 		{"403-permission", "403", "PERMISSION_DENIED (code 403): caller lacks entitlement"},
 		{"403-validation", "403", "PERMISSION_DENIED (code 403): VALIDATION_REQUIRED"},
 		{"404", "404", "NOT_FOUND (code 404): model missing"},
+	} {
+		t.Run("switch/"+tc.name, func(t *testing.T) {
+			h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=" + tc.code, "FAKE_AGY_FAIL_MSG=" + tc.msg}})
+			user := userPreferring(t, h.p, "acct0")
+			first := h.complete(ctx, user, req)
+			if first.err == nil || first.err.Kind != conv.ErrOverloaded || first.err.HTTPStatus != 0 || first.err.RetryAfterSeconds != switchRetryAfterSeconds ||
+				!strings.Contains(first.err.Message, "next request switches to another account") {
+				t.Fatalf("first on %s = %+v, want a retryable 503 with the switch notice", tc.name, first.err)
+			}
+			if strings.Contains(strings.ToLower(first.err.Message), "verify") {
+				t.Fatalf("message leaked verify: %q", first.err.Message)
+			}
+			if r := h.complete(ctx, user, req); r.err != nil || r.text != "reply to: hi" {
+				t.Fatalf("retry on %s = %+v, want reply", tc.name, r)
+			}
+		})
+	}
+
+	// Failures that may pass count down the retries the account has left.
+	for _, tc := range []struct {
+		name string
+		code string
+		msg  string
+	}{
 		{"429-capacity", "429", agytest.CapacityError},
 		{"503", "503", "UNAVAILABLE (code 503): backend down"},
 	} {
-		t.Run("fallback/"+tc.name, func(t *testing.T) {
+		t.Run("count/"+tc.name, func(t *testing.T) {
 			h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=" + tc.code, "FAKE_AGY_FAIL_MSG=" + tc.msg}})
 			user := userPreferring(t, h.p, "acct0")
-			r := h.complete(ctx, user, req)
-			if r.err != nil || r.text != "reply to: hi" {
-				t.Fatalf("fallback on %s = %+v, want reply", tc.name, r)
+			for failures := 1; failures <= failuresBeforeSwitch; failures++ {
+				r := h.complete(ctx, user, req)
+				want := fmt.Sprintf("Retries left before switching accounts: %d", failuresBeforeSwitch-failures)
+				if failures == failuresBeforeSwitch {
+					want = fmt.Sprintf("(%d of %d). %s", failures, failuresBeforeSwitch, switchWarning)
+				}
+				if r.err == nil || !strings.Contains(r.err.Message, tc.msg) || !strings.Contains(r.err.Message, want) {
+					t.Fatalf("failure %d on %s = %+v, want %q", failures, tc.name, r.err, want)
+				}
+			}
+			if r := h.complete(ctx, user, req); r.err != nil || r.text != "reply to: hi" {
+				t.Fatalf("request after the retries on %s = %+v, want reply", tc.name, r)
 			}
 		})
 	}

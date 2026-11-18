@@ -323,7 +323,10 @@ func streamChat(w http.ResponseWriter, events <-chan conv.Event, meta chatMeta, 
 				WriteError(w, ev.Err)
 				return false
 			}
+			// The status is sent already: end the stream the way a finished
+			// one ends, after an error event the client's SDK raises.
 			s.write("", errorBody(ev.Err))
+			s.raw("data: [DONE]\n\n")
 			return false
 		case ev.Text != "":
 			delta(map[string]any{"content": ev.Text})

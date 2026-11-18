@@ -32,10 +32,12 @@ const (
 	ReplayNoSnapshot ReplayReason = "no_snapshot"
 	// ReplayToolsChanged: the session's tool set differs from the request's.
 	ReplayToolsChanged ReplayReason = "tools_changed"
-	// ReplayWarmFailed: the session could not be reopened or rewound.
-	ReplayWarmFailed ReplayReason = "warm_failed"
-	// ReplayRetry: an earlier attempt failed on another account.
-	ReplayRetry ReplayReason = "retry"
+	// ReplaySwitchFailures: the conversation's account failed its requests
+	// too often, so the conversation moved to another account.
+	ReplaySwitchFailures ReplayReason = "switch_failures"
+	// ReplaySwitchDefinite: the account could not serve the conversation
+	// at all (quota, sign-in, model), so it moved to another account.
+	ReplaySwitchDefinite ReplayReason = "switch_definite"
 )
 
 // AnchorStatus reports whether the request returned a usable anchor

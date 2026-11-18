@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"time"
@@ -29,7 +30,7 @@ import (
 // request plans from an earlier rewindable position.
 func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailure) {
 	if !r.reuse {
-		return g.startFresh(ctx, r, ReplayRetry)
+		return g.startFresh(ctx, r, r.moveReason)
 	}
 	for {
 		snap, ok := g.anchoredSnapshot(r.t)
@@ -40,6 +41,9 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 			return g.startFresh(ctx, r, ReplayNoSnapshot)
 		}
 		if snap.ToolsKey != toolsKey(r.req.Tools) {
+			// A new session on the same account: only a failure moves a
+			// conversation to another.
+			r.pin = snap.Account
 			return g.startFresh(ctx, r, ReplayToolsChanged)
 		}
 		if at := g.tryContinue(snap, r); at != nil {
@@ -60,8 +64,34 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 		if ctx.Err() != nil {
 			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 		}
-		g.log.Info("warm session unusable; replaying fresh", "session", snap.SessionID, "err", err)
-		return g.startFresh(ctx, r, ReplayWarmFailed)
+		return nil, g.warmFailure(snap, err)
+	}
+}
+
+// warmFailure tells the client that the account holding its conversation's
+// session cannot resume it. The conversation does not replay on another
+// account unasked: that loses the reasoning.
+func (g *Gateway) warmFailure(snap snapshot, err error) *attemptFailure {
+	var accountErr *accountError
+	if !errors.As(err, &accountErr) {
+		accountErr = newAccountError("could not resume the conversation's session", false, err)
+	}
+	return g.accountFailure(snap.Account, accountErr)
+}
+
+// accountFailure is a failure of the account to serve the conversation.
+func (g *Gateway) accountFailure(id string, err *accountError) *attemptFailure {
+	name := id
+	if account := g.pool.Account(id); account != nil {
+		name = account.Name()
+	}
+	g.log.Warn("account could not serve the conversation", "account", name, "definite", err.definite, "err", err)
+	return &attemptFailure{
+		err:         &conv.Error{Kind: conv.ErrUpstream, Message: err.reason},
+		account:     id,
+		accountName: name,
+		retry:       true,
+		definite:    err.definite,
 	}
 }
 
@@ -101,25 +131,18 @@ func (g *Gateway) tryContinue(snap snapshot, r *run) *activeTurn {
 func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*activeTurn, error) {
 	account := g.pool.Account(snap.Account)
 	if account == nil {
-		return nil, fmt.Errorf("account %s is no longer configured", snap.Account)
+		return nil, newAccountError("the account holding this conversation was removed", true, fmt.Errorf("account %s is no longer configured", snap.Account))
 	}
 	if err := account.Available(r.poolGroup(account)); err != nil {
-		return nil, err
+		return nil, newAccountError("the account holding this conversation is unavailable", true, err)
 	}
 	slug, tier, ok := slugOn(account, r)
 	if !ok {
-		return nil, fmt.Errorf("account %s does not offer model %s", snap.Account, r.req.Model)
+		return nil, newAccountError(fmt.Sprintf("the account holding this conversation does not offer model %q", r.req.Model), true, nil)
 	}
 	at, err := g.claimSession(ctx, snap, account, r)
 	if err != nil {
-		var limitErr *conv.Error
-		if errors.As(err, &limitErr) {
-			return nil, err
-		}
-		if !errors.Is(err, errSessionBusy) && !errors.Is(err, pool.ErrSlotBusy) && ctx.Err() == nil {
-			g.forget(snap.Account, snap.SessionID)
-		}
-		return nil, err
+		return nil, g.claimFailure(ctx, snap, err)
 	}
 	// Claiming may have waited for a cancelled turn that took input past
 	// snap.
@@ -132,10 +155,10 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 		rewound, err := g.rewindTo(ctx, at, snap, r)
 		if err != nil {
 			g.releaseClaim(at)
-			if ctx.Err() == nil {
-				g.forget(snap.Account, snap.SessionID)
+			if ctx.Err() != nil {
+				return nil, err
 			}
-			return nil, err
+			return nil, newAccountError("could not rewind the conversation's session", false, err)
 		}
 		if rewound {
 			r.mode = ModeRewind
@@ -167,6 +190,26 @@ func (g *Gateway) rewindTo(ctx context.Context, at *activeTurn, snap snapshot, r
 		g.log.Warn("snapshot rewind not persisted", "err", err)
 	}
 	return true, nil
+}
+
+// claimFailure classifies why claimSession could not give the snapshot's
+// session to the request. A session lost on its account is forgotten: no
+// retry brings it back.
+func (g *Gateway) claimFailure(ctx context.Context, snap snapshot, err error) error {
+	var limitErr *conv.Error
+	var accountErr *accountError
+	switch {
+	case errors.As(err, &limitErr), ctx.Err() != nil:
+		return err
+	case errors.Is(err, errSessionBusy), errors.Is(err, pool.ErrSlotBusy):
+		return newAccountError("the conversation's session is busy", false, err)
+	case errors.As(err, &accountErr):
+		if accountErr.definite {
+			g.forget(snap.Account, snap.SessionID)
+		}
+		return err
+	}
+	return newAccountError("could not reopen the conversation's session", false, err)
 }
 
 // claimSession reserves the snapshot's session for a new turn, cancelling
@@ -242,7 +285,7 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 // reopen restores a persisted session into the account's current process.
 func (g *Gateway) reopen(ctx context.Context, sess *session, r *run) error {
 	if _, err := os.Stat(sess.account.ConversationStore(sess.id)); err != nil {
-		return fmt.Errorf("conversation store: %w", err)
+		return newAccountError("the conversation's session was lost on its account", true, fmt.Errorf("conversation store: %w", err))
 	}
 	tools := r.req.Tools
 	proc, err := sess.account.Proc(context.WithoutCancel(ctx), profileFor(tools))
@@ -270,7 +313,11 @@ func (g *Gateway) reopen(ctx context.Context, sess *session, r *run) error {
 // model and replays the transcript; reason says why, when it has history.
 // Accounts that fail to open one are skipped.
 func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (*activeTurn, *attemptFailure) {
-	var lastErr error
+	if r.pin != "" {
+		if failure := g.pinnedFailure(r); failure != nil {
+			return nil, failure
+		}
+	}
 	var lacking []string
 	for {
 		for _, a := range g.pool.Accounts() {
@@ -283,13 +330,16 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			}
 		}
 		account, err := g.pickAccount(r)
+		if err != nil && r.pin != "" {
+			return nil, g.accountFailure(r.pin, newAccountError("the account holding this conversation is busy", false, err))
+		}
 		if err != nil {
 			// Catalogs that sessions just reported may show no account
 			// has the model, as the fallback list had promised.
 			if _, offered := lookupModel(g.offered(), r.req.Model, r.req.Effort); !offered {
 				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", r.req.Model)}}
 			}
-			g.log.Warn("no account available for request", "model", r.req.Model, "err", err, "lacking", lacking, "last_err", lastErr)
+			g.log.Warn("no account available for request", "model", r.req.Model, "err", err, "lacking", lacking)
 			if g.hasAvailableAccount(r) {
 				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrUnavailable, Message: "service temporarily unavailable"}}
 			}
@@ -336,13 +386,28 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 		if ctx.Err() != nil {
 			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 		}
-		if agy.IsAuthError(err) {
+		authFailed := agy.IsAuthError(err)
+		if authFailed {
 			account.Disable(err)
 		}
-		g.log.Warn("account could not open a session", "account", account.Name(), "err", err)
-		r.exclude[account.ID()] = true
-		lastErr = err
+		return nil, g.accountFailure(account.ID(), newAccountError("could not start a session on the account", authFailed, err))
 	}
+}
+
+// pinnedFailure checks the account a conversation is bound to before a new
+// session opens there; nil means it can serve the request.
+func (g *Gateway) pinnedFailure(r *run) *attemptFailure {
+	account := g.pool.Account(r.pin)
+	if account == nil {
+		return g.accountFailure(r.pin, newAccountError("the account holding this conversation was removed", true, nil))
+	}
+	if _, _, ok := slugOn(account, r); !ok {
+		return g.accountFailure(r.pin, newAccountError(fmt.Sprintf("the account holding this conversation does not offer model %q", r.req.Model), true, nil))
+	}
+	if err := account.Available(r.poolGroup(account)); err != nil {
+		return g.accountFailure(r.pin, newAccountError("the account holding this conversation is unavailable", true, err))
+	}
+	return nil
 }
 
 func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
@@ -365,7 +430,16 @@ func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
 		}
 		idle[id] = cur
 	}
-	return g.pool.Pick(r.user, r.model.id, r.exclude, idle)
+	exclude := r.exclude
+	if r.pin != "" {
+		exclude = maps.Clone(r.exclude)
+		for _, account := range g.pool.Accounts() {
+			if account.ID() != r.pin {
+				exclude[account.ID()] = true
+			}
+		}
+	}
+	return g.pool.Pick(r.user, r.model.id, exclude, idle)
 }
 
 // openSession creates a session on account and claims it.
