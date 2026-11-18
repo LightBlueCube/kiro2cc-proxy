@@ -629,9 +629,9 @@ function flaggedTable(prompts, reload, { detailMode = false, onDeleted = reload 
       onchange: e => setPinned(p, e.target.checked, e.target) }) },
     { title: t("flagged.hits"), num: true, cell: p => String(p.hits) },
     { title: t("flagged.by"), cell: p => stack(keyName(p.key_name, p.key_hash), where(p)) },
-    { title: "", actions: true, cell: p => h("div", { class: "actions" },
-      p.active ? h("button", { type: "button", onclick: e => cancel(p, e.target) }, t("flagged.cancel")) : null,
-      h("button", { type: "button", class: "danger", onclick: e => remove(p, e.target) }, t("flagged.delete"))) },
+    { title: "", actions: true, cell: p => p.active
+      ? h("button", { type: "button", class: "danger", onclick: e => cancel(p, e.target) }, t("flagged.cancel"))
+      : h("button", { type: "button", class: "danger", onclick: e => remove(p, e.target) }, t("flagged.delete")) },
   ], prompts);
 }
 

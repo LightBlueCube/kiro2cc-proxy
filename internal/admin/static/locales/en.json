@@ -142,7 +142,7 @@
   "flagged.cancel": "Cancel flag",
   "flagged.cancelled": "Flag cancelled",
   "flagged.delete": "Delete",
-  "flagged.delete.confirm": "Delete flagged prompt {hash}? Its saved request is removed, and if still flagged or kept, it will be allowed through again.",
+  "flagged.delete.confirm": "Delete flagged prompt {hash}? This cannot be undone.",
   "flagged.deleted": "Flagged prompt deleted",
   "settings.context_check": "Refuse prompts over the window",
   "settings.context_check.hint": "Counts every prompt with the model's tokenizer; the tokenizers take about 55 MiB and load in 0.2 s",

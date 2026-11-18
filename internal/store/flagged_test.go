@@ -97,10 +97,23 @@ func TestFlaggedPrompts(t *testing.T) {
 		t.Fatalf("list after prune = %+v, %v", list, err)
 	}
 
-	if err := st.DeleteFlaggedPrompt(ctx, "f1"); err != nil {
+	// Deleting refuses an active or pinned prompt, and removes an ended one.
+	if err := st.DeleteFlaggedPrompt(ctx, "f1", first.Add(time.Hour)); !errors.Is(err, ErrFlagActive) {
+		t.Fatalf("delete while running = %v, want ErrFlagActive", err)
+	}
+	if err := st.PinFlaggedPrompt(ctx, "f1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DeleteFlaggedPrompt(ctx, "f1"); !errors.Is(err, ErrNotFound) {
+	if err := st.DeleteFlaggedPrompt(ctx, "f1", now.Add(time.Second)); !errors.Is(err, ErrFlagActive) {
+		t.Fatalf("delete while pinned = %v, want ErrFlagActive", err)
+	}
+	if err := st.UnpinFlaggedPrompt(ctx, "f1", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteFlaggedPrompt(ctx, "f1", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteFlaggedPrompt(ctx, "f1", now.Add(time.Second)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete: %v", err)
 	}
 	if _, err := st.FlaggedPrompt(ctx, "f1"); !errors.Is(err, ErrNotFound) {

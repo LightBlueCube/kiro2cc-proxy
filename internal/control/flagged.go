@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 
 	"agyrelay/internal/store"
 )
@@ -36,8 +37,11 @@ func (c *Control) UnpinFlaggedPrompt(ctx context.Context, fingerprint string) er
 	return c.cfg.Flags.Unpin(ctx, fingerprint)
 }
 
-// DeleteFlaggedPrompt removes a flagged prompt record and lifts any active
-// flag or pin on it.
+// DeleteFlaggedPrompt deletes an ended, unpinned flagged prompt record.
 func (c *Control) DeleteFlaggedPrompt(ctx context.Context, fingerprint string) error {
-	return c.cfg.Flags.Delete(ctx, fingerprint)
+	err := c.cfg.Flags.Delete(ctx, fingerprint)
+	if errors.Is(err, store.ErrFlagActive) {
+		return &InputError{"cancel the flag before deleting the prompt"}
+	}
+	return err
 }

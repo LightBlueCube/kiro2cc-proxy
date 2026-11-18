@@ -115,15 +115,18 @@ func TestFlaggedPromptsAdminAPI(t *testing.T) {
 		t.Fatal("prompt pinned after the unpin")
 	}
 
-	// Deleting removes an active/pinned or ended prompt and lifts its refusal.
+	// Deleting requires the prompt to be neither running nor pinned.
 	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/pin", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("re-pin before delete = %d %s", r.status, r.raw)
 	}
+	if r := c.do("DELETE", "/admin/api/flagged-prompts/abc123", nil, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("delete while pinned = %d %s, want 400", r.status, r.raw)
+	}
+	if r := c.do("POST", "/admin/api/flagged-prompts/abc123/cancel", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("cancel before delete = %d %s", r.status, r.raw)
+	}
 	if r := c.do("DELETE", "/admin/api/flagged-prompts/abc123", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("delete = %d %s", r.status, r.raw)
-	}
-	if _, pinned := e.flags.Flagged("abc123"); pinned {
-		t.Fatal("deleted prompt still pinned in memory")
 	}
 	if r := c.do("GET", "/admin/api/flagged-prompts/abc123", nil, nil); r.status != http.StatusNotFound {
 		t.Fatalf("deleted prompt detail = %d", r.status)
@@ -142,7 +145,7 @@ func TestFlaggedPromptsAdminAPI(t *testing.T) {
 			counts[entry.Action]++
 		}
 	}
-	if counts["flagged_prompt_cancelled"] != 1 || counts["flagged_prompt_pinned"] != 2 || counts["flagged_prompt_unpinned"] != 1 || counts["flagged_prompt_deleted"] != 1 {
-		t.Fatalf("audit entries = %v, want 1 cancelled, 2 pinned, 1 unpinned, 1 deleted", counts)
+	if counts["flagged_prompt_cancelled"] != 2 || counts["flagged_prompt_pinned"] != 2 || counts["flagged_prompt_unpinned"] != 1 || counts["flagged_prompt_deleted"] != 1 {
+		t.Fatalf("audit entries = %v, want 2 cancelled, 2 pinned, 1 unpinned, 1 deleted", counts)
 	}
 }

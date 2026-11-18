@@ -132,10 +132,11 @@ func (f *Flags) Unpin(ctx context.Context, fingerprint string) error {
 	return nil
 }
 
-// Delete removes the prompt from the store and lifts any active flag or pin
-// in memory. It returns store.ErrNotFound when there is no such prompt.
+// Delete removes an ended, unpinned prompt from the store. It returns
+// store.ErrNotFound when there is no such prompt, or store.ErrFlagActive
+// when the prompt is still flagged or pinned.
 func (f *Flags) Delete(ctx context.Context, fingerprint string) error {
-	if err := f.store.DeleteFlaggedPrompt(ctx, fingerprint); err != nil {
+	if err := f.store.DeleteFlaggedPrompt(ctx, fingerprint, time.Now()); err != nil {
 		return err
 	}
 	f.mu.Lock()

@@ -156,10 +156,36 @@ func (s *Store) UnpinFlaggedPrompt(ctx context.Context, fingerprint string, now 
 		now.UnixMilli(), fingerprint))
 }
 
-// DeleteFlaggedPrompt removes a flagged prompt from the store. It returns
-// ErrNotFound when there is no such prompt.
-func (s *Store) DeleteFlaggedPrompt(ctx context.Context, fingerprint string) error {
-	return affected(s.db.ExecContext(ctx, `DELETE FROM flagged_prompts WHERE fingerprint = ?`, fingerprint))
+// ErrFlagActive means the prompt's flag must end or be cancelled before
+// the prompt can be deleted.
+var ErrFlagActive = errors.New("flagged prompt is active")
+
+// DeleteFlaggedPrompt removes an ended, unpinned prompt from the store. It
+// returns ErrNotFound when there is no such prompt, or ErrFlagActive when
+// the prompt is pinned or still flagged at now.
+func (s *Store) DeleteFlaggedPrompt(ctx context.Context, fingerprint string, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var pinned int
+	var until int64
+	err = tx.QueryRowContext(ctx, `SELECT pinned, flagged_until FROM flagged_prompts WHERE fingerprint = ?`, fingerprint).Scan(&pinned, &until)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if pinned == 1 || until > now.UnixMilli() {
+		return ErrFlagActive
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM flagged_prompts WHERE fingerprint = ?`, fingerprint); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PruneFlaggedPrompts deletes the unpinned prompts that were neither

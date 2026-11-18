@@ -158,22 +158,27 @@ func TestPinnedPromptStaysRefusedUntilUnpinned(t *testing.T) {
 		t.Fatal("unpinned prompt with no running flag still refused")
 	}
 
-	// Deleting removes a pinned or running prompt from memory and the store.
-	if err := f.Pin(ctx, "running"); err != nil {
+	// Deleting refuses a running or pinned prompt, and removes an ended one.
+	if err := f.Delete(ctx, "running"); !errors.Is(err, store.ErrFlagActive) {
+		t.Fatalf("delete while running = %v, want ErrFlagActive", err)
+	}
+	if err := f.Pin(ctx, "over"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Delete(ctx, "running"); err != nil {
+	if err := f.Delete(ctx, "over"); !errors.Is(err, store.ErrFlagActive) {
+		t.Fatalf("delete while pinned = %v, want ErrFlagActive", err)
+	}
+	if err := f.Unpin(ctx, "over"); err != nil {
 		t.Fatal(err)
 	}
-	if refused(f, "running") {
-		t.Fatal("deleted prompt still refused in memory")
+	if err := f.Delete(ctx, "over"); err != nil {
+		t.Fatal(err)
 	}
-	if err := f.Delete(ctx, "running"); !errors.Is(err, store.ErrNotFound) {
+	if err := f.Delete(ctx, "over"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("second delete: %v", err)
 	}
-	_, f = open(t, path)
-	if refused(f, "running") {
-		t.Fatal("deleted prompt loaded after restart")
+	if _, err := f.Get(ctx, "over"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted prompt still readable: %v", err)
 	}
 }
 
