@@ -156,7 +156,10 @@ type activeTurn struct {
 	// upstream generation call that tripped it.
 	risky                       bool
 	riskyRequest, riskyResponse []byte
-	finished                    bool
+	// stuck is set when the turn was cancelled because its session kept
+	// failing generation calls; it is the last failure.
+	stuck    *pool.ModelFailure
+	finished bool
 	// baseSteps is a lower bound of the session's native steps at launch.
 	baseSteps int
 	// The turn's earlier responses reported the model calls before step
@@ -668,14 +671,20 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 	outcome := at.turn.Outcome()
 	account, accountName := at.account.ID(), at.account.Name()
 	failure := at.account.ModelFailure(at.sess.id)
+	truncated := at.account.Truncated(at.sess.id)
 	at.account.ForgetModelFailure(at.sess.id)
 	g.mu.Lock()
-	risky := at.risky
+	risky, stuck := at.risky, at.stuck
 	g.mu.Unlock()
 	if risky {
 		// The session holds the refused input now.
 		g.forget(account, at.sess.id)
 		return g.riskControl(at, r)
+	}
+	if stuck != nil {
+		// The session holds the input of the failed calls now.
+		g.forget(account, at.sess.id)
+		return g.modelFailure(at, r, stuck)
 	}
 	if outcome.Err != nil {
 		g.log.Warn("turn failed", "account", accountName, "session", at.sess.id, "err", outcome.Err)
@@ -719,7 +728,7 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 		return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
 	}
 	finish := conv.FinishStop
-	if outcome.StopReason == agy.StopMaxTokens {
+	if outcome.StopReason == agy.StopMaxTokens || truncated {
 		finish = conv.FinishLength
 	}
 	if !w.send(conv.Event{Finish: finish}) {

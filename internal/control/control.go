@@ -640,23 +640,25 @@ func (c *Control) addToPool(id, name string, env []string, accountProxy string) 
 		}
 		var failure *pool.ModelFailure
 		if callErr != nil {
-			failure = &pool.ModelFailure{Code: callErr.Code, Message: callErr.Message}
+			failure = &pool.ModelFailure{Code: callErr.Code, Message: callErr.Message, Truncated: callErr.Truncated}
 			if callErr.RetryAfter > 0 {
 				failure.Reset = time.Now().Add(callErr.RetryAfter)
 			}
 		}
 		// The call is recorded either way: the account's failure state
 		// does not depend on risk control.
-		risk := account.RecordModelCall(session, model, failure)
-		if !risk || !c.cfg.Flags.Enabled() {
-			return false
+		switch account.RecordModelCall(session, model, failure) {
+		case pool.CallRisky:
+			if !c.cfg.Flags.Enabled() {
+				return false
+			}
+			c.cfg.Gateway.StopRiskySession(account, session, callErr.Request, callErr.Response)
+			return true
+		case pool.CallStuck:
+			c.cfg.Gateway.StopStuckSession(account, session, *failure)
+			return true
 		}
-		var reqBody, respBody []byte
-		if callErr != nil {
-			reqBody, respBody = callErr.Request, callErr.Response
-		}
-		c.cfg.Gateway.StopRiskySession(account, session, reqBody, respBody)
-		return true
+		return false
 	})
 	if err != nil {
 		c.cfg.Egress.Forget(id)

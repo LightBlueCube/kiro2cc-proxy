@@ -32,7 +32,7 @@ type reportedCall struct {
 }
 
 func newAccountProxy(onModelCall ModelCallFunc) *accountProxy {
-	return &accountProxy{onModelCall: onModelCall, stopped: map[string]time.Time{}}
+	return &accountProxy{log: slog.New(slog.DiscardHandler), onModelCall: onModelCall, stopped: map[string]time.Time{}}
 }
 
 func generationRequest(t *testing.T, requestID string) (*http.Request, []byte) {
@@ -93,9 +93,12 @@ func TestWatchModelCallReportsGooglesError(t *testing.T) {
 	html.Request = r
 	ap.watchModelCall(html)
 
-	ok := response("", http.StatusOK, nil, "")
+	ok := response("", http.StatusOK, []byte(stopStream), "")
 	ok.Request = r
 	ap.watchModelCall(ok)
+	if _, err := io.ReadAll(ok.Body); err != nil {
+		t.Fatal(err)
+	}
 
 	noStatus := response("", http.StatusBadRequest, []byte(`{"error": {"code": 400, "message": "Invalid image"}}`), "")
 	noStatus.Request = r

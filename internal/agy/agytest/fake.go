@@ -16,6 +16,12 @@
 //	@ok                  report a model call that succeeded, reply "ok"
 //	@risk429             risk control: report RiskError (a 429 naming no
 //	                     wait) up to RiskAttempts times, then end the turn
+//	@stuck               report StuckError (a 200 with nothing in it) up to
+//	                     StuckAttempts times, as agy retries it without
+//	                     end, then end the turn
+//	@blocked             report BlockedError, then end the turn
+//	@maxtokens           report a call cut off at the output token limit,
+//	                     reply "cut"
 //	@failonce            fail the model call with FailOnceError the first
 //	                     time this process sees this input; later ones get
 //	                     the usual reply
@@ -136,6 +142,9 @@ type ModelCall struct {
 	Code       int           `json:"code"`
 	Message    string        `json:"message,omitempty"`
 	RetryAfter time.Duration `json:"retryAfter,omitempty"`
+	// Truncated marks a call that answered but stopped at the output
+	// token limit (Code 200).
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // UpstreamModel is the model every model call of the fake names.
@@ -150,6 +159,19 @@ const (
 	RiskAttempts   = 6
 	RiskRetryDelay = 20 * time.Millisecond
 )
+
+// StuckError is the call failure of "@stuck": the proxy's verdict on a
+// stream that held nothing. The fake repeats the call StuckAttempts times
+// unless the call report is refused, and then ends the turn; a relay that
+// never stops the session sees the whole run.
+const (
+	StuckError    = "empty response"
+	StuckAttempts = 15
+)
+
+// BlockedError is the call failure of "@blocked": a stream Google's
+// content safety filter stopped.
+const BlockedError = "response blocked by Google's content safety filter (finishReason SAFETY)"
 
 // LoginCode is the authorization code the fake login accepts; it signs in
 // LoginEmail.
@@ -725,6 +747,31 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		}
 		f.addSteps(sessionID, s, stepErrorMessage)
 		return "⚠ " + RiskError, nil
+	case "@stuck":
+		for range StuckAttempts {
+			// A refused report means the relay stopped the session.
+			if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusBadGateway, Message: StuckError}); err != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return "", nil
+			case <-time.After(RiskRetryDelay):
+			}
+		}
+		f.addSteps(sessionID, s, stepErrorMessage)
+		return "⚠ Model produced invalid output.", nil
+	case "@blocked":
+		if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusBadRequest, Message: BlockedError}); err != nil {
+			return "", err
+		}
+		f.addSteps(sessionID, s, stepErrorMessage)
+		return "⚠ Agent execution terminated due to error.", nil
+	case "@maxtokens":
+		if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusOK, Truncated: true}); err != nil {
+			return "", err
+		}
+		return "cut", nil
 	case "@retry429":
 		if err := f.modelCall(ModelCall{Session: sessionID, Code: http.StatusTooManyRequests, Message: CapacityError}); err != nil {
 			return "", err

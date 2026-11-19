@@ -90,6 +90,7 @@ var omittedFields = []string{"modelExperiments", "modelExperimentIds", "supporte
 const disabledSuffix = "-disabled"
 
 type accountProxy struct {
+	log            *slog.Logger
 	proxy          *httputil.ReverseProxy
 	transport      *http.Transport
 	onVerification VerificationFunc
@@ -142,7 +143,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 	prefix := "/" + name
-	ap := &accountProxy{transport: transport, onVerification: onVerification, onModelCall: onModelCall, stopped: map[string]time.Time{}}
+	ap := &accountProxy{log: s.log, transport: transport, onVerification: onVerification, onModelCall: onModelCall, stopped: map[string]time.Time{}}
 	ap.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Path = strings.TrimPrefix(r.In.URL.Path, prefix)

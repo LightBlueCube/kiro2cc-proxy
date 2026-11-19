@@ -152,18 +152,22 @@ func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGatew
 		}
 		seenToken(currentGateway().CallTokenOf(name, call.Session))
 		var failure *pool.ModelFailure
-		if call.Code != http.StatusOK {
+		if call.Code != http.StatusOK || call.Truncated {
 			if call.Code == http.StatusForbidden && strings.Contains(call.Message, "VALIDATION_REQUIRED") {
 				account.SetVerification(true, "https://accounts.google.com/v")
 			}
-			failure = &pool.ModelFailure{Code: call.Code, Message: call.Message}
+			failure = &pool.ModelFailure{Code: call.Code, Message: call.Message, Truncated: call.Truncated}
 			if call.RetryAfter > 0 {
 				failure.Reset = time.Now().Add(call.RetryAfter)
 			}
 		}
-		if account.RecordModelCall(call.Session, call.Model, failure) {
+		switch account.RecordModelCall(call.Session, call.Model, failure) {
+		case pool.CallRisky:
 			stopped.add(call.Session)
 			currentGateway().StopRiskySession(account, call.Session, raw, []byte(call.Message))
+		case pool.CallStuck:
+			stopped.add(call.Session)
+			currentGateway().StopStuckSession(account, call.Session, *failure)
 		}
 	})
 }

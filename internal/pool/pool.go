@@ -99,7 +99,12 @@ type Account struct {
 	// with a 429 that names no wait.
 	calls   []callRecord
 	streaks map[string]*noWaitStreak
-	procs   map[string]*procSlot
+	// failedCalls counts, by session, its consecutive failed calls.
+	failedCalls map[string]int
+	// truncated holds the sessions whose latest generation call stopped
+	// at the output token limit.
+	truncated map[string]bool
+	procs     map[string]*procSlot
 	// models is the ACP model catalog agy last reported for the account,
 	// nil until it opens a session.
 	models []agy.ModelInfo
@@ -191,6 +196,8 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 		cooldown:          map[string]time.Time{},
 		modelFailures:     map[string]ModelFailure{},
 		streaks:           map[string]*noWaitStreak{},
+		failedCalls:       map[string]int{},
+		truncated:         map[string]bool{},
 		procs:             map[string]*procSlot{},
 	}
 	if err := os.MkdirAll(a.workspace, 0o700); err != nil {
@@ -511,6 +518,9 @@ type ModelFailure struct {
 	Message string
 	// Reset is when Google said to retry; zero when it named no time.
 	Reset time.Time
+	// Truncated marks a call that answered but stopped at the output
+	// token limit (Code is 200): the reply is cut off, not failed.
+	Truncated bool
 }
 
 // Risk control: Google answers a request it dislikes with a 429 that names
@@ -526,6 +536,23 @@ const (
 	// riskStreakAlone is how many show it when no other session made a
 	// call on the model meanwhile.
 	riskStreakAlone = 3
+	// stuckCallStreak is how many failed calls in a row, with no call
+	// succeeding between, show a session stuck in agy's retry loop: agy
+	// retries a failing call 8 times, but a call that answers with
+	// nothing usable is retried at once, without end.
+	stuckCallStreak = 10
+)
+
+// CallVerdict is what a generation call shows about its session.
+type CallVerdict int
+
+const (
+	CallOK CallVerdict = iota
+	// CallRisky: the session's request is under risk control.
+	CallRisky
+	// CallStuck: the session keeps failing calls, see stuckCallStreak.
+	// Reported once per turn.
+	CallStuck
 )
 
 // callRecord is one generation call's outcome.
@@ -551,35 +578,54 @@ func isNoWait429(failure *ModelFailure) bool {
 }
 
 // RecordModelCall notes how the session's latest generation call, made
-// on model, went; failure is nil when it succeeded. It reports true when
-// the call shows the session's request is under risk control, once per
+// on model, went; failure is nil when it succeeded. A Truncated failure
+// counts as a call that answered; Truncated tells whether it was the
+// latest. It reports CallRisky when the call shows the session's request
+// is under risk control, once per
 // session turn: the call is the session's second 429 in a row that names
 // no wait while other sessions' calls on the model succeeded, or its
 // third when no other session made a call on the model meanwhile. When
 // another session's call on the model was refused the same way, the
-// trouble is the model's or the account's, not the request's.
-func (a *Account) RecordModelCall(session, model string, failure *ModelFailure) (risk bool) {
+// trouble is the model's or the account's, not the request's. A call is
+// also the stuckCallStreak-th failed one in a row: CallStuck, once per
+// session turn.
+func (a *Account) RecordModelCall(session, model string, failure *ModelFailure) CallVerdict {
 	a.mu.Lock()
 	now := time.Now()
 	a.pruneCallsLocked(now)
 	noWait := isNoWait429(failure)
-	a.calls = append(a.calls, callRecord{at: now, session: session, model: model, ok: failure == nil, noWait: noWait})
-	if failure == nil {
-		delete(a.modelFailures, session)
-	} else {
+	failed := failure != nil && !failure.Truncated
+	a.calls = append(a.calls, callRecord{at: now, session: session, model: model, ok: !failed, noWait: noWait})
+	delete(a.modelFailures, session)
+	delete(a.truncated, session)
+	switch {
+	case failed:
 		a.modelFailures[session] = *failure
+		a.failedCalls[session]++
+	case failure != nil:
+		a.truncated[session] = true
+		delete(a.failedCalls, session)
+	default:
+		delete(a.failedCalls, session)
 	}
+	var risk bool
 	if noWait {
 		risk = a.countNoWaitLocked(session, model, now)
 	} else {
 		delete(a.streaks, session)
 	}
+	stuck := failed && a.failedCalls[session] == stuckCallStreak
 	name := a.name
 	a.mu.Unlock()
-	if risk {
+	switch {
+	case risk:
 		a.pool.log.Warn("request under risk control", "account", name, "session", session, "model", model)
+		return CallRisky
+	case stuck:
+		a.pool.log.Warn("session stuck failing generation calls", "account", name, "session", session, "model", model, "calls", stuckCallStreak)
+		return CallStuck
 	}
-	return risk
+	return CallOK
 }
 
 func (a *Account) pruneCallsLocked(now time.Time) {
@@ -629,11 +675,21 @@ func (a *Account) ModelFailure(session string) *ModelFailure {
 	return &failure
 }
 
-// ForgetModelFailure drops the session's recorded failure and its run of
-// 429s that name no wait.
+// Truncated reports whether the session's latest generation call stopped
+// at the output token limit.
+func (a *Account) Truncated(session string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.truncated[session]
+}
+
+// ForgetModelFailure drops the session's recorded failure, its run of
+// failed calls, its truncated call, and its run of 429s that name no wait.
 func (a *Account) ForgetModelFailure(session string) {
 	a.mu.Lock()
 	delete(a.modelFailures, session)
+	delete(a.failedCalls, session)
+	delete(a.truncated, session)
 	delete(a.streaks, session)
 	a.mu.Unlock()
 }

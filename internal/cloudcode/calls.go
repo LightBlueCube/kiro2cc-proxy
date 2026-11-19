@@ -34,13 +34,17 @@ type CallError struct {
 	// Request is the body agy sent; Response is the decoded error body
 	// Google answered (empty when unreadable or the call never reached Google).
 	Request, Response []byte
+	// Truncated marks a call that answered but stopped at the output
+	// token limit (Code is 200): not a failure, but its reply is cut off.
+	Truncated bool
 }
 
 // ModelCallFunc learns the outcome of each generation call agy makes for
 // a session, before agy does: err is nil when the call succeeded, and
 // model is the upstream model the call named. It returns true to stop the
 // session: the proxy then refuses the session's later generation calls
-// instead of sending them upstream.
+// instead of sending them upstream. The call's response stream is judged
+// when it ends, so err can describe a call Google answered with 200.
 type ModelCallFunc func(session, model string, err *CallError) (stop bool)
 
 // stoppedFor bounds how long a stopped session's calls are refused; the
@@ -104,14 +108,15 @@ func recordResponse(resp *http.Response) {
 	resp.Body = &recordingBody{ReadCloser: resp.Body, pending: c.capture, status: resp.StatusCode}
 }
 
-// watchModelCall reports the outcome of a tagged generation call.
+// watchModelCall reports the outcome of a tagged generation call: at
+// once for a refusal, when its stream ends for an answer.
 func (ap *accountProxy) watchModelCall(resp *http.Response) {
 	c := callOf(resp.Request)
 	if c.session == "" {
 		return
 	}
 	if resp.StatusCode/100 == 2 {
-		ap.report(c, nil)
+		ap.judgeStream(c, resp)
 		return
 	}
 	ce := callError(resp)
@@ -144,6 +149,14 @@ func (ap *accountProxy) isStopped(session string) bool {
 	return ok && time.Since(at) <= stoppedFor
 }
 
+// describeError words Google's error as agy does.
+func describeError(code int, status, message string) string {
+	if status != "" {
+		return fmt.Sprintf("%s (code %d): %s", status, code, message)
+	}
+	return fmt.Sprintf("HTTP %d: %s", code, message)
+}
+
 // callError reads Google's error from resp, leaving its body for agy as it
 // was:
 //
@@ -169,11 +182,7 @@ func callError(resp *http.Response) *CallError {
 	if json.Unmarshal(raw, &body) != nil || body.Error.Message == "" {
 		return result
 	}
-	if body.Error.Status != "" {
-		result.Message = fmt.Sprintf("%s (code %d): %s", body.Error.Status, resp.StatusCode, body.Error.Message)
-	} else {
-		result.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, body.Error.Message)
-	}
+	result.Message = describeError(resp.StatusCode, body.Error.Status, body.Error.Message)
 	for _, d := range body.Error.Details {
 		if d.Type != retryInfoType {
 			continue
