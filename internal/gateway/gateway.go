@@ -363,6 +363,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		}
 		g.mu.Lock()
 		rec.Account, rec.AccountName, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.ID(), at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
+		rec.SessionID = at.sess.id
 		rec.QuotaGroup = r.poolGroup(at.account)
 		at.callToken = rec.CallToken
 		g.mu.Unlock()

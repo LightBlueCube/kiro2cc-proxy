@@ -83,7 +83,10 @@ type Record struct {
 	// attempt started.
 	Account     string
 	AccountName string
-	Mode        Mode
+	// SessionID is the ACP session that served the request, empty when no
+	// attempt started.
+	SessionID string
+	Mode      Mode
 	// ReplayReason is set when Mode is ModeReplay.
 	ReplayReason ReplayReason
 

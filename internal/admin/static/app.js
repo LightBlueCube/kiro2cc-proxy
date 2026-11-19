@@ -1806,7 +1806,9 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
     list.replaceChildren(h("div", {}, h("h2", {}, t("calls.requests")), table([
       { title: t("common.time"), cell: r => stack(fmt.time(r.at),
           r.ttft_ms === null ? fmt.ms(r.duration_ms) : t("calls.time.first_output", { total: fmt.ms(r.duration_ms), first: fmt.ms(r.ttft_ms) })) },
-      { title: t("calls.who"), cell: r => stack(keyName(r.key, r.key_hash),
+      { title: t("calls.who"), cell: r => stack(
+          h("span", {}, h("span", { title: r.key_hash }, r.key || shortHash(r.key_hash)),
+            r.session ? [" · ", h("span", { class: "mono muted", title: r.session }, shortHash(r.session))] : null),
           [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : "", anchorBadge(r.anchor)]) },
       { title: t("calls.model_mode"), cell: r => stack(
           [h("span", { title: r.slug }, r.model), r.effort ? term(" · " + r.effort, t("calls.effort.hint")) : ""],

@@ -2273,6 +2273,19 @@ func TestRecordsNameReplayReasons(t *testing.T) {
 	}
 }
 
+func TestRecordsNameTheirSession(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	model := "gemini-3.8-flash"
+	first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: []conv.Message{user("hello")}})
+	h.complete(ctx, "alice", conv.Request{Model: model, Messages: []conv.Message{user("hello"), {Role: conv.RoleAssistant, Text: first.text}, user("again")}})
+
+	records := h.records.all(t, 2)
+	if records[0].SessionID == "" || records[1].Mode != ModeWarm || records[1].SessionID != records[0].SessionID {
+		t.Errorf("sessions = %q (%s), %q (%s), want one session for both", records[0].SessionID, records[0].Mode, records[1].SessionID, records[1].Mode)
+	}
+}
+
 func TestPositionsKeepOnlyRewindableHistory(t *testing.T) {
 	store, err := openSnapshotStore(filepath.Join(t.TempDir(), "snapshots.json"), time.Hour)
 	if err != nil {

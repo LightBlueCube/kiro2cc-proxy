@@ -50,6 +50,9 @@ type Request struct {
 	QuotaSkip QuotaSkip
 	// CallToken ties the request to the upstream calls captured for it.
 	CallToken string
+	// Session is the ACP session that served the request, empty when no
+	// attempt started.
+	Session string
 	// Upstream counts the request's captured upstream calls still kept;
 	// Requests fills it, AddRequest ignores it.
 	Upstream int
@@ -81,7 +84,7 @@ const StatusCancelled = "cancelled"
 const requestAccountNameExpr = `COALESCE((SELECT name FROM accounts WHERE id = requests.account), NULLIF(requests.account_name, ''), requests.account)`
 
 const requestColumns = `id, at, key_hash, key_name, account, ` + requestAccountNameExpr + `, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
-	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip, call_token`
+	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip, call_token, session`
 
 // AddRequest stores the request, adds its cost to the key's spend, and
 // counts it in the key's totals when it succeeded.
@@ -96,9 +99,9 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, account_name, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
-		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, call_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, call_token, session) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.AccountName, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Anchor, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
-		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup, r.CallToken)
+		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup, r.CallToken, r.Session)
 	if err != nil {
 		return err
 	}
@@ -181,7 +184,7 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter, beforeID int64, l
 		var ttft sql.NullInt64
 		var cost, quota sql.NullFloat64
 		if err := rows.Scan(&r.ID, &at, &r.KeyHash, &r.KeyName, &r.Account, &r.AccountName, &r.Model, &r.Slug, &r.Effort, &r.API, &r.Stream, &r.Anchor, &r.Mode, &r.ReplayReason, &r.Status, &r.Error, &r.Finish,
-			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota, &r.QuotaSkip, &r.CallToken, &r.Upstream); err != nil {
+			&duration, &ttft, &r.Input, &r.Cached, &r.Output, &r.Reasoning, &cost, &r.QuotaGroup, &quota, &r.QuotaSkip, &r.CallToken, &r.Session, &r.Upstream); err != nil {
 			return nil, err
 		}
 		r.At, r.Duration = time.UnixMilli(at), time.Duration(duration)*time.Millisecond

@@ -392,7 +392,7 @@
   "quota_skip.failed": "Could not calculate quota use within 1 hour",
   "calls.requests": "Requests",
   "calls.time.first_output": "{total} · first output {first}",
-  "calls.who": "Key · account · API",
+  "calls.who": "Key · session · account",
   "calls.no_account": "no account",
   "calls.stream.hint": "Streamed (stream: true)",
   "anchor.ok": "Client returned a valid encrypted_content anchor for the latest turn",

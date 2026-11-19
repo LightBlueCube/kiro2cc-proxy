@@ -348,6 +348,23 @@ func TestRenameAccount(t *testing.T) {
 	}
 }
 
+func TestRequestKeepsItsSession(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	if err := st.AddRequest(ctx, Request{At: time.Now(), Status: StatusOK, Session: "S1"}); err != nil {
+		t.Fatal(err)
+	}
+	reqs, err := st.Requests(ctx, RequestFilter{}, 0, 10)
+	if err != nil || len(reqs) != 1 || reqs[0].Session != "S1" {
+		t.Fatalf("requests = %+v, %v, want session S1", reqs, err)
+	}
+}
+
 func TestAccountGroupUsage(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "db"))
 	if err != nil {
