@@ -35,6 +35,7 @@ type modelEntry struct {
 // Offline catalog until an account reports its live one.
 var fallbackModels = []modelEntry{
 	{id: "gemini-4-argon", name: "Gemini 4 Argon", efforts: []string{"low", "medium", "high"}},
+	{id: "gemini-4-neon", name: "Gemini 4 Neon", efforts: []string{"low", "medium", "high", "xhigh"}},
 	{id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", efforts: []string{"low", "medium", "high"}},
 	{id: "gemini-3.1-pro", name: "Gemini 3.1 Pro", efforts: []string{"low", "high"}},
 	{id: "claude-opus-5-5", name: "Claude Opus 5.5", efforts: []string{"low", "medium", "high"}},

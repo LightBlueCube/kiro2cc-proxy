@@ -16,8 +16,14 @@ import (
 )
 
 func TestPrices(t *testing.T) {
+	if err := ValidatePrices(DefaultPrices); err != nil {
+		t.Fatalf("DefaultPrices invalid: %v", err)
+	}
 	if p, ok := priceOf(DefaultPrices, "gemini-4-argon"); !ok || p.Input != 4 {
 		t.Fatalf("argon = %+v %v", p, ok)
+	}
+	if p, ok := priceOf(DefaultPrices, "gemini-4-neon"); !ok || p.Input != 3 || p.Cached != 0.15 || p.CacheWrite != 0 || p.Output != 15 {
+		t.Fatalf("neon = %+v %v", p, ok)
 	}
 	if _, ok := priceOf(DefaultPrices, "gpt-oss-120b-medium"); ok {
 		t.Fatal("a model without a price has one")

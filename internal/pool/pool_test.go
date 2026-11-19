@@ -111,6 +111,7 @@ func TestKeyGroup(t *testing.T) {
 		"gemini-4-carbon":   GroupArgon,
 		"gemini-3.8-flash":  GroupGemini,
 		"gemini-4-hydrogen": GroupGemini,
+		"gemini-4-neon":     GroupGemini,
 		"claude-sonnet-5-5": GroupClaudeGPT,
 		"gpt-oss-120b":      GroupClaudeGPT,
 	} {
@@ -153,9 +154,9 @@ func TestPoolGroup(t *testing.T) {
 		want    map[string]string
 	}{
 		{"pro", newPoolGroupAccount(t, p, "pro", proModels, proBuckets), map[string]string{
-			"gemini-4-argon": GroupArgon, "gemini-4-carbon": GroupArgon, "gemini-3.8-flash": GroupGemini, "claude-opus-5-5": GroupClaudeGPT}},
+			"gemini-4-argon": GroupArgon, "gemini-4-carbon": GroupArgon, "gemini-3.8-flash": GroupGemini, "gemini-4-neon": GroupGemini, "claude-opus-5-5": GroupClaudeGPT}},
 		{"ultra", newPoolGroupAccount(t, p, "ultra", ultraModels, ultraBuckets), map[string]string{
-			"gemini-4-argon": GroupGemini, "gemini-4-carbon": GroupGemini, "gemini-3.8-flash": GroupGemini, "claude-opus-5-5": GroupClaudeGPT}},
+			"gemini-4-argon": GroupGemini, "gemini-4-carbon": GroupGemini, "gemini-3.8-flash": GroupGemini, "gemini-4-neon": GroupGemini, "claude-opus-5-5": GroupClaudeGPT}},
 		{"carbon offered, not sampled", newPoolGroupAccount(t, p, "unsampled", ultraModels, nil), map[string]string{
 			"gemini-4-argon": GroupArgon, "gemini-4-carbon": GroupArgon}},
 		{"sampled without Argon bucket, no carbon", newPoolGroupAccount(t, p, "free", proModels, ultraBuckets), map[string]string{

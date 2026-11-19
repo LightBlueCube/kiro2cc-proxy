@@ -1562,6 +1562,40 @@ func TestXHighAndMaxEffortTiers(t *testing.T) {
 	}
 }
 
+func TestGemini4NeonModel(t *testing.T) {
+	h := newHarness(t, 1, map[int][]string{
+		0: {"FAKE_AGY_MODELS=gemini-4-neon-low,gemini-4-neon-medium,gemini-4-neon-high,gemini-4-neon-xhigh"},
+	})
+	var fallback *conv.ModelInfo
+	for _, m := range h.gw.Models() {
+		if m.ID == "gemini-4-neon" {
+			fallback = &m
+			break
+		}
+	}
+	if fallback == nil || fallback.Name != "Gemini 4 Neon" ||
+		!slices.Equal(fallback.Efforts, []string{"low", "medium", "high", "xhigh"}) {
+		t.Fatalf("fallback gemini-4-neon = %+v", fallback)
+	}
+
+	ctx := context.Background()
+	if r := h.complete(ctx, "alice", conv.Request{Model: "gemini-4-neon", Effort: "xhigh", Messages: []conv.Message{user("hi")}}); r.err != nil {
+		t.Fatalf("complete xhigh = %+v", r.err)
+	}
+	if r := h.complete(ctx, "alice", conv.Request{Model: "gemini-4-neon", Messages: []conv.Message{user("default")}}); r.err != nil {
+		t.Fatalf("complete default = %+v", r.err)
+	}
+	records := h.records.all(t, 2)
+	if records[0].Slug != "gemini-4-neon-xhigh" || records[0].Effort != "xhigh" ||
+		records[0].QuotaGroup != pool.GroupGemini || records[0].KeyGroup != pool.GroupGemini {
+		t.Fatalf("xhigh record = %+v", records[0])
+	}
+	if records[1].Slug != "gemini-4-neon-medium" || records[1].Effort != "medium" ||
+		records[1].QuotaGroup != pool.GroupGemini || records[1].KeyGroup != pool.GroupGemini {
+		t.Fatalf("default record = %+v", records[1])
+	}
+}
+
 // Accounts without a catalog are refreshed before the request is routed,
 // once for concurrent requests; one whose refresh fails is not refreshed
 // again right away and is tried as before.
