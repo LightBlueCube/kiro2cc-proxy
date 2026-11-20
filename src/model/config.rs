@@ -248,7 +248,7 @@ fn default_region() -> String {
 }
 
 fn default_kiro_version() -> String {
-    "2.2.2".to_string()
+    "1.4.236".to_string()
 }
 
 fn default_max_rpm_per_credential() -> u32 {
@@ -268,7 +268,7 @@ fn default_system_version() -> String {
 }
 
 fn default_node_version() -> String {
-    "22.21.1".to_string()
+    "24.22.3".to_string()
 }
 
 fn default_count_tokens_auth_type() -> String {

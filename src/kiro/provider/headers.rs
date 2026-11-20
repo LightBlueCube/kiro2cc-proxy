@@ -9,11 +9,27 @@ use crate::kiro::token_manager::CallContext;
 
 use super::core::{KiroProvider, MAX_RETRIES_PER_CREDENTIAL};
 
-const KIRO_AWS_SDK_JS_VERSION: &str = "1.0.27";
+const KIRO_AWS_SDK_JS_VERSION: &str = "1.0.44";
 const AWS_SDK_UA_PROTOCOL_VERSION: &str = "2.1";
-const CODEWHISPERER_STREAMING_API_VERSION: &str = "1.0.27";
+const CODEWHISPERER_STREAMING_API_VERSION: &str = "1.0.44";
+/// Kiro IDE 1.4.236 内置 KAS agent（`@kiro/agent`）的版本
+const KAS_VERSION: &str = "0.66.119";
+const ACP_CLIENT_TAG: &str = "acp-client/kiro-ide";
 
 impl KiroProvider {
+    /// CreateResponse 的 User-Agent，与 KAS `BackendUserAgentPolicy` 的默认形态一致
+    /// （实验 `user_agent_refactoring_enabled` 默认关闭）。
+    /// 例：`KiroIDE 1.4.236 {machine_id} KAS/0.66.119 acp-client/kiro-ide`
+    fn create_response_user_agent(&self, ctx: &CallContext) -> String {
+        let config = self.token_manager.config();
+        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);
+
+        format!(
+            "KiroIDE {} {} KAS/{} {}",
+            config.kiro_version, machine_id, KAS_VERSION, ACP_CLIENT_TAG
+        )
+    }
+
     /// `(x-amz-user-agent, user-agent)`：AWS SDK 形态的 Kiro IDE 标识
     fn sdk_user_agents(&self, ctx: &CallContext) -> (String, String) {
         let config = self.token_manager.config();
@@ -50,7 +66,7 @@ impl KiroProvider {
         attempt: usize,
         endpoint: &Endpoint,
     ) -> anyhow::Result<HeaderMap> {
-        let (_, user_agent) = self.sdk_user_agents(ctx);
+        let user_agent = self.create_response_user_agent(ctx);
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
