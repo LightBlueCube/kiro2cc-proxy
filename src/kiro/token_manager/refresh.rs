@@ -567,9 +567,9 @@ pub(crate) fn kiro_ide_user_agents(
     let kiro_version = &config.kiro_version;
     KiroIdeUserAgents {
         user_agent: format!(
-            "aws-sdk-js/1.0.0 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.21.1 \
+            "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} \
              api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
-            kiro_version, machine_id
+            config.system_version, config.node_version, kiro_version, machine_id
         ),
         amz_user_agent: format!(
             "{} KiroIDE-{}-{}",

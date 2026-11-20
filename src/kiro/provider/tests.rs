@@ -740,6 +740,35 @@ mod tests {
     }
 
     #[test]
+    fn test_create_response_user_agent_matches_kas_default_shape() {
+        let mut config = Config::default();
+        config.kiro_version = "1.4.236".to_string();
+        let creds = KiroCredentials::default();
+        let provider = create_test_provider(config, creds.clone());
+        let ctx = CallContext {
+            id: 1,
+            credentials: creds,
+            token: "test_token".to_string(),
+            trial: None,
+        };
+        let endpoint = Endpoint::by_name(EndpointName::Runtime, "us-east-1");
+        let request = crate::kiro::create_response::CreateResponseRequest {
+            body: "{}".to_string(),
+            origin: "AI_EDITOR".to_string(),
+            profile_arn: None,
+        };
+
+        let headers = provider
+            .build_create_response_headers(&ctx, &request, 0, &endpoint)
+            .unwrap();
+        let user_agent = headers.get("user-agent").unwrap().to_str().unwrap();
+
+        assert!(user_agent.starts_with("KiroIDE 1.4.236 "));
+        assert!(user_agent.ends_with(" KAS/0.66.119 acp-client/kiro-ide"));
+        assert!(!user_agent.contains("aws-sdk-js"));
+    }
+
+    #[test]
     fn test_create_response_error_bodies_are_recognized() {
         let signature = r#"{"error":{"message":"messages.3.content.0: Invalid `signature` in `thinking` block","type":"invalid_request","code":"kiro:thinking_signature_invalid"}}"#;
         assert!(KiroProvider::is_thinking_signature_invalid(signature));
