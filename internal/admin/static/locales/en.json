@@ -375,6 +375,8 @@
   "calls.tokens.in_out": "{in} in · {out} out",
   "calls.tokens.cached": "{pct} cached",
   "calls.tokens.reasoning": "{n} reasoning",
+  "calls.tokens.serial": "serial tool call",
+  "calls.tokens.serial.hint": "The model asked for several tools in one call and agy runs them one by one.",
   "calls.cost": "List price · quota",
   "calls.cost.hint": "Quota: a call's share of its account's weekly bucket; for a key, the average over the accounts with that bucket",
   "calls.unpriced": { "one": "{count} call of a model without a price", "other": "{count} calls of models without a price" },

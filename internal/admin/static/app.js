@@ -1598,9 +1598,12 @@ const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#0891b2
 function cachePct(input, cached) { return input > 0 ? cached / input : null; }
 
 // tokensCell shows in/out over cache hit and reasoning, for a request or a
-// sum of them.
+// sum of them. A tool_calls response without tokens made no model call.
 function tokensCell(row) {
-  if (!row.input && !row.output) return h("span", { class: "muted" }, "—");
+  if (!row.input && !row.output) {
+    if (row.status === "ok" && row.finish === "tool_calls") return term(t("calls.tokens.serial"), t("calls.tokens.serial.hint"));
+    return h("span", { class: "muted" }, "—");
+  }
   return stack(t("calls.tokens.in_out", { in: fmt.compact(row.input), out: fmt.compact(row.output) }),
     joined(t("calls.tokens.cached", { pct: fmt.pct(cachePct(row.input, row.cached)) }),
       row.reasoning ? t("calls.tokens.reasoning", { n: fmt.compact(row.reasoning) }) : ""));

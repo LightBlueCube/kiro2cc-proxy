@@ -813,6 +813,48 @@ func TestToolLoopResponsesReportTheirOwnCalls(t *testing.T) {
 	}
 }
 
+// A model call that asks for tools one after the other answers its later
+// tools with responses that made no model call, so they report no usage:
+// a response's usage is its own, which clients add up.
+func TestSerialToolCallsReportNoUsageForLaterTools(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+	messages := []conv.Message{user("@serial read read")}
+
+	var calls []result
+	for range 2 {
+		call := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+		if call.finish != conv.FinishToolCalls {
+			t.Fatalf("response %d finish = %q, want tool_calls", len(calls), call.finish)
+		}
+		calls = append(calls, call)
+		messages = append(messages,
+			conv.Message{Role: conv.RoleAssistant, ToolCalls: call.calls},
+			conv.Message{Role: conv.RoleTool, ToolCallID: call.calls[0].ID, Text: "x"})
+	}
+	done := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+
+	want := []conv.Usage{oneCall, {}}
+	for i, call := range calls {
+		if call.usage == nil || *call.usage != want[i] {
+			t.Errorf("tool-call response %d usage %+v, want %+v", i, call.usage, want[i])
+		}
+	}
+	if done.usage == nil || *done.usage != oneCall {
+		t.Errorf("final response usage %+v, want %+v (the turn's total less the one call reported)", done.usage, oneCall)
+	}
+
+	records := h.records.all(t, 3)
+	wantRecorded := []conv.Usage{oneCall, {}, oneCall}
+	for i, r := range records {
+		if r.Usage == nil || *r.Usage != wantRecorded[i] {
+			t.Errorf("record %d usage %+v, want %+v", i, r.Usage, wantRecorded[i])
+		}
+	}
+}
+
 // A position the client left mid-turn has no step count, so the next turn
 // launches knowing only a lower bound; its tool-call response still counts
 // only its own calls.

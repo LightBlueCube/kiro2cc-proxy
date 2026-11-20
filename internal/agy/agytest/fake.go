@@ -7,6 +7,8 @@
 //	@tool NAME JSON      call the client tool NAME, reply "tool said: <result>";
 //	                     a result "@hang" makes it produce nothing until cancelled
 //	@parallel A B ...    call tools A, B, ... through the parallel tool
+//	@serial A B ...      one model call that asks for tools A, B, ... one
+//	                     after the other
 //	@hang                produce nothing until cancelled
 //	@think-hang          a thought, then nothing until cancelled
 //	@overflow            fail the model call: input over the window
@@ -793,6 +795,17 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		if result == "@hang" {
 			<-ctx.Done()
 			return "", nil
+		}
+		return "tool said: " + result, nil
+	case "@serial":
+		f.addSteps(sessionID, s, stepPlanner)
+		result := ""
+		for _, name := range fields[1:] {
+			var err error
+			if result, err = callTool(ctx, s, name, json.RawMessage("{}")); err != nil {
+				return "", err
+			}
+			f.addSteps(sessionID, s, stepGeneric)
 		}
 		return "tool said: " + result, nil
 	case "@parallel":
