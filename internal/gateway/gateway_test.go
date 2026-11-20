@@ -1479,19 +1479,27 @@ func TestSwitchedRequestNamesItsReplayReason(t *testing.T) {
 	}
 }
 
-// userPreferring finds a user whose first-choice account is account.
+// userPreferring finds a user whose first-choice account is account for the
+// opening prompts used by the routing tests.
 func userPreferring(t *testing.T, p *pool.Pool, account string) string {
 	t.Helper()
-	for i := range 100 {
+	prompts := []string{"hi", "one", "one @failonce", "c", "hello", "c0"}
+Search:
+	for i := range 2000 {
 		candidate := fmt.Sprintf("user%d", i)
-		picked, err := p.Pick(candidate, "gemini", nil, nil)
-		if err != nil {
-			t.Fatal(err)
+		keyHash := testCaller(candidate).KeyHash
+		for _, prompt := range prompts {
+			tr := newTranscript([]conv.Message{user(prompt)})
+			picked, err := p.Pick(sessionAffinity(keyHash, tr), "gemini", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			picked.Release()
+			if picked.Name() != account {
+				continue Search
+			}
 		}
-		picked.Release()
-		if picked.Name() == account {
-			return candidate
-		}
+		return candidate
 	}
 	t.Fatalf("no user prefers %s", account)
 	return ""
@@ -2481,6 +2489,40 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	}
 }
 
+func TestSingleKeyDistributesNewSessionsAcrossAccounts(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	h.p.SetTurnsPerAccount(64)
+	ctx := context.Background()
+
+	seen := map[string]int{}
+	for i := range 32 {
+		prompt := fmt.Sprintf("session-%d", i)
+		first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user(prompt)}})
+		if first.err != nil {
+			t.Fatalf("session %d = %+v", i, first.err)
+		}
+		recs := h.records.all(t, 2*i+1)
+		openedOn := recs[2*i].Account
+		seen[openedOn]++
+
+		warm := h.complete(ctx, "alice", conv.Request{
+			Model:    "gemini-3.8-flash",
+			Messages: []conv.Message{user(prompt), {Role: conv.RoleAssistant, Text: first.text}, user("follow-up")},
+		})
+		if warm.err != nil {
+			t.Fatalf("session %d warm = %+v", i, warm.err)
+		}
+		warmRec := h.records.all(t, 2*i+2)[2*i+1]
+		if warmRec.Account != openedOn || warmRec.Mode != ModeWarm {
+			t.Fatalf("session %d warm = %s %s, want %s warm", i, warmRec.Account, warmRec.Mode, openedOn)
+		}
+		if len(seen) == 2 {
+			return
+		}
+	}
+	t.Fatalf("single key only routed new sessions to %v across 32 sessions; want both accounts used", seen)
+}
+
 func TestUnsupportedAccountSlotUntouched(t *testing.T) {
 	h := newHarness(t, 2, map[int][]string{
 		0: {"FAKE_AGY_MODELS=gemini-3.8-flash-low"},
@@ -2638,9 +2680,9 @@ func TestWorkerLimitsAndIdleEviction(t *testing.T) {
 	if s3.err != nil || s4.err != nil || len(h.gw.Sessions()) != 2 {
 		t.Fatalf("s3=%+v s4=%+v sessions=%+v; want 2 sessions after evicting oldest on each account", s3.err, s4.err, h.gw.Sessions())
 	}
-	allRecs := h.records.all(t, 15)
-	if allRecs[11].Account == allRecs[12].Account || allRecs[13].Account != allRecs[11].Account || allRecs[14].Account != allRecs[12].Account {
-		t.Fatalf("dave accounts = %s, %s, %s, %s; want fill both then rotate", allRecs[11].Account, allRecs[12].Account, allRecs[13].Account, allRecs[14].Account)
+	allRecs := h.records.all(t, 17)
+	if allRecs[13].Account == allRecs[14].Account || allRecs[15].Account != allRecs[13].Account || allRecs[16].Account != allRecs[14].Account {
+		t.Fatalf("dave accounts = %s, %s, %s, %s; want fill both then rotate", allRecs[13].Account, allRecs[14].Account, allRecs[15].Account, allRecs[16].Account)
 	}
 }
 

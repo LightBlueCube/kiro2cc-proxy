@@ -460,7 +460,15 @@ func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
 			}
 		}
 	}
-	return g.pool.Pick(r.user, r.model.id, exclude, idle)
+	return g.pool.Pick(sessionAffinity(r.user, r.t), r.model.id, exclude, idle)
+}
+
+// sessionAffinity keys rendezvous account selection by API key and the
+// conversation's opening prefix (system prompt + first message), so one key's
+// distinct sessions spread across accounts while replays of the same
+// conversation stay deterministic.
+func sessionAffinity(user string, t *transcript) string {
+	return user + "\x00" + t.hashes[1]
 }
 
 // openSession creates a session on account and claims it.

@@ -277,18 +277,18 @@ type IdleSessions struct {
 	Oldest time.Time
 }
 
-// Pick reserves a turn slot on the best account for user and model, by
+// Pick reserves a turn slot on the best account for session and model, by
 // the quota group each account charges the model to, skipping excluded
 // accounts (by ID). It first tries accounts with a
 // free worker slot (busy + idle < TurnsPerAccount), ranked by priority and
-// rendezvous hash of (user, account ID), and only falls back to accounts that
+// rendezvous hash of (session, account ID), and only falls back to accounts that
 // must evict an idle worker (oldest idle session first within the same
 // priority) when every eligible account is full. The caller must Release
 // the slot.
-func (p *Pool) Pick(user, model string, exclude map[string]bool, idle map[string]IdleSessions) (*Account, error) {
+func (p *Pool) Pick(session, model string, exclude map[string]bool, idle map[string]IdleSessions) (*Account, error) {
 	ranked := p.Accounts()
 	slices.SortFunc(ranked, func(a, b *Account) int {
-		return compareAccounts(user, a, b, nil)
+		return compareAccounts(session, a, b, nil)
 	})
 	for _, a := range ranked {
 		if exclude[a.id] {
@@ -299,7 +299,7 @@ func (p *Pool) Pick(user, model string, exclude map[string]bool, idle map[string
 		}
 	}
 	slices.SortFunc(ranked, func(a, b *Account) int {
-		return compareAccounts(user, a, b, idle)
+		return compareAccounts(session, a, b, idle)
 	})
 	var reasons []string
 	for _, a := range ranked {
@@ -318,7 +318,7 @@ func (p *Pool) Pick(user, model string, exclude map[string]bool, idle map[string
 	return nil, fmt.Errorf("%w (%s)", ErrNoAccount, strings.Join(reasons, "; "))
 }
 
-func compareAccounts(user string, a, b *Account, idle map[string]IdleSessions) int {
+func compareAccounts(session string, a, b *Account, idle map[string]IdleSessions) int {
 	pa, pb := a.Priority(), b.Priority()
 	switch {
 	case pa > pb:
@@ -341,7 +341,7 @@ func compareAccounts(user string, a, b *Account, idle map[string]IdleSessions) i
 			return 1
 		}
 	}
-	ra, rb := rendezvous(user, a.id), rendezvous(user, b.id)
+	ra, rb := rendezvous(session, a.id), rendezvous(session, b.id)
 	switch {
 	case ra > rb:
 		return -1
@@ -351,8 +351,8 @@ func compareAccounts(user string, a, b *Account, idle map[string]IdleSessions) i
 	return strings.Compare(a.id, b.id)
 }
 
-func rendezvous(user, account string) uint64 {
-	sum := sha256.Sum256([]byte(user + "\x00" + account))
+func rendezvous(session, account string) uint64 {
+	sum := sha256.Sum256([]byte(session + "\x00" + account))
 	return binary.BigEndian.Uint64(sum[:8])
 }
 
