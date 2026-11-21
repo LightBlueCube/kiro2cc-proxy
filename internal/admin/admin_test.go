@@ -1028,6 +1028,20 @@ func TestAccountSignIn(t *testing.T) {
 	if r := c.do("POST", "/admin/api/accounts/"+id+"/pause", nil, nil); r.status != http.StatusOK {
 		t.Fatalf("pause = %d", r.status)
 	}
+	const locReason = "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
+	e.p.Account(id).PauseWithReason(locReason)
+	if r := c.do("GET", "/admin/api/accounts", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"pause_reason":"`+locReason+`"`) {
+		t.Fatalf("accounts with pause_reason = %d %s", r.status, r.raw)
+	}
+	if r := c.do("GET", "/admin/api/workers", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"pause_reason":"`+locReason+`"`) {
+		t.Fatalf("workers with pause_reason = %d %s", r.status, r.raw)
+	}
+	if r := c.do("POST", "/admin/api/accounts/"+id+"/resume", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("resume = %d", r.status)
+	}
+	if r := c.do("GET", "/admin/api/accounts", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"paused":false,"pause_reason":""`) {
+		t.Fatalf("accounts after resume = %d %s", r.status, r.raw)
+	}
 	if err := e.ctl.Settings(); err.TurnsPerAccount == 0 {
 		t.Fatal("settings lost")
 	}

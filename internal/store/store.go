@@ -49,14 +49,15 @@ var migrations = []string{
 		value TEXT NOT NULL DEFAULT ''
 	);
 	CREATE TABLE accounts (
-		id         TEXT PRIMARY KEY,
-		name       TEXT NOT NULL UNIQUE,
-		env        TEXT NOT NULL DEFAULT '[]',
-		proxy      TEXT NOT NULL DEFAULT '',
-		paused     INTEGER NOT NULL DEFAULT 0,
-		priority   INTEGER NOT NULL DEFAULT 0,
-		models     TEXT NOT NULL DEFAULT '[]',
-		created_at INTEGER NOT NULL DEFAULT 0
+		id           TEXT PRIMARY KEY,
+		name         TEXT NOT NULL UNIQUE,
+		env          TEXT NOT NULL DEFAULT '[]',
+		proxy        TEXT NOT NULL DEFAULT '',
+		paused       INTEGER NOT NULL DEFAULT 0,
+		pause_reason TEXT NOT NULL DEFAULT '',
+		priority     INTEGER NOT NULL DEFAULT 0,
+		models       TEXT NOT NULL DEFAULT '[]',
+		created_at   INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE TABLE api_keys (
 		hash        TEXT PRIMARY KEY,

@@ -824,6 +824,7 @@ views.settings = (container, openTopic) => {
 // accountBadge shows why an account is out of rotation, or ready when the
 // account's checks passed.
 function accountBadge(a, ready) {
+  if (a.paused && a.pause_reason) return h("span", { class: "badge bad", title: a.pause_reason }, t("account.unsupported_location"));
   if (a.paused) return h("span", { class: "badge warn" }, t("account.paused"));
   if (a.disabled) return h("span", { class: "badge bad", title: a.disabled }, t("account.needs_signin"));
   if (a.blocked) return h("span", { class: "badge bad", title: a.blocked }, t("account.no_proxy"));
@@ -1024,6 +1025,15 @@ views.accounts = container => {
     return { node, sync };
   }
 
+  // locationPauseNotice explains why the account was auto-paused and reminds
+  // the admin to change its proxy before resuming manually.
+  function locationPauseNotice(a) {
+    if (!a.paused || !a.pause_reason) return null;
+    return h("div", { class: "card" },
+      h("p", { class: "bad" }, t("accounts.location_paused")),
+      h("p", { class: "bad mono" }, a.pause_reason));
+  }
+
   // verifyNotice tells what to do about Google's verification request.
   function verifyNotice(a) {
     if (!a.verify) return null;
@@ -1144,6 +1154,7 @@ views.accounts = container => {
       a.user ? h("p", {}, `${a.user.email} · ${a.user.tier || a.user.plan}`) : null,
       a.disabled ? h("p", { class: "bad" }, a.disabled) : null,
       a.blocked ? h("p", { class: "bad" }, a.blocked) : null,
+      locationPauseNotice(a),
       verifyNotice(a),
       Object.entries(a.cooldowns).map(([group, until]) => h("p", { class: "warn" }, t("accounts.cooldown", { group, time: fmt.until(until) }))),
       a.sample_error ? h("p", { class: "bad mono" }, t("accounts.sample_error", { error: a.sample_error })) : null,
@@ -1161,7 +1172,8 @@ views.accounts = container => {
     updateCardControls(entry, a);
   }
 
-  const outOfRotation = a => a.paused ? t("account.paused") : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy")
+  const outOfRotation = a => a.paused ? (a.pause_reason ? t("account.unsupported_location") : t("account.paused"))
+    : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy")
     : a.verify ? t("account.needs_verification") : "";
 
   // accountSet shows the first account in rotation and how many more

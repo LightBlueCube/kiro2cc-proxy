@@ -57,6 +57,25 @@ func TestProxyEnvAndBlocking(t *testing.T) {
 		t.Fatalf("enabled pick = %v, %v, %+v", got, err, a.Status())
 	}
 	a.Release()
+
+	const locErr = "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
+	if !a.PauseWithReason(locErr) {
+		t.Fatal("first PauseWithReason should report change")
+	}
+	if a.PauseWithReason(locErr) {
+		t.Fatal("duplicate PauseWithReason should report no change")
+	}
+	if _, err := p.Pick("u", "gemini-3.8-flash", nil, nil); !errors.Is(err, ErrNoAccount) || !a.Status().Paused || a.Status().PauseReason != locErr {
+		t.Fatalf("auto-paused account picked: %v, %+v", err, a.Status())
+	}
+	if err := a.Available("gemini"); err == nil {
+		t.Fatal("auto-paused account should be unavailable")
+	}
+	a.SetPaused(false)
+	if got, err := p.Pick("u", "gemini-3.8-flash", nil, nil); err != nil || got != a || a.Status().Paused || a.Status().PauseReason != "" {
+		t.Fatalf("resumed pick = %v, %v, %+v", got, err, a.Status())
+	}
+	a.Release()
 }
 
 func TestPriorityAndAllowedModels(t *testing.T) {

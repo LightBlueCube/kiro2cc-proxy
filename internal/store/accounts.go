@@ -20,8 +20,10 @@ type Account struct {
 	Env []string
 	// Proxy is the HTTP proxy URL agy's traffic goes through ("" = none).
 	Proxy string
-	// Paused takes the account out of rotation.
-	Paused bool
+	// Paused takes the account out of rotation; PauseReason records why
+	// agyrelay paused it automatically ("" when paused manually).
+	Paused      bool
+	PauseReason string
 	// Priority orders accounts in rotation; higher values take requests
 	// first.
 	Priority int
@@ -32,7 +34,7 @@ type Account struct {
 }
 
 func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, env, proxy, paused, priority, models, created_at FROM accounts ORDER BY name, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, env, proxy, paused, pause_reason, priority, models, created_at FROM accounts ORDER BY name, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +44,7 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 		var a Account
 		var env, models string
 		var created int64
-		if err := rows.Scan(&a.ID, &a.Name, &env, &a.Proxy, &a.Paused, &a.Priority, &models, &created); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &env, &a.Proxy, &a.Paused, &a.PauseReason, &a.Priority, &models, &created); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(env), &a.Env); err != nil {
@@ -69,8 +71,8 @@ func (s *Store) AddAccount(ctx context.Context, a Account) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts (id, name, env, proxy, paused, priority, models, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.Name, string(env), a.Proxy, a.Paused, a.Priority, string(models), a.CreatedAt.Unix())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts (id, name, env, proxy, paused, pause_reason, priority, models, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.Name, string(env), a.Proxy, a.Paused, a.PauseReason, a.Priority, string(models), a.CreatedAt.Unix())
 	return uniqueErr(err)
 }
 
@@ -108,8 +110,11 @@ func (s *Store) SetAccountRouting(ctx context.Context, id string, priority int, 
 	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET priority = ?, models = ? WHERE id = ?`, priority, string(encoded), id))
 }
 
-func (s *Store) SetAccountPaused(ctx context.Context, id string, paused bool) error {
-	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET paused = ? WHERE id = ?`, paused, id))
+func (s *Store) SetAccountPaused(ctx context.Context, id string, paused bool, reason string) error {
+	if !paused {
+		reason = ""
+	}
+	return affected(s.db.ExecContext(ctx, `UPDATE accounts SET paused = ?, pause_reason = ? WHERE id = ?`, paused, reason, id))
 }
 
 func (s *Store) RemoveAccount(ctx context.Context, id string) error {

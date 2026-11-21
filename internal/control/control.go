@@ -330,7 +330,11 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 		if err != nil {
 			return nil, err
 		}
-		account.SetPaused(a.Paused)
+		if a.Paused && a.PauseReason != "" {
+			account.PauseWithReason(a.PauseReason)
+		} else {
+			account.SetPaused(a.Paused)
+		}
 		account.SetRouting(a.Priority, a.Models)
 	}
 	if cfg.Gateway != nil {
@@ -633,6 +637,8 @@ func (c *Control) addToPool(id, name string, env []string, accountProxy string) 
 			return
 		}
 		account.SetVerification(true, v.URL)
+	}, func(reason string) {
+		c.pauseAccountForLocation(id, reason)
 	}, func(session, model string, callErr *cloudcode.CallError) bool {
 		account := c.cfg.Pool.Account(id)
 		if account == nil {
@@ -674,12 +680,33 @@ func (c *Control) addToPool(id, name string, env []string, accountProxy string) 
 	return account, nil
 }
 
+const autoPauseTimeout = 5 * time.Second
+
+// pauseAccountForLocation takes an account out of rotation and persists the
+// reason after Google rejects its exit location. The account stays paused
+// across restarts and proxy edits until an administrator manually resumes it.
+func (c *Control) pauseAccountForLocation(id, reason string) {
+	account := c.cfg.Pool.Account(id)
+	if account == nil {
+		return
+	}
+	if !account.PauseWithReason(reason) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), autoPauseTimeout)
+	defer cancel()
+	if err := c.cfg.Store.SetAccountPaused(ctx, id, true, reason); err != nil {
+		c.log.Error("failed to persist account pause for unsupported location", "account", account.Name(), "err", err)
+	}
+	c.log.Error("account paused because Google rejected its location; change its proxy and resume manually", "account", account.Name(), "reason", reason)
+}
+
 func (c *Control) SetAccountPaused(ctx context.Context, id string, paused bool) error {
 	account := c.cfg.Pool.Account(id)
 	if account == nil {
 		return store.ErrNotFound
 	}
-	if err := c.cfg.Store.SetAccountPaused(ctx, id, paused); err != nil {
+	if err := c.cfg.Store.SetAccountPaused(ctx, id, paused, ""); err != nil {
 		return err
 	}
 	account.SetPaused(paused)

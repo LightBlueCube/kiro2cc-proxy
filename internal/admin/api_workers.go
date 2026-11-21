@@ -17,16 +17,17 @@ type workersView struct {
 }
 
 type accountWorkersView struct {
-	ID       string        `json:"id"`
-	Name     string        `json:"name"`
-	Paused   bool          `json:"paused"`
-	Disabled string        `json:"disabled"`
-	Blocked  string        `json:"blocked"`
-	Verify   bool          `json:"verify"`
-	Turns    int           `json:"turns"`
-	Procs    []procView    `json:"procs"`
-	Sessions []sessionView `json:"sessions"`
-	Egress   *egressView   `json:"egress"`
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Paused      bool          `json:"paused"`
+	PauseReason string        `json:"pause_reason"`
+	Disabled    string        `json:"disabled"`
+	Blocked     string        `json:"blocked"`
+	Verify      bool          `json:"verify"`
+	Turns       int           `json:"turns"`
+	Procs       []procView    `json:"procs"`
+	Sessions    []sessionView `json:"sessions"`
+	Egress      *egressView   `json:"egress"`
 }
 
 type procView struct {
@@ -117,7 +118,7 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 	out := workersView{Accounts: []accountWorkersView{}, Now: time.Now()}
 	for _, account := range h.pool.Accounts() {
 		st := account.Status()
-		v := accountWorkersView{ID: st.ID, Name: st.Name, Paused: st.Paused, Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, Turns: st.Turns,
+		v := accountWorkersView{ID: st.ID, Name: st.Name, Paused: st.Paused, PauseReason: st.PauseReason, Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, Turns: st.Turns,
 			Procs: []procView{}, Sessions: sessionsByAccount[st.ID]}
 		workerOf := map[string]int{}
 		for _, proc := range account.LiveProcs() {

@@ -79,11 +79,13 @@ type Account struct {
 	// runs maps the turns that make model calls to when they began; a turn
 	// waiting for tool results is not in it.
 	runs map[any]time.Time
-	// paused is set by the admin; disabled by a failed sign-in; blocked
-	// by the control plane (no route for the account's traffic).
-	paused   bool
-	disabled error
-	blocked  error
+	// paused is set by the admin or automatically (with pauseReason);
+	// disabled by a failed sign-in; blocked by the control plane (no route
+	// for the account's traffic).
+	paused      bool
+	pauseReason string
+	disabled    error
+	blocked     error
 	// verify is set while Google wants the account's owner to verify the
 	// account; verifyURL is Google's page for that ("" when it named none).
 	verify    bool
@@ -121,11 +123,12 @@ type Account struct {
 
 // Status is a point-in-time view of an account.
 type Status struct {
-	ID       string
-	Name     string
-	Paused   bool
-	Disabled string
-	Blocked  string
+	ID          string
+	Name        string
+	Paused      bool
+	PauseReason string
+	Disabled    string
+	Blocked     string
 	// Verify is set while Google wants the account verified; VerifyURL is
 	// its page for that, "" when it named none.
 	Verify    bool
@@ -475,6 +478,9 @@ func (a *Account) CooldownRemaining(group string) time.Duration {
 
 func (a *Account) unavailableLocked(group string) error {
 	if a.paused {
+		if a.pauseReason != "" {
+			return errors.New("paused: " + a.pauseReason)
+		}
 		return errors.New("paused by the admin")
 	}
 	if a.disabled != nil {
@@ -730,7 +736,20 @@ func (a *Account) Enable() {
 func (a *Account) SetPaused(paused bool) {
 	a.mu.Lock()
 	a.paused = paused
+	a.pauseReason = ""
 	a.mu.Unlock()
+}
+
+// PauseWithReason takes the account out of rotation with a persisted reason
+// (e.g. Google rejected its exit location) until manually resumed. It reports
+// whether the pause state or reason changed.
+func (a *Account) PauseWithReason(reason string) bool {
+	a.mu.Lock()
+	changed := !a.paused || a.pauseReason != reason
+	a.paused = true
+	a.pauseReason = reason
+	a.mu.Unlock()
+	return changed
 }
 
 // Home is the account's HOME directory.
@@ -784,7 +803,7 @@ func (a *Account) Blocked() error {
 func (a *Account) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	st := Status{ID: a.id, Name: a.name, Paused: a.paused, Turns: a.turns, Cooldowns: map[string]time.Time{}}
+	st := Status{ID: a.id, Name: a.name, Paused: a.paused, PauseReason: a.pauseReason, Turns: a.turns, Cooldowns: map[string]time.Time{}}
 	if a.disabled != nil {
 		st.Disabled = a.disabled.Error()
 	}

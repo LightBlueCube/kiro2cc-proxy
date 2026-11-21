@@ -32,6 +32,7 @@ type accountView struct {
 	Proxy         string                   `json:"proxy"`
 	Route         string                   `json:"route"`
 	Paused        bool                     `json:"paused"`
+	PauseReason   string                   `json:"pause_reason"`
 	Priority      int                      `json:"priority"`
 	AllowedModels []string                 `json:"allowed_models"`
 	Disabled      string                   `json:"disabled"`
@@ -168,7 +169,7 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			allowed = []string{}
 		}
 		v := accountView{
-			ID: st.ID, Name: st.Name, Paused: st.Paused, Priority: account.Priority(), AllowedModels: allowed,
+			ID: st.ID, Name: st.Name, Paused: st.Paused, PauseReason: st.PauseReason, Priority: account.Priority(), AllowedModels: allowed,
 			Disabled: st.Disabled, Blocked: st.Blocked, Verify: st.Verify, VerifyURL: st.VerifyURL, Cooldowns: st.Cooldowns,
 			Turns: st.Turns, Procs: st.Procs, Login: h.control.LoginPending(st.ID), EnvNames: []string{},
 		}
@@ -344,6 +345,9 @@ func (h *Handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
 	case err != nil && h.awaitsVerification(id):
 		writeError(w, http.StatusBadGateway, "Google asks for the account to be verified first: open the link on its card, "+
 			"finish the check, then refresh. Quota refresh failed: "+err.Error())
+	case err != nil && h.locationPaused(id):
+		writeError(w, http.StatusBadGateway, "Google rejected this account's location, so it has been paused: change its proxy to a supported region, "+
+			"then click Resume. Quota refresh failed: "+err.Error())
 	case err != nil:
 		writeError(w, http.StatusBadGateway, "quota refresh failed: "+err.Error())
 	default:
@@ -354,6 +358,15 @@ func (h *Handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) awaitsVerification(id string) bool {
 	account := h.pool.Account(id)
 	return account != nil && account.Status().Verify
+}
+
+func (h *Handler) locationPaused(id string) bool {
+	account := h.pool.Account(id)
+	if account == nil {
+		return false
+	}
+	st := account.Status()
+	return st.Paused && st.PauseReason != ""
 }
 
 func (h *Handler) startLogin(w http.ResponseWriter, r *http.Request) {

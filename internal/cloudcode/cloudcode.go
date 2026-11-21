@@ -90,11 +90,12 @@ var omittedFields = []string{"modelExperiments", "modelExperimentIds", "supporte
 const disabledSuffix = "-disabled"
 
 type accountProxy struct {
-	log            *slog.Logger
-	proxy          *httputil.ReverseProxy
-	transport      *http.Transport
-	onVerification VerificationFunc
-	onModelCall    ModelCallFunc
+	log                   *slog.Logger
+	proxy                 *httputil.ReverseProxy
+	transport             *http.Transport
+	onVerification        VerificationFunc
+	onLocationUnsupported LocationUnsupportedFunc
+	onModelCall           ModelCallFunc
 
 	mu sync.Mutex
 	// stopped maps the sessions whose generation calls are refused to when
@@ -129,9 +130,10 @@ func (s *Server) Close() error { return s.http.Close() }
 // Register routes the account's Cloud Code traffic through egressURL (its
 // egress proxy URL with credentials) and returns the endpoint its agy
 // must use. onVerification learns whether Google wants the account
-// verified; onModelCall learns how each generation call went and may stop
-// a session.
-func (s *Server) Register(name, egressURL string, onVerification VerificationFunc, onModelCall ModelCallFunc) (string, error) {
+// verified; onLocationUnsupported learns when Google rejects a call for
+// the account's exit location; onModelCall learns how each generation
+// call went and may stop a session.
+func (s *Server) Register(name, egressURL string, onVerification VerificationFunc, onLocationUnsupported LocationUnsupportedFunc, onModelCall ModelCallFunc) (string, error) {
 	egress, err := url.Parse(egressURL)
 	if err != nil {
 		return "", fmt.Errorf("egress URL for %s: %w", name, err)
@@ -143,7 +145,14 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 	prefix := "/" + name
-	ap := &accountProxy{log: s.log, transport: transport, onVerification: onVerification, onModelCall: onModelCall, stopped: map[string]time.Time{}}
+	ap := &accountProxy{
+		log:                   s.log,
+		transport:             transport,
+		onVerification:        onVerification,
+		onLocationUnsupported: onLocationUnsupported,
+		onModelCall:           onModelCall,
+		stopped:               map[string]time.Time{},
+	}
 	ap.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Path = strings.TrimPrefix(r.In.URL.Path, prefix)
@@ -159,6 +168,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
 			s.watchVerification(name, resp)
+			ap.watchUnsupportedLocation(resp)
 			ap.watchModelCall(resp)
 			recordResponse(resp)
 			if !isCatalog(resp.Request) || resp.StatusCode != http.StatusOK {

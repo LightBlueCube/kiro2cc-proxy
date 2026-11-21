@@ -156,6 +156,9 @@ func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGatew
 			if call.Code == http.StatusForbidden && strings.Contains(call.Message, "VALIDATION_REQUIRED") {
 				account.SetVerification(true, "https://accounts.google.com/v")
 			}
+			if call.Code == http.StatusBadRequest && isLocationUnsupported(call.Message) {
+				account.PauseWithReason(call.Message)
+			}
 			failure = &pool.ModelFailure{Code: call.Code, Message: call.Message, Truncated: call.Truncated}
 			if call.RetryAfter > 0 {
 				failure.Reset = time.Now().Add(call.RetryAfter)
@@ -2761,6 +2764,13 @@ func TestUpstreamErrorsPassThrough(t *testing.T) {
 			wantMsg:  "INVALID_ARGUMENT (code 400): unsupported image",
 		},
 		{
+			name:     "400 unsupported location passes message through when last account",
+			code:     "400",
+			msg:      "FAILED_PRECONDITION (code 400): User location is not supported for the API use.",
+			wantKind: conv.ErrInvalidRequest,
+			wantMsg:  "FAILED_PRECONDITION (code 400): User location is not supported for the API use.",
+		},
+		{
 			name:       "413 payload too large",
 			code:       "413",
 			msg:        "HTTP 413 Request Entity Too Large",
@@ -2845,14 +2855,16 @@ func TestUpstreamErrorsPassThrough(t *testing.T) {
 	// a retryable error with a short Retry-After, and its retry is served
 	// by the second account.
 	for _, tc := range []struct {
-		name string
-		code string
-		msg  string
+		name      string
+		code      string
+		msg       string
+		wantInMsg string
 	}{
-		{"401", "401", "UNAUTHENTICATED (code 401): bad token"},
-		{"403-permission", "403", "PERMISSION_DENIED (code 403): caller lacks entitlement"},
-		{"403-validation", "403", "PERMISSION_DENIED (code 403): VALIDATION_REQUIRED"},
-		{"404", "404", "NOT_FOUND (code 404): model missing"},
+		{"400-location", "400", "FAILED_PRECONDITION (code 400): User location is not supported for the API use.", "FAILED_PRECONDITION (code 400): User location is not supported for the API use."},
+		{"401", "401", "UNAUTHENTICATED (code 401): bad token", ""},
+		{"403-permission", "403", "PERMISSION_DENIED (code 403): caller lacks entitlement", ""},
+		{"403-validation", "403", "PERMISSION_DENIED (code 403): VALIDATION_REQUIRED", ""},
+		{"404", "404", "NOT_FOUND (code 404): model missing", ""},
 	} {
 		t.Run("switch/"+tc.name, func(t *testing.T) {
 			h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=" + tc.code, "FAKE_AGY_FAIL_MSG=" + tc.msg}})
@@ -2861,6 +2873,9 @@ func TestUpstreamErrorsPassThrough(t *testing.T) {
 			if first.err == nil || first.err.Kind != conv.ErrOverloaded || first.err.HTTPStatus != 0 || first.err.RetryAfterSeconds != switchRetryAfterSeconds ||
 				!strings.Contains(first.err.Message, "next request switches to another account") {
 				t.Fatalf("first on %s = %+v, want a retryable 503 with the switch notice", tc.name, first.err)
+			}
+			if tc.wantInMsg != "" && !strings.Contains(first.err.Message, tc.wantInMsg) {
+				t.Fatalf("first on %s message = %q, want upstream text %q", tc.name, first.err.Message, tc.wantInMsg)
 			}
 			if strings.Contains(strings.ToLower(first.err.Message), "verify") {
 				t.Fatalf("message leaked verify: %q", first.err.Message)

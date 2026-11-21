@@ -280,6 +280,22 @@ func TestAccountRouting(t *testing.T) {
 	if err := st.SetAccountRouting(ctx, "nobody", 1, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown account = %v", err)
 	}
+
+	const reason = "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
+	if err := st.SetAccountPaused(ctx, id, true, reason); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err = st.Accounts(ctx)
+	if err != nil || !accounts[0].Paused || accounts[0].PauseReason != reason {
+		t.Fatalf("paused account = %+v, %v", accounts, err)
+	}
+	if err := st.SetAccountPaused(ctx, id, false, reason); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err = st.Accounts(ctx)
+	if err != nil || accounts[0].Paused || accounts[0].PauseReason != "" {
+		t.Fatalf("resumed account = %+v, %v", accounts, err)
+	}
 }
 
 func TestRenameAccount(t *testing.T) {

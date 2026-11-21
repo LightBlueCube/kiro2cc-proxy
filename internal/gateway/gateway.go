@@ -918,6 +918,13 @@ var contextOverflow = regexp.MustCompile(`exceeds the maximum number of tokens a
 
 const statusSiteOverloaded = 529
 
+// isLocationUnsupported reports whether a 400 model failure message is
+// Google's FAILED_PRECONDITION rejection for an unsupported exit location.
+func isLocationUnsupported(msg string) bool {
+	return strings.HasPrefix(msg, "FAILED_PRECONDITION ") &&
+		strings.Contains(strings.ToLower(msg), "user location is not supported")
+}
+
 // modelFailure maps the failed model call that ended the turn. Messages
 // pass through: clients recognize overflow by their text as well. A 429
 // that names a retry time is the account's quota: the account cools down
@@ -943,6 +950,10 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 	switch {
 	case failure.Code == http.StatusBadRequest && contextOverflow.MatchString(failure.Message):
 		return rejected(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message})
+	case failure.Code == http.StatusBadRequest && isLocationUnsupported(failure.Message):
+		// The account's exit location is unsupported (cloudcode already paused
+		// it); pass Google's message through and let the conversation switch.
+		return definite(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message}, 0)
 	case failure.Code == http.StatusRequestEntityTooLarge:
 		return rejected(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message, HTTPStatus: failure.Code})
 	case failure.Code == http.StatusBadRequest:
