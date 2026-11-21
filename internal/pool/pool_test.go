@@ -216,3 +216,72 @@ func TestPickByAccountPoolGroup(t *testing.T) {
 		t.Fatalf("pick with the Gemini group cooling on ultra and Argon on pro: %v", err)
 	}
 }
+
+func TestCooldownSetAndSync(t *testing.T) {
+	p, err := New(Config{TurnsPerAccount: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := p.Add(AccountConfig{Name: "a", Home: filepath.Join(t.TempDir(), "a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	longUntil := time.Now().Add(5 * 24 * time.Hour)
+	shortUntil := time.Now().Add(2 * time.Hour)
+	a.Cool(GroupGemini, longUntil)
+	a.Cool(GroupClaudeGPT, longUntil)
+
+	// SyncCooldowns clears groups with quota available and shortens groups whose
+	// only remaining exhaustion is a shorter window (e.g. weekly reset, 5h at 0).
+	asOf := time.Now()
+	a.SyncCooldowns(map[string]time.Time{GroupGemini: shortUntil}, asOf)
+	st := a.Status()
+	if got := st.Cooldowns[GroupGemini]; !got.Equal(shortUntil) {
+		t.Fatalf("gemini cooldown = %v, want %v", got, shortUntil)
+	}
+	if _, ok := st.Cooldowns[GroupClaudeGPT]; ok {
+		t.Fatalf("claude-gpt cooldown not cleared: %v", st.Cooldowns)
+	}
+
+	// A brand-new cooldown recorded after asOf (while the quota RPC was in
+	// flight) is kept when SyncCooldowns omits it, unless the sample extends it.
+	inFlightStart := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	freshUntil := time.Now().Add(3 * time.Hour)
+	a.Cool(GroupClaudeGPT, freshUntil)
+
+	a.SyncCooldowns(map[string]time.Time{}, inFlightStart)
+	st = a.Status()
+	if _, ok := st.Cooldowns[GroupGemini]; ok {
+		t.Fatalf("older gemini cooldown not cleared: %v", st.Cooldowns)
+	}
+	if got := st.Cooldowns[GroupClaudeGPT]; !got.Equal(freshUntil) {
+		t.Fatalf("in-flight claude-gpt cooldown lost: got %v, want %v", got, freshUntil)
+	}
+
+	// Extending an in-flight cooldown still takes the later reset time.
+	laterUntil := freshUntil.Add(time.Hour)
+	a.SetCooldown(GroupClaudeGPT, laterUntil, inFlightStart)
+	if got := a.Status().Cooldowns[GroupClaudeGPT]; !got.Equal(laterUntil) {
+		t.Fatalf("extended cooldown = %v, want %v", got, laterUntil)
+	}
+
+	// Re-writing the same deadline keeps the original SetAt so debounce timers
+	// do not reset on repeated exhausted refreshes.
+	origSetAt := a.Cooldowns()[GroupClaudeGPT].SetAt
+	if origSetAt.IsZero() {
+		t.Fatal("Cooldowns() returned zero SetAt")
+	}
+	time.Sleep(2 * time.Millisecond)
+	a.SetCooldown(GroupClaudeGPT, laterUntil, time.Now())
+	if got := a.Cooldowns()[GroupClaudeGPT].SetAt; !got.Equal(origSetAt) {
+		t.Fatalf("unchanged SetCooldown bumped SetAt: got %v, want %v", got, origSetAt)
+	}
+
+	// SetCooldown with zero clears the cooldown once asOf is past its setAt.
+	a.SetCooldown(GroupClaudeGPT, time.Time{}, time.Now())
+	if len(a.Status().Cooldowns) != 0 || len(a.Cooldowns()) != 0 {
+		t.Fatalf("cooldowns after clear = %v, want empty", a.Status().Cooldowns)
+	}
+}

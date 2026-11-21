@@ -90,7 +90,7 @@ func (m *Monitor) SampleRunning(ctx context.Context, account *pool.Account) {
 	if proc == nil {
 		return // no agy, or its idle sessions were all closed
 	}
-	if _, err := m.sample(ctx, account, proc); err == nil {
+	if _, err := m.sample(ctx, account, proc, cooldownBackground); err == nil {
 		account.Enable()
 	}
 }
@@ -184,7 +184,7 @@ func withLanguageServer(procs []*agy.Proc) (*agy.Proc, error) {
 // when a request meets that, until a new sign-in or successful refresh
 // restores it.
 func (m *Monitor) Refresh(ctx context.Context, account *pool.Account) (AccountQuota, error) {
-	q, authOK, err := m.tryRefresh(ctx, account)
+	q, authOK, err := m.tryRefresh(ctx, account, cooldownRefresh)
 	finishRefresh(account, authOK, err)
 	return q, err
 }
@@ -201,11 +201,11 @@ func finishRefresh(account *pool.Account, authOK bool, err error) {
 // TryRefresh is Refresh that leaves a refused sign-in to the caller, for
 // trying a sign-in the account may not keep.
 func (m *Monitor) TryRefresh(ctx context.Context, account *pool.Account) (AccountQuota, error) {
-	q, _, err := m.tryRefresh(ctx, account)
+	q, _, err := m.tryRefresh(ctx, account, cooldownReplace)
 	return q, err
 }
 
-func (m *Monitor) tryRefresh(ctx context.Context, account *pool.Account) (AccountQuota, bool, error) {
+func (m *Monitor) tryRefresh(ctx context.Context, account *pool.Account, mode cooldownSyncMode) (AccountQuota, bool, error) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	proc, err := account.Proc(ctx, m.cfg.Profile)
@@ -228,7 +228,7 @@ func (m *Monitor) tryRefresh(ctx context.Context, account *pool.Account) (Accoun
 		q, _ := m.Latest(account.ID())
 		return q, false, err
 	}
-	q, err := m.sample(ctx, account, proc)
+	q, err := m.sample(ctx, account, proc, mode)
 	return q, true, err
 }
 
@@ -242,7 +242,7 @@ func (m *Monitor) closeProbe(account string, proc *agy.Proc, sessionID string) {
 	}
 }
 
-func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.Proc) (AccountQuota, error) {
+func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.Proc, mode cooldownSyncMode) (AccountQuota, error) {
 	m.sampleMu.Lock()
 	defer m.sampleMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
@@ -250,6 +250,7 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 	id, name := account.ID(), account.Name()
 	oldestRun, _ := account.OldestRun()
 	user, err := proc.UserStatus(ctx)
+	fetchedAt := time.Now()
 	var groups []agy.QuotaGroup
 	if err == nil {
 		groups, err = proc.Quota(ctx)
@@ -261,6 +262,7 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 	}
 	q := AccountQuota{At: time.Now(), User: user, Groups: groups}
 	m.mu.Lock()
+	prev := m.latest[id]
 	m.latest[id] = q
 	m.mu.Unlock()
 
@@ -268,15 +270,12 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 	var bucketGroups []string
 	for _, g := range groups {
 		for _, b := range g.Buckets {
-			group := BucketGroup(b.ID)
-			bucketGroups = append(bucketGroups, group)
-			if group != "" && b.Remaining <= 0 && b.ResetAt.After(q.At) {
-				account.Cool(group, b.ResetAt)
-			}
+			bucketGroups = append(bucketGroups, BucketGroup(b.ID))
 			samples = append(samples, store.QuotaSample{Account: id, At: q.At, Bucket: b.ID, Group: g.Name, Window: b.Window, Remaining: b.Remaining, ResetAt: b.ResetAt})
 		}
 	}
 	account.SetQuotaGroups(bucketGroups)
+	applySampleCooldowns(account, prev, q, fetchedAt, mode)
 	if err := m.cfg.Store.AddQuotaSamples(ctx, samples); err != nil {
 		m.cfg.Log.Error("quota samples not stored", "account", name, "err", err)
 		return q, nil
@@ -286,6 +285,143 @@ func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.P
 		m.cfg.OnSample(ctx, id, q.At, oldestRun)
 	}
 	return q, nil
+}
+
+// minQuotaResetJump is the minimum upward jump in a relevant bucket's
+// remaining fraction that an explicit Refresh immediately trusts as a quota
+// reset (well above Cloud Code's ~0.5% two-replica skew).
+const minQuotaResetJump = 0.10
+
+// resetMatchSkew tolerates minor clock/rounding differences between a 429
+// RetryInfo deadline and RetrieveUserQuotaSummary's resetTime.
+const resetMatchSkew = time.Minute
+
+// quotaResetDebounce is how long after a cooldown was recorded an explicit
+// Refresh waits before trusting remaining > 0 without an unambiguous refill or
+// a jump >= minQuotaResetJump, covering Cloud Code's quota lag after a 429.
+// A variable for tests.
+var quotaResetDebounce = SettleTime
+
+type cooldownSyncMode int
+
+const (
+	// cooldownBackground clears or shortens cooldowns only on an unambiguous refill.
+	cooldownBackground cooldownSyncMode = iota
+	// cooldownRefresh clears or shortens cooldowns on an unambiguous refill, a
+	// remaining jump >= minQuotaResetJump, or once quotaResetDebounce has elapsed.
+	cooldownRefresh
+	// cooldownReplace unconditionally aligns cooldowns with the sample (e.g. a
+	// newly imported sign-in replacing the previous Google account).
+	cooldownReplace
+)
+
+// applySampleCooldowns updates account's quota cooldowns from a fresh sample.
+func applySampleCooldowns(account *pool.Account, prev, cur AccountQuota, fetchedAt time.Time, mode cooldownSyncMode) {
+	exhaustedUntil := map[string]time.Time{}
+	seenGroups := map[string]bool{}
+	for _, g := range cur.Groups {
+		for _, b := range g.Buckets {
+			group := BucketGroup(b.ID)
+			if group == "" {
+				continue
+			}
+			seenGroups[group] = true
+			if b.Remaining <= 0 && b.ResetAt.After(cur.At) && b.ResetAt.After(exhaustedUntil[group]) {
+				exhaustedUntil[group] = b.ResetAt
+			}
+		}
+	}
+
+	if mode == cooldownReplace {
+		account.SyncCooldowns(exhaustedUntil, fetchedAt)
+		return
+	}
+
+	cooldowns := account.Cooldowns()
+	if mode == cooldownRefresh {
+		// Clear cooldowns for groups absent from this account's quota plan
+		// (e.g. a pre-sample argon cooldown on an Ultra account).
+		for group := range cooldowns {
+			if !seenGroups[group] {
+				account.SetCooldown(group, time.Time{}, fetchedAt)
+			}
+		}
+	}
+
+	resetGroups := detectResetGroups(prev, cur, cooldowns, fetchedAt, mode)
+	for group := range seenGroups {
+		until := exhaustedUntil[group]
+		if resetGroups[group] {
+			account.SetCooldown(group, until, fetchedAt)
+		} else if !until.IsZero() {
+			account.Cool(group, until)
+		}
+	}
+}
+
+func detectResetGroups(prev, cur AccountQuota, cooldowns map[string]pool.Cooldown, fetchedAt time.Time, mode cooldownSyncMode) map[string]bool {
+	if len(cooldowns) == 0 {
+		return nil
+	}
+
+	prevBuckets := map[string]agy.QuotaBucket{}
+	for _, g := range prev.Groups {
+		for _, b := range g.Buckets {
+			prevBuckets[b.ID] = b
+		}
+	}
+
+	reset := map[string]bool{}
+	if mode == cooldownRefresh {
+		for group, cd := range cooldowns {
+			if !fetchedAt.Before(cd.SetAt.Add(quotaResetDebounce)) {
+				reset[group] = true
+			}
+		}
+	}
+
+	for _, g := range cur.Groups {
+		for _, b := range g.Buckets {
+			group := BucketGroup(b.ID)
+			if group == "" || reset[group] {
+				continue
+			}
+			cd, ok := cooldowns[group]
+			if !ok {
+				continue
+			}
+			pb, ok := prevBuckets[b.ID]
+			if !ok {
+				continue
+			}
+
+			// Require a later reset time (past both the previous sample and
+			// the current cooldown) AND more remaining quota, matching
+			// attribute.go's refill rule while ignoring 5h resets during a
+			// weekly cooldown and rolling reset_at on untouched 100% buckets.
+			unambiguousRefill := b.ResetAt.After(pb.ResetAt) && b.Remaining > pb.Remaining && b.ResetAt.After(cd.Until)
+			if unambiguousRefill {
+				reset[group] = true
+				continue
+			}
+
+			if mode != cooldownRefresh {
+				continue
+			}
+
+			// Ignore shorter-window buckets (e.g. 5h) whose reset times both
+			// before and after the sample are far earlier than the cooldown.
+			cooldownFloor := cd.Until.Add(-resetMatchSkew)
+			relevantToCooldown := (!b.ResetAt.IsZero() && !b.ResetAt.Before(cooldownFloor)) ||
+				(!pb.ResetAt.IsZero() && !pb.ResetAt.Before(cooldownFloor)) ||
+				(b.ResetAt.IsZero() && pb.ResetAt.IsZero())
+			significantJump := b.Remaining-pb.Remaining >= minQuotaResetJump
+			if relevantToCooldown && significantJump {
+				reset[group] = true
+			}
+		}
+	}
+	return reset
 }
 
 func (m *Monitor) fail(account *pool.Account, err error) {

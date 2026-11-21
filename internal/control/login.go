@@ -65,6 +65,7 @@ func (c *Control) SubmitLogin(ctx context.Context, id, code string) (string, err
 	}
 	// What Google said about the old sign-in no longer holds.
 	c.cfg.CloudCode.ClearVerification(id)
+	account.SyncCooldowns(nil, time.Time{})
 	account.SignedIn()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

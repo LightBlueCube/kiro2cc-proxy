@@ -418,3 +418,369 @@ func TestRefreshProbesCatalogWhenLanguageServerAlreadyRuns(t *testing.T) {
 		t.Fatal("Refresh with running LS left Models() nil")
 	}
 }
+
+func TestRefreshClearsCooldownAfterQuotaReset(t *testing.T) {
+	e := newMonitorEnv(t)
+	ctx := context.Background()
+	account := e.p.Account("a")
+
+	fiveDays := time.Now().Add(5 * 24 * time.Hour)
+	account.Cool(pool.GroupGemini, fiveDays)
+	if _, ok := account.Status().Cooldowns[pool.GroupGemini]; !ok {
+		t.Fatal("precondition: gemini should be cooling down")
+	}
+
+	// A failed Refresh must not clear an existing cooldown.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := e.monitor.Refresh(cancelled, account); err == nil {
+		t.Fatal("Refresh with cancelled context succeeded")
+	}
+	if _, ok := account.Status().Cooldowns[pool.GroupGemini]; !ok {
+		t.Fatal("failed Refresh cleared gemini cooldown")
+	}
+
+	// Immediate Refresh right after a 429 with no baseline sample is debounced
+	// so lagging quota reads do not prematurely clear the cooldown.
+	if _, err := e.monitor.Refresh(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := account.Status().Cooldowns[pool.GroupGemini]; !ok {
+		t.Fatal("immediate Refresh without baseline jump cleared cooldown within debounce window")
+	}
+
+	// Once a baseline sample shows the bucket was exhausted (0%) and Refresh
+	// sees a jump >= minQuotaResetJump (fake agy returns 100%), it clears at once.
+	e.monitor.mu.Lock()
+	e.monitor.latest[account.ID()] = quotaSample(time.Now().Add(-time.Minute),
+		agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+	)
+	e.monitor.mu.Unlock()
+	if _, err := e.monitor.Refresh(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if cooling := account.Status().Cooldowns; len(cooling) != 0 {
+		t.Fatalf("cooldowns after Refresh with quota jump = %v, want empty", cooling)
+	}
+	if err := account.Available(pool.GroupGemini); err != nil {
+		t.Fatalf("account still unavailable after quota reset refresh: %v", err)
+	}
+
+	// TryRefresh (new token import) aligns cooldowns immediately without
+	// waiting for the previous sign-in's debounce window.
+	account.Cool(pool.GroupGemini, fiveDays)
+	if _, err := e.monitor.TryRefresh(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if cooling := account.Status().Cooldowns; len(cooling) != 0 {
+		t.Fatalf("cooldowns after TryRefresh = %v, want empty", cooling)
+	}
+
+	// Even with no delta (prev already 100%), Refresh trusts remaining > 0
+	// once quotaResetDebounce has elapsed since the 429.
+	origDebounce := quotaResetDebounce
+	quotaResetDebounce = time.Millisecond
+	t.Cleanup(func() { quotaResetDebounce = origDebounce })
+
+	account.Cool(pool.GroupGemini, fiveDays)
+	time.Sleep(5 * time.Millisecond)
+	if _, err := e.monitor.Refresh(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if cooling := account.Status().Cooldowns; len(cooling) != 0 {
+		t.Fatalf("cooldowns after debounced Refresh = %v, want empty", cooling)
+	}
+}
+
+func quotaSample(at time.Time, buckets ...agy.QuotaBucket) AccountQuota {
+	return AccountQuota{
+		At:     at,
+		Groups: []agy.QuotaGroup{{Name: "Quota", Buckets: buckets}},
+	}
+}
+
+func TestApplySampleCooldownsRefresh(t *testing.T) {
+	newAccount := func(t *testing.T) *pool.Account {
+		t.Helper()
+		p, err := pool.New(pool.Config{TurnsPerAccount: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := p.Add(pool.AccountConfig{Name: "a", Home: filepath.Join(t.TempDir(), "a")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	now := time.Now()
+	fiveDays := now.Add(5 * 24 * time.Hour)
+	sevenDays := now.Add(7 * 24 * time.Hour)
+	twoHours := now.Add(2 * time.Hour)
+	fiveHours := now.Add(5 * time.Hour)
+
+	t.Run("debounces lagged 429 read within SettleTime", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		prev := quotaSample(now.Add(-2*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+		)
+		applySampleCooldowns(a, prev, cur, setAt.Add(time.Minute), cooldownRefresh)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(fiveDays) {
+			t.Fatalf("lagged Refresh cleared cooldown early: got %v, want %v", got, fiveDays)
+		}
+		if gotSetAt := a.Cooldowns()[pool.GroupGemini].SetAt; !gotSetAt.Equal(setAt) {
+			t.Fatalf("debounced Refresh altered SetAt: got %v, want %v", gotSetAt, setAt)
+		}
+	})
+
+	t.Run("debounces small stale replica jump within SettleTime", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		prev := quotaSample(now.Add(-2*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.005, ResetAt: fiveDays},
+		)
+		applySampleCooldowns(a, prev, cur, setAt.Add(time.Minute), cooldownRefresh)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(fiveDays) {
+			t.Fatalf("small jump cleared cooldown early: got %v, want %v", got, fiveDays)
+		}
+	})
+
+	t.Run("debounces short 429 when quota is unchanged", func(t *testing.T) {
+		a := newAccount(t)
+		shortWait := now.Add(30 * time.Second)
+		a.Cool(pool.GroupGemini, shortWait)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		prev := quotaSample(now.Add(-time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.80, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.80, ResetAt: fiveDays},
+		)
+		applySampleCooldowns(a, prev, cur, setAt.Add(5*time.Second), cooldownRefresh)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(shortWait) {
+			t.Fatalf("Refresh cleared short 429: got %v, want %v", got, shortWait)
+		}
+	})
+
+	t.Run("does not let 5h jump clear 5d weekly cooldown within SettleTime", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		prev := quotaSample(now.Add(-2*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 0.10, ResetAt: now.Add(-time.Minute)},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 1.0, ResetAt: fiveHours},
+		)
+		applySampleCooldowns(a, prev, cur, setAt.Add(time.Minute), cooldownRefresh)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(fiveDays) {
+			t.Fatalf("5h jump cleared 5d weekly cooldown: got %v, want %v", got, fiveDays)
+		}
+	})
+
+	t.Run("clears immediately on jump >= 10% even with same reset_at", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		a.Cool(pool.GroupArgon, fiveDays) // orphaned group absent from sample
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		prev := quotaSample(now.Add(-2*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 1.0, ResetAt: fiveDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 1.0, ResetAt: fiveHours},
+		)
+		applySampleCooldowns(a, prev, cur, setAt.Add(time.Minute), cooldownRefresh)
+		if cooling := a.Status().Cooldowns; len(cooling) != 0 {
+			t.Fatalf("cooldowns after >=10%% reset jump = %v, want empty", cooling)
+		}
+	})
+
+	t.Run("clears immediately on small unambiguous refill past cooldown", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		prev := quotaSample(now.Add(-2*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.05, ResetAt: sevenDays},
+		)
+		applySampleCooldowns(a, prev, cur, setAt.Add(time.Minute), cooldownRefresh)
+		if cooling := a.Status().Cooldowns; len(cooling) != 0 {
+			t.Fatalf("cooldowns after unambiguous refill = %v, want empty", cooling)
+		}
+	})
+
+	t.Run("shortens to 5h immediately when weekly jumps while 5h is exhausted", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		prev := quotaSample(now.Add(-2*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 0, ResetAt: twoHours},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 1.0, ResetAt: sevenDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 0, ResetAt: twoHours},
+		)
+		applySampleCooldowns(a, prev, cur, setAt.Add(time.Minute), cooldownRefresh)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(twoHours) {
+			t.Fatalf("cooldown = %v, want %v", got, twoHours)
+		}
+	})
+
+	t.Run("trusts remaining > 0 after quotaResetDebounce even without jump", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.05, ResetAt: fiveDays},
+		)
+		applySampleCooldowns(a, AccountQuota{}, cur, setAt.Add(quotaResetDebounce), cooldownRefresh)
+		if cooling := a.Status().Cooldowns; len(cooling) != 0 {
+			t.Fatalf("cooldowns after debounce elapsed = %v, want empty", cooling)
+		}
+	})
+
+	t.Run("keeps cooldown after quotaResetDebounce when bucket is still exhausted", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+		)
+		applySampleCooldowns(a, AccountQuota{}, cur, setAt.Add(quotaResetDebounce), cooldownRefresh)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(fiveDays) {
+			t.Fatalf("cooldown while still exhausted = %v, want %v", got, fiveDays)
+		}
+	})
+}
+
+func TestApplySampleCooldownsBackgroundSample(t *testing.T) {
+	newAccount := func(t *testing.T) *pool.Account {
+		t.Helper()
+		p, err := pool.New(pool.Config{TurnsPerAccount: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := p.Add(pool.AccountConfig{Name: "a", Home: filepath.Join(t.TempDir(), "a")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	now := time.Now()
+	fiveDays := now.Add(5 * 24 * time.Hour)
+	sevenDays := now.Add(7 * 24 * time.Hour)
+	twoHours := now.Add(2 * time.Hour)
+	fiveHours := now.Add(5 * time.Hour)
+
+	t.Run("clears on unambiguous weekly refill", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		prev := quotaSample(now.Add(-5*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 1.0, ResetAt: sevenDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 1.0, ResetAt: fiveHours},
+		)
+		applySampleCooldowns(a, prev, cur, time.Now(), cooldownBackground)
+		if cooling := a.Status().Cooldowns; len(cooling) != 0 {
+			t.Fatalf("cooldowns after refill = %v, want empty", cooling)
+		}
+	})
+
+	t.Run("shortens to 5h when weekly refills while 5h is exhausted", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		prev := quotaSample(now.Add(-5*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 0, ResetAt: twoHours},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 1.0, ResetAt: sevenDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 0, ResetAt: twoHours},
+		)
+		applySampleCooldowns(a, prev, cur, time.Now(), cooldownBackground)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(twoHours) {
+			t.Fatalf("cooldown = %v, want %v", got, twoHours)
+		}
+	})
+
+	t.Run("preserves cooldown on lagged 429 read", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		prev := quotaSample(now.Add(-5*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+		)
+		applySampleCooldowns(a, prev, cur, time.Now(), cooldownBackground)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(fiveDays) {
+			t.Fatalf("lagged read cleared cooldown: got %v, want %v", got, fiveDays)
+		}
+	})
+
+	t.Run("preserves cooldown on two-replica stale bump with same reset_at", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		prev := quotaSample(now.Add(-5*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0, ResetAt: fiveDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.005, ResetAt: fiveDays},
+		)
+		applySampleCooldowns(a, prev, cur, time.Now(), cooldownBackground)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(fiveDays) {
+			t.Fatalf("stale replica bump cleared cooldown: got %v, want %v", got, fiveDays)
+		}
+	})
+
+	t.Run("preserves 5d weekly cooldown when only 5h bucket refills", func(t *testing.T) {
+		a := newAccount(t)
+		a.Cool(pool.GroupGemini, fiveDays)
+		prev := quotaSample(now.Add(-5*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 0.2, ResetAt: now.Add(-time.Minute)},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},
+			agy.QuotaBucket{ID: "gemini-5h", Remaining: 1.0, ResetAt: fiveHours},
+		)
+		applySampleCooldowns(a, prev, cur, time.Now(), cooldownBackground)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(fiveDays) {
+			t.Fatalf("5h refill cleared 5d weekly cooldown: got %v, want %v", got, fiveDays)
+		}
+	})
+
+	t.Run("preserves short 429 cooldown when full bucket reset_at rolls forward", func(t *testing.T) {
+		a := newAccount(t)
+		shortWait := now.Add(30 * time.Second)
+		a.Cool(pool.GroupGemini, shortWait)
+		prev := quotaSample(now.Add(-10*time.Minute),
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 1.0, ResetAt: sevenDays},
+		)
+		cur := quotaSample(now,
+			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 1.0, ResetAt: sevenDays.Add(10 * time.Minute)},
+		)
+		applySampleCooldowns(a, prev, cur, time.Now(), cooldownBackground)
+		if got := a.Status().Cooldowns[pool.GroupGemini]; !got.Equal(shortWait) {
+			t.Fatalf("rolling full bucket cleared short 429: got %v, want %v", got, shortWait)
+		}
+	})
+}

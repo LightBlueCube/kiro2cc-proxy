@@ -92,7 +92,7 @@ type Account struct {
 	verifyURL string
 	// removed accounts start no processes.
 	removed  bool
-	cooldown map[string]time.Time
+	cooldown map[string]Cooldown
 	// modelFailures holds, by session, the failure of its latest
 	// generation call; sessions whose latest call succeeded are absent.
 	modelFailures map[string]ModelFailure
@@ -119,6 +119,12 @@ type Account struct {
 	// allowedModels limits the account to these public model ids; empty
 	// allows all models the account offers.
 	allowedModels []string
+}
+
+// Cooldown is an active quota-group cooldown on an account.
+type Cooldown struct {
+	Until time.Time
+	SetAt time.Time
 }
 
 // Status is a point-in-time view of an account.
@@ -196,7 +202,7 @@ func (p *Pool) Add(ac AccountConfig) (*Account, error) {
 		proxy:             ac.Proxy,
 		cloudCodeEndpoint: ac.CloudCodeEndpoint,
 		runs:              map[any]time.Time{},
-		cooldown:          map[string]time.Time{},
+		cooldown:          map[string]Cooldown{},
 		modelFailures:     map[string]ModelFailure{},
 		streaks:           map[string]*noWaitStreak{},
 		failedCalls:       map[string]int{},
@@ -464,16 +470,31 @@ func (a *Account) CooldownRemaining(group string) time.Duration {
 	if a.paused || a.disabled != nil || a.blocked != nil || a.verify {
 		return 0
 	}
-	until, ok := a.cooldown[group]
+	entry, ok := a.cooldown[group]
 	if !ok {
 		return 0
 	}
-	rem := time.Until(until)
+	rem := time.Until(entry.Until)
 	if rem <= 0 {
 		delete(a.cooldown, group)
 		return 0
 	}
 	return rem
+}
+
+// Cooldowns returns the account's active quota-group cooldowns with when each
+// was recorded.
+func (a *Account) Cooldowns() map[string]Cooldown {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	out := make(map[string]Cooldown, len(a.cooldown))
+	for group, entry := range a.cooldown {
+		if now.Before(entry.Until) {
+			out[group] = entry
+		}
+	}
+	return out
 }
 
 func (a *Account) unavailableLocked(group string) error {
@@ -492,9 +513,9 @@ func (a *Account) unavailableLocked(group string) error {
 	if a.verify {
 		return ErrVerificationRequired
 	}
-	if until, ok := a.cooldown[group]; ok {
-		if time.Now().Before(until) {
-			return fmt.Errorf("%s quota cooling down until %s", group, until.Format(time.RFC3339))
+	if entry, ok := a.cooldown[group]; ok {
+		if time.Now().Before(entry.Until) {
+			return fmt.Errorf("%s quota cooling down until %s", group, entry.Until.Format(time.RFC3339))
 		}
 		delete(a.cooldown, group)
 	}
@@ -504,15 +525,100 @@ func (a *Account) unavailableLocked(group string) error {
 // Cool marks group exhausted on this account until the given time.
 func (a *Account) Cool(group string, until time.Time) {
 	a.mu.Lock()
-	wasCooling := time.Now().Before(a.cooldown[group])
-	if until.After(a.cooldown[group]) {
-		a.cooldown[group] = until
+	now := time.Now()
+	cur := a.cooldown[group]
+	wasCooling := now.Before(cur.Until)
+	if until.After(cur.Until) {
+		a.cooldown[group] = Cooldown{Until: until, SetAt: now}
 	}
 	name := a.name
 	a.mu.Unlock()
-	if !wasCooling {
+	if !wasCooling && now.Before(until) {
 		a.pool.log.Warn("account quota cooling down", "account", name, "group", group, "until", until)
 	}
+}
+
+// SetCooldown replaces group's cooldown with until (or clears it when until is
+// zero or not in the future), unless a newer cooldown was recorded after asOf.
+func (a *Account) SetCooldown(group string, until, asOf time.Time) {
+	a.mu.Lock()
+	cooled, cleared := a.setCooldownLocked(group, until, asOf, time.Now())
+	name := a.name
+	a.mu.Unlock()
+
+	switch {
+	case cooled:
+		a.pool.log.Warn("account quota cooling down", "account", name, "group", group, "until", until)
+	case cleared:
+		a.pool.log.Info("account quota cooldown cleared", "account", name, "group", group)
+	}
+}
+
+// SyncCooldowns aligns every quota group's cooldown with a fresh quota sample
+// started at asOf: exhausted groups cool until their reset time, and groups
+// with quota available (or absent from the sample) clear older cooldowns.
+// Cooldowns recorded after asOf are preserved unless the sample extends them.
+func (a *Account) SyncCooldowns(untilByGroup map[string]time.Time, asOf time.Time) {
+	a.mu.Lock()
+	now := time.Now()
+	var cooled []string
+	var cleared []string
+
+	for group := range a.cooldown {
+		if _, inSample := untilByGroup[group]; inSample {
+			continue
+		}
+		if _, didClear := a.setCooldownLocked(group, time.Time{}, asOf, now); didClear {
+			cleared = append(cleared, group)
+		}
+	}
+
+	for group, until := range untilByGroup {
+		didCool, didClear := a.setCooldownLocked(group, until, asOf, now)
+		if didCool {
+			cooled = append(cooled, group)
+		}
+		if didClear {
+			cleared = append(cleared, group)
+		}
+	}
+
+	name := a.name
+	a.mu.Unlock()
+
+	for _, group := range cooled {
+		a.pool.log.Warn("account quota cooling down", "account", name, "group", group, "until", untilByGroup[group])
+	}
+	for _, group := range cleared {
+		a.pool.log.Info("account quota cooldown cleared", "account", name, "group", group)
+	}
+}
+
+func (a *Account) setCooldownLocked(group string, until, asOf, now time.Time) (cooled, cleared bool) {
+	cur := a.cooldown[group]
+	wasCooling := now.Before(cur.Until)
+	cooling := now.Before(until)
+
+	newerRecorded := !asOf.IsZero() && cur.SetAt.After(asOf)
+	if newerRecorded {
+		if until.After(cur.Until) {
+			a.cooldown[group] = Cooldown{Until: until, SetAt: now}
+			return !wasCooling && cooling, false
+		}
+		return false, false
+	}
+
+	if cooling {
+		setAt := now
+		if wasCooling && until.Equal(cur.Until) {
+			setAt = cur.SetAt
+		}
+		a.cooldown[group] = Cooldown{Until: until, SetAt: setAt}
+		return !wasCooling, false
+	}
+
+	delete(a.cooldown, group)
+	return false, wasCooling
 }
 
 // ModelFailure is a generation call agy made for a session that failed.
@@ -812,9 +918,9 @@ func (a *Account) Status() Status {
 	}
 	st.Verify, st.VerifyURL = a.verify, a.verifyURL
 	now := time.Now()
-	for group, until := range a.cooldown {
-		if now.Before(until) {
-			st.Cooldowns[group] = until
+	for group, entry := range a.cooldown {
+		if now.Before(entry.Until) {
+			st.Cooldowns[group] = entry.Until
 		}
 	}
 	for _, slot := range a.procs {
