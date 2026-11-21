@@ -3,26 +3,33 @@ package agybin
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestPatternFind(t *testing.T) {
-	p := mustPattern("48 ?? d2")
-	got := p.find([]byte{0x48, 0x85, 0xd2, 0x48, 0x00, 0xd2, 0x48, 0x85})
-	if len(got) != 2 || got[0] != 0 || got[1] != 3 {
-		t.Fatalf("matches %v, want [0 3]", got)
+func hexBytes(t *testing.T, spec string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(strings.ReplaceAll(spec, " ", ""))
+	if err != nil {
+		t.Fatalf("bad hex %q: %v", spec, err)
 	}
+	return b
 }
 
 func TestJccToJmpKeepsTarget(t *testing.T) {
-	// test rdx,rdx; jle +0x10; then filler.
-	body := append(mustBytes("48 85 d2 0f 8e 10 00 00 00"), make([]byte, 0x20)...)
-	if err := jccToJmp(3)(nil, function{body: body}, 0); err != nil {
+	// test rdx,rdx; jle +0x10; filler.
+	body := append(hexBytes(t, "48 85 d2 0f 8e 10 00 00 00"), make([]byte, 0x20)...)
+	b, ok := decodeJcc(body, 3, ccLE)
+	if !ok {
+		t.Fatal("decodeJcc did not match")
+	}
+	if err := rewriteJccToJmp(body, b); err != nil {
 		t.Fatal(err)
 	}
-	if body[3] != 0xe9 || body[8] != 0x90 {
+	if body[3] != opJmpRel32 || body[8] != opNOP {
 		t.Fatalf("bytes % x", body[:9])
 	}
 	// jle target: 3+6+0x10; jmp target: 3+5+rel.
@@ -32,9 +39,93 @@ func TestJccToJmpKeepsTarget(t *testing.T) {
 }
 
 func TestJccToJmpRejectsOutsideTarget(t *testing.T) {
-	body := mustBytes("48 85 d2 0f 8e 00 01 00 00")
-	if err := jccToJmp(3)(nil, function{body: body}, 0); err == nil {
+	body := hexBytes(t, "48 85 d2 0f 8e 00 01 00 00")
+	b, ok := decodeJcc(body, 3, ccLE)
+	if !ok {
+		t.Fatal("decodeJcc did not match")
+	}
+	if err := rewriteJccToJmp(body, b); err == nil {
 		t.Fatal("want an error for a target outside the function")
+	}
+}
+
+func TestShortSymbolName(t *testing.T) {
+	cases := map[string]string{
+		"google3/third_party/jetski/cli/model/model.SelectorModel.offersContextWindow": "model.SelectorModel.offersContextWindow",
+		"runtime.selectgo":              "runtime.selectgo",
+		"google3/a/b.Fn[google3/c/d.T]": "b.Fn[google3/c/d.T]",
+	}
+	for in, want := range cases {
+		if got := shortSymbolName(in); got != want {
+			t.Errorf("shortSymbolName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestOriginalSnippetsMatch verifies the structural locators match the exact
+// agy 1.5.3 instruction snippets once. End-to-end compatibility across agy
+// builds is verified against real executables (TestPinnedBuild / check-agy).
+func TestOriginalSnippetsMatch(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		locate func(*image, function) ([]func() error, error)
+	}{
+		{
+			name:   "mcp-call-timeout-call",
+			body:   "48 b9 00 08 d6 e8 29 00 00 00",
+			locate: locateImm64(defaultMCPCallTimeout.Nanoseconds(), patchedMCPCallTimeout.Nanoseconds()),
+		},
+		{
+			name:   "mcp-call-timeout-error",
+			body:   "48 ba 00 08 d6 e8 29 00 00 00",
+			locate: locateImm64(defaultMCPCallTimeout.Nanoseconds(), patchedMCPCallTimeout.Nanoseconds()),
+		},
+		{
+			name:   "full-tool-output",
+			body:   "48 85 d2 0f 8e 05 00 00 00 90 90 90 90 90 c9 c3",
+			locate: locateOutputTruncation,
+		},
+		{
+			name:   "context-gate-1",
+			body:   "49 89 e4 49 81 ec 68 3d 00 00 0f 82 00 00 00 00 c9 c3",
+			locate: locateReturnTrue,
+		},
+		{
+			name:   "context-gate-3a",
+			body:   "81 fa 00 e8 03 00 be 00 e8 03 00 0f 42 f2",
+			locate: locateClamp256K,
+		},
+		{
+			name:   "context-gate-4a",
+			body:   "83 f8 08 74 05 83 f8 13 75 08 90 90 90 90 90 90 90 90 48 89 c8 c9 c3",
+			locate: locateUserInputMaxTokens,
+		},
+		{
+			name:   "context-gate-4b",
+			body:   "83 fa 0e 75 0a 48 8b bc 24 18 02 00 00 eb 11 83 fa 17 75 04 31 ff eb 08 48 8b bc 24 10 02 00 00 48 85 ff 7f 01 90 c3",
+			locate: locateStepUserInputLimit,
+		},
+		{
+			name:   "full-step-output",
+			body:   "83 fa 0e 75 0a 48 8b bc 24 18 02 00 00 eb 11 83 fa 17 75 04 31 ff eb 08 48 8b bc 24 10 02 00 00 48 85 ff 7f 01 90 c3",
+			locate: locateStepDefaultLimit,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fn := function{body: hexBytes(t, tc.body)}
+			hits, err := tc.locate(nil, fn)
+			if err != nil {
+				t.Fatalf("locate error: %v", err)
+			}
+			if len(hits) != 1 {
+				t.Fatalf("got %d matches, want 1", len(hits))
+			}
+			if err := hits[0](); err != nil {
+				t.Fatalf("rewrite error: %v", err)
+			}
+		})
 	}
 }
 
@@ -77,7 +168,7 @@ func TestPinnedBuild(t *testing.T) {
 	if stat, _ := os.Stat(again); !stat.ModTime().Equal(before) {
 		t.Fatal("an intact cached copy must be reused, not rewritten")
 	}
-	entries, _ := os.ReadDir(dir)
+	entries, err := os.ReadDir(dir)
 	if len(entries) != 2 {
 		t.Fatalf("cache holds %d files, want the binary and its .sha256", len(entries))
 	}

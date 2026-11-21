@@ -1,8 +1,9 @@
 // Package agybin derives the agy executable the relay runs: a pinned agy
 // release with the relay's patches applied, cached under the data
-// directory. Every patch locates its function by name in the Go function
-// table and its instructions by a signature that must match exactly once,
-// so a changed build fails instead of being patched at the wrong place.
+// directory. Every patch locates its function uniquely by trailing
+// package-qualified name in the Go function table and its rewrite site by a
+// structural matcher that must match exactly once, so a changed build fails
+// closed instead of being patched at the wrong place.
 package agybin
 
 import (
@@ -31,8 +32,8 @@ var pinned = []Build{
 type SiteResult struct {
 	Patch    string
 	Function string
-	// Matches counts the signature inside the function; -1 when the
-	// function is missing.
+	// Matches counts the site matches inside the function; -1 when a
+	// required symbol is missing or ambiguous.
 	Matches int
 	Err     error
 }
@@ -159,16 +160,19 @@ func applySite(im *image, patchName string, s site) SiteResult {
 		result.Err = err
 		return result
 	}
-	matches := s.signature.find(fn.body)
-	result.Matches = len(matches)
-	switch {
-	case len(matches) != 1:
-		result.Err = fmt.Errorf("%d signature matches, want 1", len(matches))
-	case s.atEntry && matches[0] != 0:
-		result.Err = fmt.Errorf("signature matches at +%#x, want the function entry", matches[0])
-	default:
-		result.Err = s.rewrite(im, fn, matches[0])
+	result.Function = fn.name
+
+	rewrites, err := s.locate(im, fn)
+	if err != nil {
+		result.Err = err
+		return result
 	}
+	result.Matches = len(rewrites)
+	if len(rewrites) != 1 {
+		result.Err = fmt.Errorf("%d signature matches, want 1", len(rewrites))
+		return result
+	}
+	result.Err = rewrites[0]()
 	return result
 }
 
