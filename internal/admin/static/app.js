@@ -230,10 +230,13 @@ function polling(container, interval, render) {
 
 // ---- keys ------------------------------------------------------------
 
+// groupName labels an account's quota pool (weekly bucket).
 const groupName = g => lookup("group", g) || g;
 // Quota group ids a key's Argon & Carbon merge involves.
 const GEMINI_GROUP = "gemini";
 const ARGON_GROUP = "argon";
+// keyGroupName labels a key's billing group, where Argon & Carbon share one.
+const keyGroupName = g => g === ARGON_GROUP ? t("keys.group.argon") : groupName(g);
 
 // quotaText lists shares by group: "Gemini 0.05% · Claude + GPT 0.11%".
 const quotaText = (byGroup, digits) => joined(...Object.entries(byGroup)
@@ -257,9 +260,9 @@ function limitEditor(groups, k) {
     [["merge", t("keys.limit.argon.merge")], ["separate", t("keys.limit.argon.separate")]]
       .map(([m, label]) => h("option", { value: m, selected: (m === "merge") === k.merge_argon }, label)));
   const merged = () => argonCount.value === "merge";
-  const groupFields = () => groups.flatMap(g => g !== ARGON_GROUP ? [h("label", {}, t("keys.limit.label", { group: groupName(g) }), perGroup[g])]
-    : [h("label", {}, groupName(g), argonCount),
-      ...(merged() ? [] : [h("label", {}, t("keys.limit.label", { group: groupName(g) }), perGroup[g])])]);
+  const groupFields = () => groups.flatMap(g => g !== ARGON_GROUP ? [h("label", {}, t("keys.limit.label", { group: keyGroupName(g) }), perGroup[g])]
+    : [h("label", {}, keyGroupName(g), argonCount),
+      ...(merged() ? [] : [h("label", {}, t("keys.limit.label", { group: keyGroupName(g) }), perGroup[g])])]);
   const initial = k.limit_total !== null ? "total" : Object.keys(k.limits).length ? "group" : "none";
   const fields = h("div", { class: "row" });
   const show = mode => {
@@ -353,14 +356,14 @@ function spendCell(k, lines) {
     amount(total, hasTotal ? k.limit_total : undefined, "total")];
   for (const g of lines) {
     if (g === ARGON_GROUP && argonMerged(k)) {
-      cells.push(h("span", {}, groupName(g)), h("span", { class: "muted" }, t("keys.usage.merged")), amount(spent(g), undefined, ""));
+      cells.push(h("span", {}, keyGroupName(g)), h("span", { class: "muted" }, t("keys.usage.merged")), amount(spent(g), undefined, ""));
       continue;
     }
     const limit = k.limits[g];
     const slot = limit !== undefined ? spendBar(counted(g), limit)
       : hasTotal ? h("span")
       : h("span", { class: "muted" }, t("keys.usage.no_limit"));
-    cells.push(h("span", {}, groupName(g)), slot, amount(counted(g), limit, ""));
+    cells.push(h("span", {}, keyGroupName(g)), slot, amount(counted(g), limit, ""));
   }
   return h("div", { class: "lines spend" }, cells);
 }
