@@ -1179,23 +1179,28 @@ views.accounts = container => {
     : a.disabled ? t("account.needs_signin") : a.blocked ? t("account.no_proxy")
     : a.verify ? t("account.needs_verification") : "";
 
+  const accountHover = accounts => accounts.map(a => joined(a.name, outOfRotation(a))).join("\n");
+  const accountSummary = accounts => accounts[0].name + (accounts.length > 1 ? ` (+${accounts.length - 1})` : "");
+
   // accountSet shows the first account in rotation and how many more
   // there are, "main (+2)"; all of them, with why one is out of rotation,
   // show on hover.
   function accountSet(accounts) {
     const ready = accounts.filter(a => !outOfRotation(a));
-    const hover = accounts.map(a => joined(a.name, outOfRotation(a))).join("\n");
+    const hover = accountHover(accounts);
     if (!ready.length) return h("span", { class: "muted", title: hover }, t("accounts.models.none_ready"));
-    return h("span", { title: hover }, ready[0].name, ready.length > 1 ? ` (+${ready.length - 1})` : "");
+    return h("span", { title: hover }, accountSummary(ready));
   }
 
   // modelGroups gathers the models accounts reported into available,
-  // quota-exhausted, manually disabled (excluded by allowed_models), and
-  // upstream-unavailable sets, each grouped by the set of accounts.
+  // quota-exhausted, manually disabled (excluded by allowed_models),
+  // out-of-rotation (no account in rotation), and upstream-unavailable
+  // sets, each grouped by the set of accounts.
   function modelGroups(accounts) {
     const available = new Map();
     const exhausted = new Map();
     const manuallyDisabled = new Map();
+    const inactive = new Map();
     const disabled = new Map();
     const add = (byId, m, a) => {
       if (!byId.has(m.id)) {
@@ -1208,7 +1213,8 @@ views.accounts = container => {
     const allowsModel = (a, id) => !a.allowed_models.length || a.allowed_models.includes(id);
     for (const a of accounts) {
       for (const m of a.models || []) {
-        if (!allowsModel(a, m.id)) add(manuallyDisabled, m, a);
+        if (outOfRotation(a)) add(inactive, m, a);
+        else if (!allowsModel(a, m.id)) add(manuallyDisabled, m, a);
         else if (quotaExhausted(a, m)) add(exhausted, m, a);
         else add(available, m, a);
       }
@@ -1224,8 +1230,11 @@ views.accounts = container => {
       available.get(id).manuallyDisabledOn = m.accounts;
       manuallyDisabled.delete(id);
     }
+    for (const [id] of inactive) {
+      if (available.has(id) || exhausted.has(id) || manuallyDisabled.has(id)) inactive.delete(id);
+    }
     for (const [id, m] of disabled) {
-      const target = available.get(id) || exhausted.get(id) || manuallyDisabled.get(id);
+      const target = available.get(id) || exhausted.get(id) || manuallyDisabled.get(id) || inactive.get(id);
       if (!target) continue;
       target.disabledOn = m.accounts;
       disabled.delete(id);
@@ -1239,11 +1248,12 @@ views.accounts = container => {
       }
       return [...groups.values()];
     };
-    const unavailableCount = new Set([...exhausted.keys(), ...manuallyDisabled.keys(), ...disabled.keys()]).size;
+    const unavailableCount = new Set([...exhausted.keys(), ...manuallyDisabled.keys(), ...inactive.keys(), ...disabled.keys()]).size;
     return {
       available: group(available),
       exhausted: group(exhausted),
       manuallyDisabled: group(manuallyDisabled),
+      inactive: group(inactive),
       unavailable: group(disabled),
       counts: [available.size, unavailableCount],
     };
@@ -1281,7 +1291,7 @@ views.accounts = container => {
   const modelsFold = h("details", { class: "card fold models" }, modelsSummary, modelsBody);
 
   function renderModels(accounts) {
-    const { available, exhausted, manuallyDisabled, unavailable, counts } = modelGroups(accounts);
+    const { available, exhausted, manuallyDisabled, inactive, unavailable, counts } = modelGroups(accounts);
     const unreported = accounts.filter(a => !a.models).length;
     modelsSummary.textContent = joined(t("accounts.models.title"), t("accounts.models.available", { count: counts[0] }),
       counts[1] ? t("accounts.models.unavailable", { count: counts[1] }) : "");
@@ -1291,6 +1301,9 @@ views.accounts = container => {
         h("h3", { class: "warn" }, t("accounts.models.exhausted_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
       ...manuallyDisabled.map(g => h("div", { class: "model-group" },
         h("h3", { class: "warn" }, t("accounts.models.manually_disabled_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
+      ...inactive.map(g => h("div", { class: "model-group" },
+        h("h3", { class: "warn", title: accountHover(g.accounts) }, joined(t("accounts.models.no_rotation"), accountSummary(g.accounts))),
+        modelTable(g.models, true))),
       ...unavailable.map(g => h("div", { class: "model-group" },
         h("h3", { class: "warn" }, t("accounts.models.unavailable_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
       ...(unreported ? [h("p", { class: "muted" }, t("accounts.models.unreported", { count: unreported }))] : []),

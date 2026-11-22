@@ -2492,6 +2492,82 @@ func TestAccountPriorityAndAllowedModels(t *testing.T) {
 	}
 }
 
+func TestModelsExcludesOutOfRotationAccounts(t *testing.T) {
+	modelIDs := func(gw *Gateway) []string {
+		var out []string
+		for _, m := range gw.Models() {
+			out = append(out, m.ID+fmt.Sprint(m.Efforts))
+		}
+		return out
+	}
+
+	// Zero accounts: nothing in rotation, so Models() is empty.
+	empty := newHarness(t, 0, nil)
+	if got := empty.gw.Models(); len(got) != 0 {
+		t.Fatalf("Models() with no accounts = %+v, want empty", got)
+	}
+
+	h := newHarness(t, 2, nil)
+	acct0, acct1 := h.p.Account("acct0"), h.p.Account("acct1")
+
+	// Unreported accounts that are all out of rotation must not expose fallback models.
+	acct0.SetPaused(true)
+	acct1.SetVerification(true, "https://accounts.google.com/v")
+	if got := h.gw.Models(); len(got) != 0 {
+		t.Fatalf("Models() with only unreported out-of-rotation accounts = %+v, want empty", got)
+	}
+	acct0.SetPaused(false)
+	acct1.SetVerification(false, "")
+	if got := h.gw.Models(); len(got) == 0 {
+		t.Fatal("Models() with unreported in-rotation accounts = empty, want fallback catalog")
+	}
+
+	// Reported catalogs: acct1 uniquely offers claude-opus-5-5 and the medium tier of flash.
+	acct0.SetModels([]agy.ModelInfo{
+		{ModelID: "gemini-3.8-flash-low", Name: "Gemini 3.8 Flash (Low)"},
+		{ModelID: "gemini-3.8-flash-high", Name: "Gemini 3.8 Flash (High)"},
+	})
+	acct1.SetModels([]agy.ModelInfo{
+		{ModelID: "gemini-3.8-flash-medium", Name: "Gemini 3.8 Flash (Medium)"},
+		{ModelID: "claude-opus-5-5-high", Name: "Claude Opus 5.5 (High)"},
+	})
+
+	both := []string{"gemini-3.8-flash[low medium high]", "claude-opus-5-5[high]"}
+	onlyAcct0 := []string{"gemini-3.8-flash[low high]"}
+	if got := modelIDs(h.gw); !slices.Equal(got, both) {
+		t.Fatalf("both in rotation = %v, want %v", got, both)
+	}
+
+	// Every out-of-rotation state excludes acct1's models and tiers.
+	checks := []struct {
+		name  string
+		off   func()
+		reset func()
+	}{
+		{"paused", func() { acct1.SetPaused(true) }, func() { acct1.SetPaused(false) }},
+		{"disabled", func() { acct1.Disable(errors.New("sign in")) }, func() { acct1.Enable() }},
+		{"blocked", func() { acct1.SetBlocked(errors.New("no proxy")) }, func() { acct1.SetBlocked(nil) }},
+		{"verify", func() { acct1.SetVerification(true, "https://accounts.google.com/v") }, func() { acct1.SetVerification(false, "") }},
+	}
+	for _, tc := range checks {
+		tc.off()
+		if got := modelIDs(h.gw); !slices.Equal(got, onlyAcct0) {
+			t.Fatalf("acct1 %s: Models() = %v, want %v", tc.name, got, onlyAcct0)
+		}
+		tc.reset()
+		if got := modelIDs(h.gw); !slices.Equal(got, both) {
+			t.Fatalf("acct1 restored from %s: Models() = %v, want %v", tc.name, got, both)
+		}
+	}
+
+	// All reported accounts out of rotation: Models() is empty.
+	acct0.SetPaused(true)
+	acct1.SetPaused(true)
+	if got := h.gw.Models(); len(got) != 0 {
+		t.Fatalf("all paused: Models() = %+v, want empty", got)
+	}
+}
+
 func TestSingleKeyDistributesNewSessionsAcrossAccounts(t *testing.T) {
 	h := newHarness(t, 2, nil)
 	h.p.SetTurnsPerAccount(64)

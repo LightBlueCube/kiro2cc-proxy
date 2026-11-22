@@ -51,21 +51,22 @@ func inRotation(account *pool.Account) bool {
 	return !st.Paused && st.Disabled == "" && st.Blocked == "" && !st.Verify
 }
 
-// offered merges the catalogs agy reported for the accounts, a model's
-// tiers being those of any account that allows the model; before any
-// report it is the fallback list filtered by what the accounts allow.
+// offered merges the catalogs agy reported for accounts in rotation, a
+// model's tiers being those of any in-rotation account that allows the
+// model; an in-rotation account without a report falls back to the merged
+// catalog plus fallbackModels, filtered by what it allows.
 func (g *Gateway) offered() []modelEntry {
-	accounts := g.pool.Accounts()
 	var catalog, allowed []modelEntry
-	reported := false
-	unreported := false
-	for _, account := range accounts {
-		models := account.Models()
-		if models == nil {
-			unreported = true
+	var unreported []*pool.Account
+	for _, account := range g.pool.Accounts() {
+		if !inRotation(account) {
 			continue
 		}
-		reported = true
+		models := account.Models()
+		if models == nil {
+			unreported = append(unreported, account)
+			continue
+		}
 		for _, e := range entriesFromACP(models) {
 			mergeEntry(&catalog, e)
 			if account.AllowsModel(e.id) {
@@ -73,24 +74,17 @@ func (g *Gateway) offered() []modelEntry {
 			}
 		}
 	}
-	if !reported && len(accounts) == 0 {
-		return fallbackModels
-	}
-	if unreported {
+	if len(unreported) > 0 {
 		unreportedCatalog := slices.Clone(catalog)
 		for _, e := range fallbackModels {
 			mergeEntry(&unreportedCatalog, e)
 		}
 		for _, e := range unreportedCatalog {
-			for _, account := range accounts {
-				if account.Models() != nil || !account.AllowsModel(e.id) {
-					continue
+			for _, account := range unreported {
+				if account.AllowsModel(e.id) {
+					mergeEntry(&allowed, e)
+					break
 				}
-				if reported && !inRotation(account) {
-					continue
-				}
-				mergeEntry(&allowed, e)
-				break
 			}
 		}
 	}

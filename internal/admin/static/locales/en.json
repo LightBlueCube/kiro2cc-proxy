@@ -242,6 +242,7 @@
   "accounts.models.unavailable": "{count} unavailable",
   "accounts.models.exhausted_on": "Quota exhausted on",
   "accounts.models.manually_disabled_on": "Manually disabled on",
+  "accounts.models.no_rotation": "No account in rotation",
   "accounts.models.unavailable_on": "Unavailable on",
   "accounts.models.none_ready": "no account in rotation",
   "accounts.models.context": "Context",
