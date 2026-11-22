@@ -26,7 +26,6 @@
   "common.remove": "Remove",
   "common.refresh": "Refresh",
 
-  "duration.now": "now",
   "duration.ms": "{n}ms",
   "duration.s": "{n}s",
   "duration.m": "{n}m",

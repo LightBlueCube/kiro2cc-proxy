@@ -112,11 +112,10 @@ const fmt = {
     : ms >= 1000 ? t("duration.s", { n: fixed(ms / 1000, 1) })
     : t("duration.ms", { n: ms }),
   seconds: s => t("duration.s", { n: fixed(s, 1) }),
-  // until is the time left to s, in minutes or more.
+  // until is the time left to s, in minutes or more (0m once elapsed).
   until: s => {
     const ms = new Date(s) - Date.now();
-    if (ms <= 0) return t("duration.now");
-    const m = Math.round(ms / 60000);
+    const m = ms > 0 ? Math.round(ms / 60000) : 0;
     return m < 60 ? t("duration.m", { n: m }) : hoursAndMore(m);
   },
   // span is the time from a to b (ISO strings or Dates).
