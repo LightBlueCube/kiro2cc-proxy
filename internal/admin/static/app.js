@@ -887,6 +887,8 @@ views.accounts = container => {
   const imports = new Map(); // account id → {token, node}
   const routings = new Map(); // account id → {node, sync}
   const tests = new Map(); // account id → {node}
+  const moreOpen = new Set(); // account ids showing their secondary actions
+  const quotaShown = new Set(); // out-of-rotation account ids with their quota unfolded
 
   const setChildren = (node, ...children) => node.replaceChildren(...h("div", {}, ...children).childNodes);
 
@@ -1209,16 +1211,48 @@ views.accounts = container => {
       class: cls || "",
       onclick: e => runCardAction(a.id, e.target, async snap => { await action(); await load(snap); }),
     }, label);
-    setChildren(entry.actions,
+    // Sign-in buttons stay up front only while the account needs a sign-in;
+    // otherwise they join the metadata edits behind More.
+    const needsSignin = !a.user || Boolean(a.disabled);
+    const signinActions = [
       signins.has(a.id) ? null : h("button", { onclick: e => startSignin(a.id, e.target) }, a.user || a.disabled ? t("accounts.signin_again") : t("accounts.signin")),
       imports.has(a.id) ? null : h("button", { onclick: () => { imports.set(a.id, makeImportPanel(a.id)); refreshCard(a.id); } }, t("accounts.import")),
-      act(t("accounts.refresh"), () => api("POST", `accounts/${enc}/refresh`)),
-      tests.has(a.id) ? null : h("button", { onclick: () => { tests.set(a.id, makeTestPanel(a)); refreshCard(a.id); } }, t("accounts.test")),
+    ];
+    const showMore = moreOpen.has(a.id);
+    const toggleMore = () => {
+      if (showMore) moreOpen.delete(a.id);
+      else moreOpen.add(a.id);
+      refreshCard(a.id);
+    };
+    const remove = h("button", { class: "danger account-remove", onclick: e => removeAccount(a, e.target) }, t("common.remove"));
+    // Remove ends the last row: the secondary one while open, sharing its
+    // line when there is room and wrapping bottom-right when not.
+    const secondaryActions = h("div", { class: "row account-more" },
+      needsSignin ? null : signinActions,
       h("button", { onclick: e => renameAccount(a, e.target) }, t("accounts.rename")),
       routings.has(a.id) ? null : h("button", { onclick: () => { routings.set(a.id, makeRoutingPanel(a)); refreshCard(a.id); } }, t("accounts.routing.edit")),
       h("button", { onclick: e => editProxy(a, e.target) }, t("accounts.proxy.edit")),
+      remove);
+    setChildren(entry.actions,
+      needsSignin ? signinActions : null,
+      act(t("accounts.refresh"), () => api("POST", `accounts/${enc}/refresh`)),
+      tests.has(a.id) ? null : h("button", { onclick: () => { tests.set(a.id, makeTestPanel(a)); refreshCard(a.id); } }, t("accounts.test")),
       a.paused ? act(t("accounts.resume"), () => api("POST", `accounts/${enc}/resume`)) : act(t("accounts.pause"), () => api("POST", `accounts/${enc}/pause`)),
-      h("button", { class: "danger account-remove", onclick: e => removeAccount(a, e.target) }, t("common.remove")));
+      h("button", { "aria-expanded": String(showMore), onclick: toggleMore }, showMore ? t("accounts.less") : t("accounts.more")),
+      showMore ? secondaryActions : remove);
+  }
+
+  // quotaSection folds an out-of-rotation account's quota until the user
+  // unfolds it; the choice survives reloads.
+  function quotaSection(a) {
+    if (!outOfRotation(a)) return quota(a);
+    const remember = e => {
+      if (e.target.open) quotaShown.add(a.id);
+      else quotaShown.delete(a.id);
+    };
+    return h("details", { class: "fold account-quota", open: quotaShown.has(a.id), ontoggle: remember },
+      h("summary", {}, t("accounts.quota.title")),
+      quota(a));
   }
 
   function updateCardEntry(entry, a) {
@@ -1245,7 +1279,7 @@ views.accounts = container => {
         a.env_names.length ? t("accounts.env_names", { names: a.env_names.join(", ") }) : "")),
       h("p", {}, a.models ? t("accounts.models", { models: a.models.map(m => m.id).join(", ") || "—" }) : h("span", { class: "muted" }, t("accounts.models.unknown"))),
       a.allowed_models.length ? h("p", {}, t("accounts.allowed_models", { models: routedModels.join(", ") || "—" })) : null,
-      quota(a));
+      quotaSection(a));
     updateCardControls(entry, a);
   }
 
@@ -1453,6 +1487,8 @@ views.accounts = container => {
       imports.delete(acctID);
       routings.delete(acctID);
       tests.delete(acctID);
+      moreOpen.delete(acctID);
+      quotaShown.delete(acctID);
     }
 
     let cursor = cards.firstElementChild;

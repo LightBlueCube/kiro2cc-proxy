@@ -32,6 +32,8 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .account-card { display: flex; flex-direction: column; }
 .account-actions { gap: 8px; margin-top: auto; padding-top: 12px; }
 .account-remove { margin-left: auto; }
+.account-more { flex-basis: 100%; gap: 8px; }
+.account-quota { margin-top: 8px; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 12px; }
 .error { color: var(--bad); min-height: 1em; margin: 0; }
