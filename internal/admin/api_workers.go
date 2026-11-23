@@ -103,6 +103,7 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 	}
 	keyNames := map[string]string{
 		store.SystemKeyWarmup: "warmup",
+		store.SystemKeyTest:   "test",
 	}
 	for _, k := range keys {
 		keyNames[k.Hash] = k.Name

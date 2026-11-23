@@ -96,6 +96,7 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/accounts/{id}/pause", h.authed(h.pauseAccount(true)))
 	h.mux.HandleFunc("POST /admin/api/accounts/{id}/resume", h.authed(h.pauseAccount(false)))
 	h.mux.HandleFunc("POST /admin/api/accounts/{id}/refresh", h.authed(h.refreshAccount))
+	h.mux.HandleFunc("POST /admin/api/accounts/{id}/test", h.authed(h.testAccount))
 	h.mux.HandleFunc("PUT /admin/api/accounts/{id}/proxy", h.authed(h.setAccountProxy))
 	h.mux.HandleFunc("PUT /admin/api/accounts/{id}/routing", h.authed(h.setAccountRouting))
 	h.mux.HandleFunc("POST /admin/api/accounts/{id}/signin", h.authed(h.startLogin))

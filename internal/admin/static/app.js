@@ -886,6 +886,7 @@ views.accounts = container => {
   const signins = new Map(); // account id → {code, node}
   const imports = new Map(); // account id → {token, node}
   const routings = new Map(); // account id → {node, sync}
+  const tests = new Map(); // account id → {node}
 
   const setChildren = (node, ...children) => node.replaceChildren(...h("div", {}, ...children).childNodes);
 
@@ -1072,6 +1073,34 @@ views.accounts = container => {
     return { node, sync };
   }
 
+  // makeTestPanel runs one "who are you" call through the account; the model
+  // is picked from the offered ones or typed, empty = the cheapest.
+  function makeTestPanel(a) {
+    const accountID = a.id;
+    const listID = `test-models-${accountID}`;
+    const model = h("input", { list: listID, placeholder: t("accounts.test.auto"), style: "width:240px" });
+    const outcome = h("div");
+    const run = event => {
+      event.preventDefault();
+      outcome.replaceChildren();
+      runCardAction(accountID, event.submitter, async () => {
+        const result = await api("POST", `accounts/${encodeURIComponent(accountID)}/test`, { model: model.value.trim() });
+        outcome.replaceChildren(
+          h("p", { class: "muted" }, t("accounts.test.result", { model: result.model, effort: result.effort, ms: result.duration_ms })),
+          h("p", { class: "mono" }, result.reply));
+      });
+    };
+    const node = h("form", { class: "card", onsubmit: run },
+      h("h3", {}, t("accounts.test.title")),
+      h("datalist", { id: listID }, (a.models || []).map(m => h("option", { value: m.id }, m.name))),
+      h("div", { class: "row" },
+        h("label", {}, t("accounts.test.model"), model),
+        h("button", { type: "submit", class: "primary" }, t("accounts.test.run")),
+        h("button", { type: "button", onclick: () => { tests.delete(accountID); refreshCard(accountID); } }, t("accounts.test.close"))),
+      outcome);
+    return { node };
+  }
+
   // autoPauseNotice explains why the account was auto-paused and what to fix
   // before resuming manually.
   function autoPauseNotice(a) {
@@ -1155,7 +1184,7 @@ views.accounts = container => {
   function syncCardPanels(entry, a) {
     const routing = routings.get(a.id);
     if (routing) routing.sync(a);
-    const activePanels = [signins.get(a.id)?.node, imports.get(a.id)?.node, routing?.node].filter(Boolean);
+    const activePanels = [signins.get(a.id)?.node, imports.get(a.id)?.node, routing?.node, tests.get(a.id)?.node].filter(Boolean);
     const unchanged = entry.panels.children.length === activePanels.length
       && activePanels.every((n, i) => entry.panels.children[i] === n);
     if (!unchanged) entry.panels.replaceChildren(...activePanels);
@@ -1184,6 +1213,7 @@ views.accounts = container => {
       signins.has(a.id) ? null : h("button", { onclick: e => startSignin(a.id, e.target) }, a.user || a.disabled ? t("accounts.signin_again") : t("accounts.signin")),
       imports.has(a.id) ? null : h("button", { onclick: () => { imports.set(a.id, makeImportPanel(a.id)); refreshCard(a.id); } }, t("accounts.import")),
       act(t("accounts.refresh"), () => api("POST", `accounts/${enc}/refresh`)),
+      tests.has(a.id) ? null : h("button", { onclick: () => { tests.set(a.id, makeTestPanel(a)); refreshCard(a.id); } }, t("accounts.test")),
       h("button", { onclick: e => renameAccount(a, e.target) }, t("accounts.rename")),
       routings.has(a.id) ? null : h("button", { onclick: () => { routings.set(a.id, makeRoutingPanel(a)); refreshCard(a.id); } }, t("accounts.routing.edit")),
       h("button", { onclick: e => editProxy(a, e.target) }, t("accounts.proxy.edit")),
@@ -1422,6 +1452,7 @@ views.accounts = container => {
       signins.delete(acctID);
       imports.delete(acctID);
       routings.delete(acctID);
+      tests.delete(acctID);
     }
 
     let cursor = cards.firstElementChild;
@@ -1467,9 +1498,9 @@ views.accounts = container => {
     h("div", { class: "row" }, h("h1", { class: "grow" }, t("accounts.title")),
       h("button", { onclick: e => refreshAll(e.target) }, t("accounts.refresh_all"))),
     h("div", { class: "card" }, form), modelsFold, cards);
-  // Re-render on a timer unless a sign-in, import, or routing edit is open.
+  // Re-render on a timer unless a sign-in, import, routing edit, or test is open.
   const stopPolling = polling(container, 10000, async () => {
-    if (signins.size === 0 && imports.size === 0 && routings.size === 0) await load();
+    if (signins.size === 0 && imports.size === 0 && routings.size === 0 && tests.size === 0) await load();
   });
   return () => {
     stopPolling();

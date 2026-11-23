@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"agyrelay/internal/agy"
@@ -14,18 +15,18 @@ import (
 )
 
 const (
-	warmupPromptText   = "who are you"
+	whoAreYouPrompt    = "who are you"
 	warmupIdleTimeout  = time.Minute
 	warmupCloseTimeout = 10 * time.Second
 )
 
-// ErrWarmupBusy reports that worker slots are occupied, so warmup deferred
-// without evicting any user session.
-var ErrWarmupBusy = errors.New("worker slots busy")
+// ErrSlotsBusy reports that worker slots are occupied, so a system call
+// deferred without evicting any user session.
+var ErrSlotsBusy = errors.New("worker slots busy")
 
-// WarmupRequest describes one minimal call sent to start a full weekly quota
-// pool's reset countdown.
-type WarmupRequest struct {
+// SystemCall describes one minimal call the relay sends on its own behalf:
+// a weekly quota warmup or an administrator's account test.
+type SystemCall struct {
 	KeyHash string
 	KeyName string
 	Model   string
@@ -37,10 +38,20 @@ type WarmupRequest struct {
 // Warmup sends a minimal prompt on account using req.Slug to start the reset
 // countdown of req.Group, records the call via the gateway's Recorder, and
 // closes and removes the throwaway session immediately after. It returns
-// ErrWarmupBusy without recording a call if all worker slots are occupied.
-func (g *Gateway) Warmup(ctx context.Context, account *pool.Account, req WarmupRequest) error {
+// ErrSlotsBusy without recording a call if all worker slots are occupied.
+func (g *Gateway) Warmup(ctx context.Context, account *pool.Account, req SystemCall) error {
+	_, err := g.runSystemCall(ctx, account, req)
+	return err
+}
+
+// Probe makes the same call as Warmup and returns the model's reply.
+func (g *Gateway) Probe(ctx context.Context, account *pool.Account, req SystemCall) (string, error) {
+	return g.runSystemCall(ctx, account, req)
+}
+
+func (g *Gateway) runSystemCall(ctx context.Context, account *pool.Account, req SystemCall) (string, error) {
 	if err := g.tryAcquireWarmupSlot(account, req); err != nil {
-		return err
+		return "", err
 	}
 
 	rec := Record{
@@ -60,7 +71,7 @@ func (g *Gateway) Warmup(ctx context.Context, account *pool.Account, req WarmupR
 	if err != nil {
 		g.releaseWarmupSlot(account, req.KeyHash)
 		g.recordWarmup(rec, time.Time{}, nil, "", warmupContextOrUpstreamErr(ctx, err))
-		return err
+		return "", err
 	}
 
 	sessionID, models, err := proc.NewSession(ctx, agy.SessionSpec{Cwd: account.Workspace()})
@@ -70,7 +81,7 @@ func (g *Gateway) Warmup(ctx context.Context, account *pool.Account, req WarmupR
 			account.Disable(err)
 		}
 		g.recordWarmup(rec, time.Time{}, nil, "", warmupContextOrUpstreamErr(ctx, err))
-		return err
+		return "", err
 	}
 	if models != nil {
 		account.SetModels(models)
@@ -102,12 +113,13 @@ func (g *Gateway) Warmup(ctx context.Context, account *pool.Account, req WarmupR
 	at.turn = proc.RunTurn(agy.TurnSpec{
 		SessionID:   sessionID,
 		Model:       req.Slug,
-		Prompt:      []agy.ContentBlock{agy.TextBlock(warmupPromptText)},
+		Prompt:      []agy.ContentBlock{agy.TextBlock(whoAreYouPrompt)},
 		IdleTimeout: warmupIdleTimeout,
 	})
 	g.mu.Unlock()
 
 	var firstOutput time.Time
+	var reply strings.Builder
 	for {
 		ev, ok := at.turn.Next(ctx)
 		if !ok {
@@ -115,6 +127,9 @@ func (g *Gateway) Warmup(ctx context.Context, account *pool.Account, req WarmupR
 		}
 		if firstOutput.IsZero() && (ev.Kind == agy.EventText || ev.Kind == agy.EventThought) && ev.Text != "" {
 			firstOutput = time.Now()
+		}
+		if ev.Kind == agy.EventText {
+			reply.WriteString(ev.Text)
 		}
 	}
 	if ctx.Err() != nil {
@@ -172,14 +187,14 @@ func (g *Gateway) Warmup(ctx context.Context, account *pool.Account, req WarmupR
 	g.recordWarmup(rec, firstOutput, usage, finish, convErr)
 	if convErr != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return "", ctx.Err()
 		}
-		return errors.New(convErr.Message)
+		return "", errors.New(convErr.Message)
 	}
-	return nil
+	return reply.String(), nil
 }
 
-func (g *Gateway) tryAcquireWarmupSlot(account *pool.Account, req WarmupRequest) error {
+func (g *Gateway) tryAcquireWarmupSlot(account *pool.Account, req SystemCall) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var idleTotal, accountIdle int
@@ -197,14 +212,14 @@ func (g *Gateway) tryAcquireWarmupSlot(account *pool.Account, req WarmupRequest)
 		}
 	}
 	if max := int(g.maxWorkers.Load()); max > 0 && g.busyTotal+idleTotal >= max {
-		return ErrWarmupBusy
+		return ErrSlotsBusy
 	}
 	if account.Turns()+accountIdle >= g.pool.TurnsPerAccount() {
-		return ErrWarmupBusy
+		return ErrSlotsBusy
 	}
 	if err := account.TryAcquire(req.Group); err != nil {
 		if errors.Is(err, pool.ErrSlotBusy) {
-			return ErrWarmupBusy
+			return ErrSlotsBusy
 		}
 		return err
 	}

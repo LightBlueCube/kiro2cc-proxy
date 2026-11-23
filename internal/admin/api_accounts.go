@@ -355,6 +355,36 @@ func (h *Handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) testAccount(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Model string `json:"model"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := h.control.TestAccount(r.Context(), id, req.Model)
+	var input *control.InputError
+	switch {
+	case errors.Is(err, store.ErrNotFound), errors.As(err, &input):
+		h.fail(w, "test account", err)
+	case errors.Is(err, control.ErrBusy):
+		writeError(w, http.StatusConflict, err.Error())
+	case err != nil:
+		h.audit(r, "account_test_failed", h.accountName(id))
+		writeError(w, http.StatusBadGateway, "test failed: "+err.Error())
+	default:
+		h.audit(r, "account_tested", fmt.Sprintf("%s with %s", h.accountName(id), result.Slug))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"model":       result.Model,
+			"slug":        result.Slug,
+			"effort":      result.Effort,
+			"reply":       result.Reply,
+			"duration_ms": result.Duration.Milliseconds(),
+		})
+	}
+}
+
 func (h *Handler) awaitsVerification(id string) bool {
 	account := h.pool.Account(id)
 	return account != nil && account.Status().Verify

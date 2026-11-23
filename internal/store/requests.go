@@ -86,6 +86,11 @@ const StatusCancelled = "cancelled"
 // never appears in /user/ queries, and is excluded from key_* billing tables.
 const SystemKeyWarmup = "system:warmup"
 
+// SystemKeyTest is the synthetic key_hash for the calls an administrator
+// makes to test an account. It is excluded from key_* billing tables like
+// SystemKeyWarmup.
+const SystemKeyTest = "system:test"
+
 // IsSystemKey reports whether keyHash belongs to an internal relay call rather
 // than a client API key.
 func IsSystemKey(keyHash string) bool {

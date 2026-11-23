@@ -86,7 +86,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Budget: budget, Flags: flags, Log: log})
+	gw, err := gateway.New(gateway.Config{Pool: p, Bridge: b, DataDir: dir, SnapshotTTL: time.Hour, IdleClose: time.Hour, Recorder: recorder, Budget: budget, Flags: flags, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1524,5 +1524,46 @@ func TestWarmupSettingsAndCallsView(t *testing.T) {
 	var userRows []map[string]any
 	if err := json.Unmarshal([]byte(userReply.raw), &userRows); err != nil || len(userRows) != 0 {
 		t.Fatalf("user requests leaked warmup calls: %s, %v", userReply.raw, err)
+	}
+}
+
+func TestAccountTest(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if err := SetPassword(ctx, e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+
+	add := c.do("POST", "/admin/api/accounts", map[string]any{"name": "main", "env": []string{agytest.EnvRun + "=1"}}, nil)
+	if add.status != http.StatusOK {
+		t.Fatalf("add = %d %s", add.status, add.raw)
+	}
+	path := "/admin/api/accounts/" + add.body["id"].(string) + "/test"
+
+	// A refresh starts agy, and its probe session reports the models.
+	if r := c.do("POST", "/admin/api/accounts/"+add.body["id"].(string)+"/refresh", nil, nil); r.status != http.StatusOK {
+		t.Fatalf("refresh = %d %s", r.status, r.raw)
+	}
+
+	r := c.do("POST", path, map[string]any{"model": "claude-opus-5-5"}, nil)
+	if r.status != http.StatusOK || r.body["reply"] != "reply to: who are you" || r.body["model"] != "claude-opus-5-5" || r.body["slug"] != "claude-opus-5-5-high" {
+		t.Fatalf("test with a model = %d %s", r.status, r.raw)
+	}
+	if r := c.do("POST", path, map[string]any{"model": ""}, nil); r.status != http.StatusOK || r.body["reply"] != "reply to: who are you" {
+		t.Fatalf("test with the cheapest model = %d %s", r.status, r.raw)
+	}
+	if r := c.do("POST", path, map[string]any{"model": "no-such-model"}, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("test with an unoffered model = %d %s, want 400", r.status, r.raw)
+	}
+	if r := c.do("POST", "/admin/api/accounts/missing/test", map[string]any{"model": ""}, nil); r.status != http.StatusNotFound {
+		t.Fatalf("test of an unknown account = %d %s, want 404", r.status, r.raw)
+	}
+
+	rows := c.do("GET", "/admin/api/requests?key="+store.SystemKeyTest, nil, nil)
+	var calls []map[string]any
+	if err := json.Unmarshal([]byte(rows.raw), &calls); err != nil || len(calls) != 2 || calls[0]["key"] != "test" || calls[0]["api"] != "" {
+		t.Fatalf("admin test requests = %s, %v", rows.raw, err)
 	}
 }

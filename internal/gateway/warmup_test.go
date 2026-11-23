@@ -14,7 +14,7 @@ func TestWarmupRecordsCallAndCleansUpSession(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	account := h.p.Account("acct0")
 
-	err := h.gw.Warmup(context.Background(), account, WarmupRequest{
+	err := h.gw.Warmup(context.Background(), account, SystemCall{
 		KeyHash: "system:warmup",
 		KeyName: "warmup",
 		Model:   "gemini-3.8-flash",
@@ -58,11 +58,39 @@ func TestWarmupRecordsCallAndCleansUpSession(t *testing.T) {
 	}
 }
 
+func TestProbeReturnsReplyAndRecordsUnderCallerKey(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	account := h.p.Account("acct0")
+
+	reply, err := h.gw.Probe(context.Background(), account, SystemCall{
+		KeyHash: "system:test",
+		KeyName: "test",
+		Model:   "gemini-3.8-flash",
+		Slug:    "gemini-3.8-flash-low",
+		Effort:  "low",
+		Group:   pool.GroupGemini,
+	})
+	if err != nil {
+		t.Fatalf("Probe failed: %v", err)
+	}
+	if reply != "reply to: who are you" {
+		t.Errorf("reply = %q, want %q", reply, "reply to: who are you")
+	}
+
+	rec := h.records.all(t, 1)[0]
+	if rec.KeyHash != "system:test" || rec.KeyName != "test" || rec.Err != nil {
+		t.Errorf("record = %+v, want a successful system:test call", rec)
+	}
+	if len(h.gw.Sessions()) != 0 {
+		t.Errorf("sessions left open after probe: %+v", h.gw.Sessions())
+	}
+}
+
 func TestWarmupQuotaFailureCoolsGroupAndLinksCallToken(t *testing.T) {
 	h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}})
 	account := h.p.Account("acct0")
 
-	err := h.gw.Warmup(context.Background(), account, WarmupRequest{
+	err := h.gw.Warmup(context.Background(), account, SystemCall{
 		KeyHash: "system:warmup",
 		KeyName: "warmup",
 		Model:   "claude-opus-5-5",
@@ -110,7 +138,7 @@ func TestWarmupDefersWhenSlotsOccupiedWithoutEvictingIdleUserSession(t *testing.
 		t.Fatalf("expected 1 idle session, got %d", len(before))
 	}
 
-	err := h.gw.Warmup(context.Background(), h.p.Account("acct0"), WarmupRequest{
+	err := h.gw.Warmup(context.Background(), h.p.Account("acct0"), SystemCall{
 		KeyHash: "system:warmup",
 		KeyName: "warmup",
 		Model:   "gemini-3.8-flash",
@@ -118,8 +146,8 @@ func TestWarmupDefersWhenSlotsOccupiedWithoutEvictingIdleUserSession(t *testing.
 		Effort:  "low",
 		Group:   pool.GroupGemini,
 	})
-	if !errors.Is(err, ErrWarmupBusy) {
-		t.Fatalf("Warmup err = %v, want ErrWarmupBusy", err)
+	if !errors.Is(err, ErrSlotsBusy) {
+		t.Fatalf("Warmup err = %v, want ErrSlotsBusy", err)
 	}
 	after := h.gw.Sessions()
 	if len(after) != 1 || after[0].ID != before[0].ID {

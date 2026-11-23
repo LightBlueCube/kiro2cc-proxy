@@ -461,7 +461,7 @@ func (c *Control) warmAccountGroup(ctx context.Context, account *pool.Account, s
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, warmupCallTimeout)
-	err = c.cfg.Gateway.Warmup(callCtx, account, gateway.WarmupRequest{
+	err = c.cfg.Gateway.Warmup(callCtx, account, gateway.SystemCall{
 		KeyHash: store.SystemKeyWarmup,
 		KeyName: warmupKeyName,
 		Model:   target.model,
@@ -471,7 +471,7 @@ func (c *Control) warmAccountGroup(ctx context.Context, account *pool.Account, s
 	})
 	cancel()
 
-	if errors.Is(err, gateway.ErrWarmupBusy) {
+	if errors.Is(err, gateway.ErrSlotsBusy) {
 		return now.Add(warmupBusyRetry), false, false
 	}
 	if err != nil {
@@ -620,7 +620,14 @@ func pickWarmupModel(account *pool.Account, catalog []conv.ModelInfo, group, con
 		configuredMissing = true
 	}
 
-	slices.SortFunc(candidates, func(a, b conv.ModelInfo) int {
+	return lowestEffortTarget(cheapestModel(candidates, prices)), configuredMissing, true
+}
+
+// cheapestModel returns the model of candidates (not empty) with the lowest
+// unit cost; models without a price come last.
+func cheapestModel(candidates []conv.ModelInfo, prices []usage.Price) conv.ModelInfo {
+	sorted := slices.Clone(candidates)
+	slices.SortFunc(sorted, func(a, b conv.ModelInfo) int {
 		costA, pricedA := usage.UnitCost(prices, a.ID)
 		costB, pricedB := usage.UnitCost(prices, b.ID)
 		if pricedA != pricedB {
@@ -636,7 +643,7 @@ func pickWarmupModel(account *pool.Account, catalog []conv.ModelInfo, group, con
 		}
 		return cmp.Compare(a.ID, b.ID)
 	})
-	return lowestEffortTarget(candidates[0]), configuredMissing, true
+	return sorted[0]
 }
 
 func matchConfiguredModel(candidates []conv.ModelInfo, configured string) (warmupTarget, bool) {
