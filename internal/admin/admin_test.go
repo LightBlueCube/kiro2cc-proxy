@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1420,5 +1421,108 @@ func TestLegacyAccountDirAndSnapshotMigration(t *testing.T) {
 	updatedSnaps, err := os.ReadFile(snapPath)
 	if err != nil || !strings.Contains(string(updatedSnaps), `"account":"`+migratedID+`"`) {
 		t.Fatalf("migrated snapshots.json = %s, %v", updatedSnaps, err)
+	}
+}
+
+func TestWarmupSettingsAndCallsView(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if err := SetPassword(ctx, e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+
+	// GET settings returns warmup defaults and stays round-trippable to PUT once defaults is removed.
+	r := c.do("GET", "/admin/api/settings", nil, nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("GET settings = %d %s", r.status, r.raw)
+	}
+	if r.body["warmup_full_pools"] != false {
+		t.Fatalf("warmup_full_pools = %v, want false", r.body["warmup_full_pools"])
+	}
+	roundTrip := maps.Clone(r.body)
+	delete(roundTrip, "defaults")
+	if rr := c.do("PUT", "/admin/api/settings", roundTrip, nil); rr.status != http.StatusOK {
+		t.Fatalf("round-trip PUT settings = %d %s", rr.status, rr.raw)
+	}
+
+	base := map[string]any{
+		"turns_per_account": 3, "max_workers": 10, "snapshot_ttl": "2h",
+		"session_idle_close": "5m", "park_ttl": "10m", "log_level": "debug",
+		"retention_days": 30, "capture_response_mib": 4, "flagged_prompt_retention_days": 14,
+		"prices": []map[string]any{{"model": "gemini-3.8-flash", "input": 1.5, "cached": 0.15, "output": 7.5}},
+	}
+
+	// Reject mismatched pool model.
+	bad := maps.Clone(base)
+	bad["warmup_full_pools"] = true
+	bad["warmup_models"] = map[string]string{"gemini": "claude-sonnet-5-5"}
+	if r := c.do("PUT", "/admin/api/settings", bad, nil); r.status != http.StatusBadRequest {
+		t.Fatalf("mismatched warmup model = %d %s, want 400", r.status, r.raw)
+	}
+
+	// Accept valid warmup settings.
+	good := maps.Clone(base)
+	good["warmup_full_pools"] = true
+	good["warmup_models"] = map[string]string{"gemini": "gemini-3.8-flash", "claude-gpt": "claude-sonnet-5-5"}
+	if r := c.do("PUT", "/admin/api/settings", good, nil); r.status != http.StatusOK {
+		t.Fatalf("valid warmup settings = %d %s", r.status, r.raw)
+	}
+	if got := e.ctl.Settings(); !got.WarmupFullPools || got.WarmupModels["gemini"] != "gemini-3.8-flash" || got.WarmupModels["claude-gpt"] != "claude-sonnet-5-5" {
+		t.Fatalf("applied warmup settings = %+v", got)
+	}
+
+	// Omitting warmup_models preserves active overrides; explicit {} clears them.
+	omit := maps.Clone(base)
+	omit["warmup_full_pools"] = true
+	if r := c.do("PUT", "/admin/api/settings", omit, nil); r.status != http.StatusOK {
+		t.Fatalf("omit warmup_models = %d %s", r.status, r.raw)
+	}
+	if got := e.ctl.Settings().WarmupModels; got["gemini"] != "gemini-3.8-flash" {
+		t.Fatalf("omitted warmup_models lost overrides: %+v", got)
+	}
+	clear := maps.Clone(base)
+	clear["warmup_full_pools"] = false
+	clear["warmup_models"] = map[string]string{}
+	if r := c.do("PUT", "/admin/api/settings", clear, nil); r.status != http.StatusOK {
+		t.Fatalf("clear warmup_models = %d %s", r.status, r.raw)
+	}
+	if got := e.ctl.Settings(); got.WarmupFullPools || len(got.WarmupModels) != 0 {
+		t.Fatalf("cleared warmup settings = %+v", got)
+	}
+
+	// Warmup calls show in admin Calls APIs and never leak to /user/api/requests.
+	keyToken, _, err := e.ctl.CreateKey(ctx, "alice", store.KeyUpdate{MergeArgon: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cost := 0.0005
+	if err := e.st.AddRequest(ctx, store.Request{
+		At: time.Now(), Duration: time.Second, KeyHash: store.SystemKeyWarmup, KeyName: "warmup",
+		Account: "acct1", AccountName: "main", Model: "gemini-3.8-flash", Slug: "gemini-3.8-flash-low", Effort: "low",
+		Status: store.StatusOK, Finish: "stop",
+		Input: 50, Output: 2, CostUSD: &cost, QuotaGroup: "gemini",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reqs := c.do("GET", "/admin/api/requests?key="+store.SystemKeyWarmup, nil, nil)
+	if reqs.status != http.StatusOK {
+		t.Fatalf("admin requests = %d %s", reqs.status, reqs.raw)
+	}
+	var adminRows []map[string]any
+	if err := json.Unmarshal([]byte(reqs.raw), &adminRows); err != nil || len(adminRows) != 1 || adminRows[0]["api"] != "" || adminRows[0]["mode"] != "" || adminRows[0]["key"] != "warmup" {
+		t.Fatalf("admin warmup requests = %s, %v", reqs.raw, err)
+	}
+
+	user := e.client("203.0.113.2")
+	userReply := user.do("GET", "/user/api/requests?key="+store.SystemKeyWarmup, nil, map[string]string{"Authorization": "Bearer " + keyToken})
+	if userReply.status != http.StatusOK {
+		t.Fatalf("user requests = %d %s", userReply.status, userReply.raw)
+	}
+	var userRows []map[string]any
+	if err := json.Unmarshal([]byte(userReply.raw), &userRows); err != nil || len(userRows) != 0 {
+		t.Fatalf("user requests leaked warmup calls: %s, %v", userReply.raw, err)
 	}
 }

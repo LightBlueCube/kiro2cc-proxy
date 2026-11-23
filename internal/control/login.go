@@ -67,6 +67,7 @@ func (c *Control) SubmitLogin(ctx context.Context, id, code string) (string, err
 	c.cfg.CloudCode.ClearVerification(id)
 	account.SyncCooldowns(nil, time.Time{})
 	account.SignedIn()
+	c.resetAccountWarmup(id)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()

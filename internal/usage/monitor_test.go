@@ -784,3 +784,19 @@ func TestApplySampleCooldownsBackgroundSample(t *testing.T) {
 		}
 	})
 }
+
+func TestSetOnQuotaNotifiesAfterRefresh(t *testing.T) {
+	e := newMonitorEnv(t)
+	var gotID string
+	var gotGroups int
+	e.monitor.SetOnQuota(func(accountID string, q AccountQuota) {
+		gotID = accountID
+		gotGroups = len(q.Groups)
+	})
+	if _, err := e.monitor.Refresh(context.Background(), e.p.Account("a")); err != nil {
+		t.Fatal(err)
+	}
+	if gotID != "a" || gotGroups == 0 {
+		t.Fatalf("OnQuota got (%q, %d groups), want (\"a\", >0)", gotID, gotGroups)
+	}
+}

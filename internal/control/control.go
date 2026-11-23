@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -94,6 +95,14 @@ type Settings struct {
 	// FlaggedPromptRetentionDays is how long a flagged prompt that is not
 	// pinned stays on record after its last refusal or release.
 	FlaggedPromptRetentionDays int `json:"flagged_prompt_retention_days"`
+	// WarmupFullPools sends a minimal request when an in-rotation account's
+	// weekly quota pool is full (100% and countdown not yet started) to start
+	// its 7-day reset timer, ignoring per-account allowed_models routing.
+	WarmupFullPools bool `json:"warmup_full_pools"`
+	// WarmupModels optionally overrides the model used to warm up each quota
+	// group (gemini, claude-gpt, argon). Empty or absent picks the cheapest
+	// offered model in that group according to Prices.
+	WarmupModels map[string]string `json:"warmup_models"`
 }
 
 // DefaultSettings are the settings before the admin changes any.
@@ -101,7 +110,8 @@ func DefaultSettings() Settings {
 	return Settings{TurnsPerAccount: 8, SnapshotTTL: "24h", SessionIdleClose: "5m", ParkTTL: "5m", LogLevel: "info", RetentionDays: 90, CaptureResponseMiB: 4,
 		RiskControl: true, FlaggedPromptRetentionDays: 30, EgressRules: slices.Clone(egress.DefaultRules),
 		Prices:            slices.Clone(usage.DefaultPrices),
-		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures)}
+		HarnessSignatures: slices.Clone(sysprompt.DefaultSignatures),
+		WarmupModels:      map[string]string{}}
 }
 
 var logLevels = map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError}
@@ -146,6 +156,9 @@ func (s Settings) validate() error {
 		return err
 	}
 	if err := sysprompt.ValidateSignatures(s.HarnessSignatures); err != nil {
+		return err
+	}
+	if err := validateWarmupModels(s.WarmupModels); err != nil {
 		return err
 	}
 	return usage.ValidatePrices(s.Prices)
@@ -211,6 +224,7 @@ func decodeSettings(raw []byte, s *Settings) error {
 		Prices            []map[string]json.RawMessage `json:"prices"`
 		HarnessSignatures json.RawMessage              `json:"harness_signatures"`
 		EgressRules       json.RawMessage              `json:"egress_rules"`
+		WarmupModels      json.RawMessage              `json:"warmup_models"`
 	}
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		return err
@@ -225,12 +239,16 @@ func decodeSettings(raw []byte, s *Settings) error {
 	if hasEgressRules {
 		s.EgressRules = []string{}
 	}
+	if stored.WarmupModels != nil {
+		s.WarmupModels = map[string]string{}
+	}
 	if err := json.Unmarshal(raw, s); err != nil {
 		return err
 	}
 	if !hasEgressRules {
 		s.EgressRules = defaults.EgressRules
 	}
+	s.WarmupModels = cleanWarmupModels(s.WarmupModels)
 	if s.TurnsPerAccount == 0 {
 		s.TurnsPerAccount = defaults.TurnsPerAccount
 	}
@@ -305,17 +323,19 @@ type Control struct {
 	keys     map[string]conv.Caller // active keys, by key hash
 	allKeys  map[string]store.Key   // active + revoked keys, by key hash
 	logins   map[string]*pendingLogin
+	warmup   *warmupTracker
 }
 
 // New registers the stored accounts with the pool and loads the API keys.
 func New(ctx context.Context, cfg Config) (*Control, error) {
 	cfg.Settings.EgressRules = cleanRuleLines(cfg.Settings.EgressRules)
+	cfg.Settings.WarmupModels = cleanWarmupModels(cfg.Settings.WarmupModels)
 	rules, err := egress.ParseRules(cfg.Settings.EgressRules)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Egress.SetRules(rules)
-	c := &Control{cfg: cfg, log: cfg.Log, settings: cfg.Settings, logins: map[string]*pendingLogin{}}
+	c := &Control{cfg: cfg, log: cfg.Log, settings: cfg.Settings, logins: map[string]*pendingLogin{}, warmup: newWarmupTracker()}
 	accounts, err := cfg.Store.Accounts(ctx)
 	if err != nil {
 		return nil, err
@@ -349,6 +369,9 @@ func New(ctx context.Context, cfg Config) (*Control, error) {
 	if err := c.applyCapture(ctx, cfg.Settings); err != nil {
 		return nil, err
 	}
+	if cfg.Monitor != nil {
+		cfg.Monitor.SetOnQuota(c.onQuotaSample)
+	}
 	return c, nil
 }
 
@@ -378,8 +401,13 @@ func (c *Control) migrateAccountDir(a store.Account) error {
 
 func (c *Control) Settings() Settings {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.settings
+	s := c.settings
+	s.WarmupModels = maps.Clone(s.WarmupModels)
+	c.mu.Unlock()
+	if s.WarmupModels == nil {
+		s.WarmupModels = map[string]string{}
+	}
+	return s
 }
 
 // UpdateSettings validates, stores, and applies s.
@@ -393,6 +421,10 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 		s.EgressRules = c.Settings().EgressRules
 	}
 	s.EgressRules = cleanRuleLines(s.EgressRules)
+	if s.WarmupModels == nil {
+		s.WarmupModels = c.Settings().WarmupModels
+	}
+	s.WarmupModels = cleanWarmupModels(s.WarmupModels)
 	if err := s.validate(); err != nil {
 		return &InputError{err.Error()}
 	}
@@ -416,7 +448,11 @@ func (c *Control) UpdateSettings(ctx context.Context, s Settings) error {
 		return err
 	}
 	c.cfg.Egress.SetRules(rules)
-	return c.applyRoutes(ctx)
+	if err := c.applyRoutes(ctx); err != nil {
+		return err
+	}
+	c.wakeWarmup()
+	return nil
 }
 
 func cleanRuleLines(lines []string) []string {
@@ -710,6 +746,9 @@ func (c *Control) SetAccountPaused(ctx context.Context, id string, paused bool) 
 		return err
 	}
 	account.SetPaused(paused)
+	if !paused {
+		c.wakeWarmup()
+	}
 	return nil
 }
 
@@ -744,6 +783,7 @@ func (c *Control) SetAccountProxy(ctx context.Context, id, proxy string) error {
 		return err
 	}
 	c.applyRoute(account, proxy)
+	c.wakeWarmup()
 	return nil
 }
 
@@ -775,6 +815,7 @@ func (c *Control) RemoveAccount(ctx context.Context, id string) (string, error) 
 		return "", err
 	}
 	c.CancelLogin(id)
+	c.resetAccountWarmup(id)
 	c.cfg.Monitor.Forget(id)
 	if err := c.cfg.Pool.Remove(id); err != nil {
 		return name, err

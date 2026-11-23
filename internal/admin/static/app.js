@@ -87,10 +87,17 @@ const joined = (...parts) => parts.filter(Boolean).join(" · ");
 const SHORT_HASH = 8;
 const shortHash = hash => hash.slice(0, SHORT_HASH);
 const hashText = hash => h("span", { class: "mono muted", title: hash }, shortHash(hash));
+const SYSTEM_KEY_PREFIX = "system:";
+const isSystemKey = hash => typeof hash === "string" && hash.startsWith(SYSTEM_KEY_PREFIX);
+const systemKeyLabel = (name, hash) => name || hash.slice(SYSTEM_KEY_PREFIX.length);
 // keyName is the key's name and short hash; text-only places (menus,
-// chart tips) use keyText.
-const keyName = (name, hash) => h("span", {}, name ? name + " " : "", hashText(hash));
-const keyText = (name, hash) => name ? `${name} (${shortHash(hash)})` : shortHash(hash);
+// chart tips) use keyText. System keys (e.g. "system:warmup") have no hash.
+const keyName = (name, hash) => isSystemKey(hash)
+  ? h("span", { class: "muted", title: hash }, systemKeyLabel(name, hash))
+  : h("span", {}, name ? name + " " : "", hashText(hash));
+const keyText = (name, hash) => isSystemKey(hash)
+  ? systemKeyLabel(name, hash)
+  : (name ? `${name} (${shortHash(hash)})` : shortHash(hash));
 
 // table renders rows; a column's hint explains its title on hover. A num
 // column aligns right; a fit column is as narrow as its content, leaving
@@ -235,6 +242,7 @@ const groupName = g => lookup("group", g) || g;
 // Quota group ids a key's Argon & Carbon merge involves.
 const GEMINI_GROUP = "gemini";
 const ARGON_GROUP = "argon";
+const QUOTA_GROUPS = [GEMINI_GROUP, "claude-gpt", ARGON_GROUP];
 // keyGroupName labels a key's billing group, where Argon & Carbon share one.
 const keyGroupName = g => g === ARGON_GROUP ? t("keys.group.argon") : groupName(g);
 
@@ -680,6 +688,33 @@ views.settings = (container, openTopic) => {
     syncEgressRules();
     const capture = h("input", { type: "checkbox", checked: s.capture_upstream });
     const captureLimit = h("input", { type: "number", min: 1, max: 256, value: s.capture_response_mib });
+    const warmupFullPools = h("input", { type: "checkbox", checked: s.warmup_full_pools });
+    const warmupGroupMatches = (group, id) => {
+      if (id.startsWith("claude-") || id.startsWith("gpt-oss-")) return group === "claude-gpt";
+      if (id.startsWith("gemini-4-argon") || id.startsWith("gemini-4-carbon")) return group === "argon" || group === "gemini";
+      if (id.startsWith("gemini-")) return group === "gemini";
+      return true;
+    };
+    const knownModels = new Map(catalog.map(m => [m.id, m.name]));
+    for (const p of s.prices) {
+      if (p.model && !knownModels.has(p.model)) knownModels.set(p.model, p.model);
+    }
+    const warmupGroups = QUOTA_GROUPS;
+    const warmupModels = Object.fromEntries(warmupGroups.map(g => [
+      g,
+      h("input", {
+        value: (s.warmup_models && s.warmup_models[g]) || "",
+        list: `warmup-models-${g}`,
+        placeholder: t("settings.warmup.auto"),
+        style: "width:240px",
+      }),
+    ]));
+    const readWarmupModels = () => Object.fromEntries(
+      warmupGroups.map(g => [g, warmupModels[g].value.trim()]).filter(([, v]) => v !== ""));
+    const warmupDatalists = warmupGroups.map(g => h("datalist", { id: `warmup-models-${g}` },
+      [...knownModels.entries()]
+        .filter(([id]) => warmupGroupMatches(g, id))
+        .map(([id, name]) => h("option", { value: id }, name))));
     const riskControl = h("input", { type: "checkbox", checked: s.risk_control });
     const flaggedRetention = h("input", { type: "number", min: 1, max: 3650, value: s.flagged_prompt_retention_days });
     const refuseHarness = h("input", { type: "checkbox", checked: s.refuse_harness_prompts });
@@ -717,12 +752,14 @@ views.settings = (container, openTopic) => {
           fallback_proxy: fallback.value.trim(), allow_direct: direct.checked, egress_rules: ruleLines(egressRules.value),
           capture_upstream: capture.checked, capture_response_mib: Number(captureLimit.value),
           risk_control: riskControl.checked, flagged_prompt_retention_days: Number(flaggedRetention.value),
+          warmup_full_pools: warmupFullPools.checked, warmup_models: readWarmupModels(),
         });
         toast(t("common.saved"));
         await loadGeneral();
       }, event.submitter);
     } },
       h("datalist", { id: "settings-models" }, catalog.map(m => h("option", { value: m.id }, m.name))),
+      warmupDatalists,
       h("div", { class: "card" }, h("h2", {}, t("settings.sessions")),
         h("div", { class: "row" },
           h("label", {}, t("settings.turns"), withReset(turns, d.turns_per_account)),
@@ -739,6 +776,13 @@ views.settings = (container, openTopic) => {
         h("p", { class: "muted" }, t("settings.egress_rules.note")),
         egressRules,
         h("div", { class: "row", style: "margin-top:8px" }, egressRulesReset)),
+      topic(t("settings.warmup"),
+        h("div", { class: "field" }, h("span", { class: "with-reset" },
+          h("label", { class: "check" }, warmupFullPools, t("settings.warmup.enable")), resetButton(warmupFullPools, d.warmup_full_pools))),
+        h("p", { class: "muted" }, t("settings.warmup.note")),
+        h("h3", {}, t("settings.warmup.models")),
+        h("div", { class: "row" }, warmupGroups.map(g =>
+          h("label", {}, groupName(g), withReset(warmupModels[g], (d.warmup_models && d.warmup_models[g]) || ""))))),
       topic(t("settings.records"),
         h("div", { class: "row" },
           h("label", {}, t("settings.log_level"), withReset(level, d.log_level)),
@@ -1822,7 +1866,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
   }
 
   function modeLine(r) {
-    if (!r.mode) return null;
+    if (!r.mode) return isSystemKey(r.key_hash) ? "—" : null;
     if (r.mode === "rewind") {
       return [term("warm", lookup("mode", "warm")), " · ", term("rewind", lookup("mode", "rewind"))];
     }
@@ -1838,9 +1882,12 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
       { title: t("common.time"), cell: r => stack(fmt.time(r.at),
           r.ttft_ms === null ? fmt.ms(r.duration_ms) : t("calls.time.first_output", { total: fmt.ms(r.duration_ms), first: fmt.ms(r.ttft_ms) })) },
       { title: t("calls.who"), cell: r => stack(
-          h("span", {}, h("span", { title: r.key_hash }, r.key || shortHash(r.key_hash)),
+          h("span", {},
+            isSystemKey(r.key_hash)
+              ? h("span", { class: "muted", title: r.key_hash }, systemKeyLabel(r.key, r.key_hash))
+              : h("span", { title: r.key_hash }, r.key || shortHash(r.key_hash)),
             r.session ? [" · ", h("span", { class: "mono muted", title: r.session }, shortHash(r.session))] : null),
-          [r.account || t("calls.no_account"), " · ", r.api, r.stream ? term(" ⇢", t("calls.stream.hint")) : "", anchorBadge(r.anchor)]) },
+          [r.account || t("calls.no_account"), " · ", r.api || "—", r.stream ? term(" ⇢", t("calls.stream.hint")) : "", anchorBadge(r.anchor)]) },
       { title: t("calls.model_mode"), cell: r => stack(
           [h("span", { title: r.slug }, r.model), r.effort ? term(" · " + r.effort, t("calls.effort.hint")) : ""],
           modeLine(r)) },

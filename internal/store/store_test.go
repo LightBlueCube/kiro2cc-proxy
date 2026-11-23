@@ -581,3 +581,97 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 		t.Fatalf("key_quota after reopen = %+v, %v; want %+v", quotas, err, wantQuotas)
 	}
 }
+
+func TestLatestQuotaSamples(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	t0 := time.Now().Truncate(time.Second)
+	reset1 := t0.Add(7 * 24 * time.Hour)
+	reset2 := reset1.Add(time.Hour)
+	samples := []QuotaSample{
+		{Account: "a1", At: t0, Bucket: "gemini-weekly", Group: "Gemini", Window: "weekly", Remaining: 1.0, ResetAt: reset1},
+		{Account: "a1", At: t0.Add(time.Minute), Bucket: "gemini-weekly", Group: "Gemini", Window: "weekly", Remaining: 0.95, ResetAt: reset2},
+		{Account: "a1", At: t0, Bucket: "3p-weekly", Group: "Claude", Window: "weekly", Remaining: 1.0, ResetAt: reset1},
+		{Account: "a2", At: t0.Add(2 * time.Minute), Bucket: "gemini-weekly", Group: "Gemini", Window: "weekly", Remaining: 0.5, ResetAt: reset1},
+	}
+	if err := st.AddQuotaSamples(ctx, samples); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.LatestQuotaSamples(ctx, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LatestQuotaSamples len = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].Bucket != "3p-weekly" || got[0].Remaining != 1.0 {
+		t.Errorf("got[0] = %+v, want 3p-weekly remaining 1.0", got[0])
+	}
+	if got[1].Bucket != "gemini-weekly" || got[1].Remaining != 0.95 || !got[1].ResetAt.Equal(reset2) {
+		t.Errorf("got[1] = %+v, want gemini-weekly remaining 0.95 reset %v", got[1], reset2)
+	}
+	if empty, err := st.LatestQuotaSamples(ctx, "missing"); err != nil || len(empty) != 0 {
+		t.Fatalf("missing account samples = %+v, %v", empty, err)
+	}
+}
+
+func TestSystemKeyWarmupExcludedFromKeyTables(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Millisecond)
+	cost := 0.002
+	if err := st.AddRequest(ctx, Request{
+		At: now, Duration: 2 * time.Second, KeyHash: SystemKeyWarmup, KeyName: "warmup",
+		Account: "a1", AccountName: "acct1", Model: "gemini-3.8-flash", Slug: "gemini-3.8-flash-low", Effort: "low",
+		Status: StatusOK, Finish: "stop",
+		Input: 100, Output: 5, CostUSD: &cost, QuotaGroup: "gemini",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reqs, err := st.Requests(ctx, RequestFilter{KeyHash: SystemKeyWarmup}, 0, 10)
+	if err != nil || len(reqs) != 1 {
+		t.Fatalf("warmup requests = %+v, %v", reqs, err)
+	}
+	if err := st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(10*time.Minute), map[int64]float64{reqs[0].ID: 0.001}); err != nil {
+		t.Fatal(err)
+	}
+	if spends, err := st.KeySpends(ctx, ""); err != nil || len(spends) != 0 {
+		t.Fatalf("key_usage = %+v, %v; want empty for system key", spends, err)
+	}
+	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 0 {
+		t.Fatalf("key_totals = %+v, %v; want empty for system key", totals, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, ""); err != nil || len(quotas) != 0 {
+		t.Fatalf("key_quota = %+v, %v; want empty for system key", quotas, err)
+	}
+
+	// LastAccountGroupRequestEnd sees the warmup request and ignores zero-token/other groups.
+	if err := st.AddRequest(ctx, Request{
+		At: now.Add(time.Minute), Duration: time.Second, KeyHash: SystemKeyWarmup, KeyName: "warmup",
+		Account: "a1", Model: "gemini-3.8-flash", Status: "upstream_error", QuotaGroup: "gemini",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lastEnd, err := st.LastAccountGroupRequestEnd(ctx, "a1", "gemini", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd := now.Add(2 * time.Second)
+	if !lastEnd.Equal(wantEnd) {
+		t.Fatalf("LastAccountGroupRequestEnd = %v, want %v", lastEnd, wantEnd)
+	}
+	if none, err := st.LastAccountGroupRequestEnd(ctx, "a1", "claude-gpt", now.Add(-time.Minute)); err != nil || !none.IsZero() {
+		t.Fatalf("claude-gpt LastAccountGroupRequestEnd = %v, %v; want zero", none, err)
+	}
+}

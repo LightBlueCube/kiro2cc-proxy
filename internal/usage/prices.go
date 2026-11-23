@@ -92,4 +92,18 @@ func (p Price) cost(prompt, cached, output int64) float64 {
 	return (float64(uncached)*uncachedPrice + float64(cached)*p.Cached + float64(output)*p.Output) / 1e6
 }
 
+// UnitCost returns the model's estimated uncached-input plus output USD per 1M
+// tokens from prices, and whether the model has a price.
+func UnitCost(prices []Price, model string) (float64, bool) {
+	p, ok := priceOf(prices, model)
+	if !ok {
+		return 0, false
+	}
+	in := p.Input
+	if p.CacheWrite > 0 {
+		in = p.CacheWrite
+	}
+	return in + p.Output, true
+}
+
 func clonePrices(prices []Price) []Price { return slices.Clone(prices) }

@@ -40,6 +40,32 @@ func (s *Store) LastQuotaSample(ctx context.Context, account, bucket string, bef
 		WHERE account = ? AND bucket = ? AND at < ? ORDER BY at DESC LIMIT 1`, account, bucket, before.UnixMilli()))
 }
 
+// LatestQuotaSamples returns the account's newest stored sample for each bucket.
+func (s *Store) LatestQuotaSamples(ctx context.Context, account string) ([]QuotaSample, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT q.account, q.at, q.bucket, q.grp, q.win, q.remaining, q.reset_at
+		FROM quota_samples q
+		JOIN (
+			SELECT bucket, MAX(at) AS max_at
+			FROM quota_samples
+			WHERE account = ?
+			GROUP BY bucket
+		) latest ON q.account = ? AND q.bucket = latest.bucket AND q.at = latest.max_at
+		ORDER BY q.bucket`, account, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QuotaSample
+	for rows.Next() {
+		q, err := scanQuotaSample(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
 // BucketAccounts lists by bucket the configured accounts that have
 // samples of it.
 func (s *Store) BucketAccounts(ctx context.Context) (map[string][]string, error) {
@@ -68,7 +94,7 @@ func (s *Store) QuotaCursor(ctx context.Context, account, bucket string) (QuotaS
 		WHERE c.account = ? AND c.bucket = ?`, account, bucket))
 }
 
-func scanQuotaSample(row *sql.Row) (QuotaSample, error) {
+func scanQuotaSample(row interface{ Scan(...any) error }) (QuotaSample, error) {
 	var q QuotaSample
 	var at, reset int64
 	err := row.Scan(&q.Account, &at, &q.Bucket, &q.Group, &q.Window, &q.Remaining, &reset)

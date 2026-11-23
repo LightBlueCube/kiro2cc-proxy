@@ -41,6 +41,15 @@ func TestPrices(t *testing.T) {
 	if want := 0.6*2.5 + 0.4*0.1 + 0.1*10; math.Abs(got-want) > 1e-9 {
 		t.Fatalf("cost with cache writes = %v, want %v", got, want)
 	}
+	if u, ok := UnitCost(DefaultPrices, "claude-sonnet-5-5"); !ok || math.Abs(u-12.5) > 1e-9 {
+		t.Fatalf("UnitCost(claude-sonnet-5-5) = %v, %v; want 12.5, true", u, ok)
+	}
+	if u, ok := UnitCost(DefaultPrices, "gemini-3.8-flash"); !ok || math.Abs(u-9.0) > 1e-9 {
+		t.Fatalf("UnitCost(gemini-3.8-flash) = %v, %v; want 9.0, true", u, ok)
+	}
+	if _, ok := UnitCost(DefaultPrices, "unknown-model"); ok {
+		t.Fatal("UnitCost(unknown-model) unexpectedly priced")
+	}
 }
 
 func TestRecordAndAttribute(t *testing.T) {

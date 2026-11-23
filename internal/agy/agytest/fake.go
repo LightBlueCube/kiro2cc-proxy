@@ -252,14 +252,16 @@ type fake struct {
 	// openDelay is FAKE_AGY_OPEN_DELAY.
 	openDelay time.Duration
 
-	mu       sync.Mutex
-	sessions map[string]*fakeSession
-	nextID   int
-	prompts  int
+	mu        sync.Mutex
+	sessions  map[string]*fakeSession
+	nextID    int
+	prompts   int
+	prompts3p int
 }
 
 type fakeSession struct {
 	url, token string
+	model      string
 	cancel     context.CancelFunc
 	steps      []string
 	stale      bool
@@ -412,8 +414,9 @@ func (f *fake) handle(msg rpcMessage) {
 		f.reply(msg.ID, map[string]any{})
 	case "session/set_config_option":
 		var p struct {
-			ConfigID string `json:"configId"`
-			Value    string `json:"value"`
+			SessionID string `json:"sessionId"`
+			ConfigID  string `json:"configId"`
+			Value     string `json:"value"`
 		}
 		json.Unmarshal(msg.Params, &p)
 		offered := slices.ContainsFunc(catalog(), func(m map[string]string) bool { return m["modelId"] == p.Value })
@@ -421,6 +424,13 @@ func (f *fake) handle(msg rpcMessage) {
 			// agy 1.5.3's answer to a slug outside the account's catalog.
 			f.fail(msg.ID, -32602, "Unknown model ID: "+p.Value)
 			return
+		}
+		if p.ConfigID == "model" {
+			f.mu.Lock()
+			if s := f.sessions[p.SessionID]; s != nil {
+				s.model = p.Value
+			}
+			f.mu.Unlock()
 		}
 		f.reply(msg.ID, map[string]any{"configOptions": []any{}})
 	case "session/prompt":
@@ -524,14 +534,20 @@ func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
 		}})
 		return
 	case "RetrieveUserQuotaSummary":
-		reset := time.Now().Add(72 * time.Hour).UTC().Format(time.RFC3339)
+		resetHours := 72
+		if raw := os.Getenv("FAKE_AGY_QUOTA_RESET_HOURS"); raw != "" {
+			if h, err := strconv.Atoi(raw); err == nil && h > 0 {
+				resetHours = h
+			}
+		}
+		reset := time.Now().Add(time.Duration(resetHours) * time.Hour).UTC().Format(time.RFC3339)
 		writeJSON(w, map[string]any{"response": map[string]any{"groups": []any{
 			map[string]any{"displayName": "Gemini Models", "buckets": []any{
-				map[string]any{"bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": 1 - QuotaPerPrompt*float64(f.prompts), "resetTime": reset},
+				map[string]any{"bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": max(0.0, 1-QuotaPerPrompt*float64(f.prompts)), "resetTime": reset},
 				map[string]any{"bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining", "window": "5h", "remainingFraction": 1, "resetTime": reset},
 			}},
 			map[string]any{"displayName": "Claude and GPT models", "buckets": []any{
-				map[string]any{"bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": 1, "resetTime": reset},
+				map[string]any{"bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": max(0.0, 1-QuotaPerPrompt*float64(f.prompts3p)), "resetTime": reset},
 			}},
 		}}})
 		return
@@ -616,7 +632,11 @@ func (f *fake) prompt(msg rpcMessage) {
 
 	f.mu.Lock()
 	stepsBefore, stale := len(s.steps), s.stale
-	f.prompts++
+	if strings.HasPrefix(s.model, "claude-") || strings.HasPrefix(s.model, "gpt-oss-") {
+		f.prompts3p++
+	} else {
+		f.prompts++
+	}
 	f.mu.Unlock()
 	f.addSteps(p.SessionID, s, stepUserInput)
 	if failure, line := scriptedFailure(input); failure != nil {

@@ -81,6 +81,17 @@ const StatusOK = "ok"
 // whose turn was cancelled.
 const StatusCancelled = "cancelled"
 
+// SystemKeyWarmup is the synthetic key_hash for automatic weekly-quota warmup
+// calls. It is not a SHA-256 hex digest, so it never collides with an API key,
+// never appears in /user/ queries, and is excluded from key_* billing tables.
+const SystemKeyWarmup = "system:warmup"
+
+// IsSystemKey reports whether keyHash belongs to an internal relay call rather
+// than a client API key.
+func IsSystemKey(keyHash string) bool {
+	return keyHash == "" || strings.HasPrefix(keyHash, "system:")
+}
+
 const requestAccountNameExpr = `COALESCE((SELECT name FROM accounts WHERE id = requests.account), NULLIF(requests.account_name, ''), requests.account)`
 
 const requestColumns = `id, at, key_hash, key_name, account, ` + requestAccountNameExpr + `, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
@@ -105,13 +116,13 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	if err != nil {
 		return err
 	}
-	if r.CostUSD != nil && *r.CostUSD > 0 {
+	if !IsSystemKey(r.KeyHash) && r.CostUSD != nil && *r.CostUSD > 0 {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO key_usage (key_hash, grp, cost_usd) VALUES (?, ?, ?)
 			ON CONFLICT (key_hash, grp) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd`, r.KeyHash, r.KeyGroup, *r.CostUSD); err != nil {
 			return err
 		}
 	}
-	if r.Status == StatusOK {
+	if !IsSystemKey(r.KeyHash) && r.Status == StatusOK {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO key_totals (key_hash, model, requests, input, output) VALUES (?, ?, 1, ?, ?)
 			ON CONFLICT (key_hash, model) DO UPDATE SET requests = requests + 1, input = input + excluded.input, output = output + excluded.output`,
 			r.KeyHash, r.Model, r.Input, r.Output); err != nil {
@@ -419,7 +430,7 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 		if err != nil {
 			return fmt.Errorf("request %d: %w", id, err)
 		}
-		if share > 0 && keyHash != "" && reqAccount != "" && group != "" {
+		if share > 0 && !IsSystemKey(keyHash) && reqAccount != "" && group != "" {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO key_quota (key_hash, account, account_name, grp, used) VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT (key_hash, account, grp) DO UPDATE SET used = used + excluded.used,
 					account_name = CASE WHEN excluded.account_name != '' THEN excluded.account_name ELSE key_quota.account_name END`,
@@ -641,6 +652,26 @@ func (s *Store) AccountGroupUsage(ctx context.Context, account, group string, si
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// LastAccountGroupRequestEnd returns the latest end time (at + duration_ms) of
+// a token-using request on account in quota group that ended at or after since,
+// or zero when none exists.
+func (s *Store) LastAccountGroupRequestEnd(ctx context.Context, account, group string, since time.Time) (time.Time, error) {
+	// Bounding at >= since - 1h lets SQLite range-scan requests_account_at while
+	// still matching long-running turns that began before since.
+	minStart := since.Add(-time.Hour)
+	var latest sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(at + duration_ms) FROM requests
+		WHERE account = ? AND quota_group = ? AND at >= ? AND at + duration_ms >= ? AND input + output > 0`,
+		account, group, minStart.UnixMilli(), since.UnixMilli()).Scan(&latest)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !latest.Valid {
+		return time.Time{}, nil
+	}
+	return time.UnixMilli(latest.Int64), nil
 }
 
 // Prune deletes requests, quota samples, and audit entries older than

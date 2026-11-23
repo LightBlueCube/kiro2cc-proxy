@@ -153,7 +153,7 @@ func TestLoadSettingsInitializesMissingKeysInDB(t *testing.T) {
 	if _, err := st.Setting(ctx, settingsKey, &stored); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "park_ttl", "log_level", "retention_days", "prices", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "egress_rules", "risk_control", "flagged_prompt_retention_days"} {
+	for _, key := range []string{"turns_per_account", "max_workers", "snapshot_ttl", "session_idle_close", "park_ttl", "log_level", "retention_days", "prices", "refuse_harness_prompts", "harness_signatures", "fallback_proxy", "allow_direct", "egress_rules", "risk_control", "flagged_prompt_retention_days", "warmup_full_pools", "warmup_models"} {
 		if _, ok := stored[key]; !ok {
 			t.Errorf("persisted settings still missing key %q: %+v", key, stored)
 		}

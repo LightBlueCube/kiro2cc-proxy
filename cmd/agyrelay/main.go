@@ -187,6 +187,7 @@ func runServe(args []string) error {
 		return err
 	}
 	go ctl.RunRetention(ctx)
+	go ctl.RunWarmup(ctx)
 
 	adminUI := admin.New(admin.Config{
 		Store: st, Control: ctl, Pool: accountPool, Monitor: monitor, Logs: logs, Log: log.With("component", "admin"), Proxies: cfg.proxies,

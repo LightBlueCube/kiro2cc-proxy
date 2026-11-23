@@ -66,6 +66,8 @@ func (c *Control) ImportSignIn(ctx context.Context, id, pasted string) (Imported
 		return Imported{}, &InputError{"the token did not sign in: " + err.Error()}
 	}
 	account.SignedIn()
+	c.resetAccountWarmup(id)
+	c.wakeWarmup()
 	return Imported{Email: q.User.Email}, nil
 }
 

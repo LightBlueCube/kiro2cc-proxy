@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"agyrelay/internal/agy"
+	"agyrelay/internal/store"
 )
 
 type workersView struct {
@@ -100,7 +101,9 @@ func (h *Handler) listWorkers(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "list keys", err)
 		return
 	}
-	keyNames := map[string]string{}
+	keyNames := map[string]string{
+		store.SystemKeyWarmup: "warmup",
+	}
 	for _, k := range keys {
 		keyNames[k.Hash] = k.Name
 	}

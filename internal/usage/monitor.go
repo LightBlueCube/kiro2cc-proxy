@@ -54,10 +54,19 @@ type Monitor struct {
 	latest map[string]AccountQuota
 	// settles holds by account the timer of SettleSoon.
 	settles map[string]*time.Timer
+	onQuota func(accountID string, q AccountQuota)
 }
 
 func NewMonitor(cfg MonitorConfig) *Monitor {
 	return &Monitor{cfg: cfg, latest: map[string]AccountQuota{}, settles: map[string]*time.Timer{}}
+}
+
+// SetOnQuota registers a callback invoked outside sampleMu after each
+// successful quota sample.
+func (m *Monitor) SetOnQuota(fn func(accountID string, q AccountQuota)) {
+	m.mu.Lock()
+	m.onQuota = fn
+	m.mu.Unlock()
 }
 
 // Run samples every account with a running agy until ctx ends, and
@@ -243,6 +252,19 @@ func (m *Monitor) closeProbe(account string, proc *agy.Proc, sessionID string) {
 }
 
 func (m *Monitor) sample(ctx context.Context, account *pool.Account, proc *agy.Proc, mode cooldownSyncMode) (AccountQuota, error) {
+	q, err := m.sampleLocked(ctx, account, proc, mode)
+	if err == nil {
+		m.mu.Lock()
+		cb := m.onQuota
+		m.mu.Unlock()
+		if cb != nil {
+			cb(account.ID(), q)
+		}
+	}
+	return q, err
+}
+
+func (m *Monitor) sampleLocked(ctx context.Context, account *pool.Account, proc *agy.Proc, mode cooldownSyncMode) (AccountQuota, error) {
 	m.sampleMu.Lock()
 	defer m.sampleMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
