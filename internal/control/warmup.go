@@ -34,6 +34,7 @@ const (
 
 // Scheduling intervals (variables so tests can shorten them).
 var (
+	warmupAfterRefresh    = 30 * time.Second
 	warmupResetMargin     = 2 * time.Minute
 	warmupFreshWindow     = 2 * time.Minute
 	warmupVerifySettle    = usage.SettleTime
@@ -122,7 +123,7 @@ func (c *Control) onQuotaSample(accountID string, q usage.AccountQuota) {
 		}
 	}
 	c.warmup.mu.Unlock()
-	if c.Settings().WarmupFullPools {
+	if account := c.cfg.Pool.Account(accountID); c.Settings().WarmupFullPools && account != nil && account.InRotation() {
 		c.wakeWarmup()
 	}
 }
@@ -191,11 +192,11 @@ func (c *Control) warmupPass(ctx context.Context, now time.Time) time.Time {
 		if ctx.Err() != nil {
 			return time.Time{}
 		}
-		if !accountInRotation(account) {
+		if !account.InRotation() {
 			continue
 		}
 		schedule(c.processAccountWarmup(ctx, account, settings, now))
-		now = time.Now()
+		now = advanceNow(now)
 	}
 	if nextWake.IsZero() {
 		return now.Add(warmupIdlePoll)
@@ -204,8 +205,11 @@ func (c *Control) warmupPass(ctx context.Context, now time.Time) time.Time {
 }
 
 func (c *Control) processAccountWarmup(ctx context.Context, account *pool.Account, settings Settings, now time.Time) time.Time {
-	st := c.warmup.accountState(account.ID())
 	sampledAt, groups, fromLive, hasAny := c.loadAccountQuota(ctx, account)
+	if !hasAny {
+		return time.Time{}
+	}
+	st := c.warmup.accountState(account.ID())
 
 	var nextWake time.Time
 	schedule := func(t time.Time) {
@@ -217,7 +221,7 @@ func (c *Control) processAccountWarmup(ctx context.Context, account *pool.Accoun
 		}
 	}
 
-	needRefresh, pendingAt := c.accountNeedsRefresh(ctx, account, st, sampledAt, groups, fromLive, hasAny, now)
+	needRefresh, pendingAt := c.accountNeedsRefresh(ctx, account, st, sampledAt, groups, fromLive, now)
 	schedule(pendingAt)
 
 	if needRefresh {
@@ -230,20 +234,23 @@ func (c *Control) processAccountWarmup(ctx context.Context, account *pool.Accoun
 		}
 		refreshedAt, refreshedGroups, retryAt, ok := c.refreshForWarmup(ctx, account, st, now)
 		if !ok {
+			if !account.InRotation() {
+				return time.Time{}
+			}
 			schedule(retryAt)
 			return nextWake
 		}
 		sampledAt, groups = refreshedAt, refreshedGroups
-		now = time.Now()
+		now = advanceNow(now)
 	}
 
-	if !accountInRotation(account) {
+	if !account.InRotation() {
 		return time.Time{}
 	}
 
 	warmedAny := false
 	for _, g := range groups {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || !account.InRotation() {
 			return time.Time{}
 		}
 		due, warmed, stop := c.warmAccountGroup(ctx, account, st, g, settings, sampledAt, now)
@@ -254,11 +261,15 @@ func (c *Control) processAccountWarmup(ctx context.Context, account *pool.Accoun
 		if stop {
 			break
 		}
-		now = time.Now()
+		now = advanceNow(now)
+	}
+
+	if !account.InRotation() {
+		return time.Time{}
 	}
 
 	if warmedAny {
-		verifySince := time.Now()
+		verifySince := advanceNow(now)
 		verifyAt := verifySince.Add(warmupVerifyDelay)
 		c.warmup.mu.Lock()
 		st.verifySince = verifySince
@@ -294,11 +305,7 @@ func (c *Control) loadAccountQuota(ctx context.Context, account *pool.Account) (
 	return sampledAt, groups, false, true
 }
 
-func (c *Control) accountNeedsRefresh(ctx context.Context, account *pool.Account, st *accountWarmupState, sampledAt time.Time, groups []weeklyGroupStatus, fromLive, hasAny bool, now time.Time) (bool, time.Time) {
-	if !hasAny {
-		return true, time.Time{}
-	}
-
+func (c *Control) accountNeedsRefresh(ctx context.Context, account *pool.Account, st *accountWarmupState, sampledAt time.Time, groups []weeklyGroupStatus, fromLive bool, now time.Time) (bool, time.Time) {
 	var pendingAt time.Time
 	addPending := func(t time.Time) {
 		if t.IsZero() {
@@ -382,6 +389,9 @@ func (c *Control) refreshForWarmup(ctx context.Context, account *pool.Account, s
 	defer cancel()
 	q, err := c.cfg.Monitor.Refresh(refreshCtx, account)
 	if err != nil {
+		if !account.InRotation() {
+			return time.Time{}, nil, time.Time{}, false
+		}
 		c.warmup.mu.Lock()
 		st.refreshFails++
 		wait := warmupBackoff(warmupRefreshBase, warmupRefreshMax, st.refreshFails)
@@ -446,6 +456,9 @@ func (c *Control) warmAccountGroup(ctx context.Context, account *pool.Account, s
 	if !lastEnd.IsZero() && now.Before(lastEnd.Add(warmupRecentGuard)) {
 		return lastEnd.Add(warmupRecentGuard), false, false
 	}
+	if readyAt := sampledAt.Add(warmupAfterRefresh); now.Before(readyAt) {
+		return readyAt, false, false
+	}
 
 	configured := settings.WarmupModels[g.group]
 	target, configuredMissing, ok := pickWarmupModel(account, c.cfg.Gateway.AccountModels(account.ID()), g.group, configured, settings.Prices)
@@ -475,6 +488,9 @@ func (c *Control) warmAccountGroup(ctx context.Context, account *pool.Account, s
 		return now.Add(warmupBusyRetry), false, false
 	}
 	if err != nil {
+		if !account.InRotation() {
+			return time.Time{}, false, true
+		}
 		c.warmup.mu.Lock()
 		gs.streak++
 		gs.lastAttempt = now
@@ -485,7 +501,7 @@ func (c *Control) warmAccountGroup(ctx context.Context, account *pool.Account, s
 		if ctx.Err() == nil {
 			c.log.Warn("weekly quota warmup failed", "account", account.Name(), "group", g.group, "model", target.model, "slug", target.slug, "retry_in", wait, "err", err)
 		}
-		return nextRetry, false, !accountInRotation(account)
+		return nextRetry, false, false
 	}
 
 	c.warmup.mu.Lock()
@@ -501,12 +517,14 @@ func (c *Control) warmAccountGroup(ctx context.Context, account *pool.Account, s
 	} else {
 		c.log.Info("weekly quota warmup sent", "account", account.Name(), "group", g.group, "model", target.model, "slug", target.slug)
 	}
-	return nextRetry, true, false
+	return nextRetry, true, !account.InRotation()
 }
 
-func accountInRotation(account *pool.Account) bool {
-	st := account.Status()
-	return !st.Paused && st.Disabled == "" && st.Blocked == "" && !st.Verify
+func advanceNow(now time.Time) time.Time {
+	if cur := time.Now(); cur.After(now) {
+		return cur
+	}
+	return now
 }
 
 func weeklySnapshotFromLive(q usage.AccountQuota) (time.Time, []weeklyGroupStatus) {

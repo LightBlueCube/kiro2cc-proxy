@@ -86,6 +86,11 @@ func (g *Gateway) runSystemCall(ctx context.Context, account *pool.Account, req 
 	if models != nil {
 		account.SetModels(models)
 	}
+	if err := account.Available(req.Group); err != nil {
+		g.cleanupWarmupSession(account, proc, sessionID)
+		g.releaseWarmupSlot(account, req.KeyHash)
+		return "", err
+	}
 	rec.SessionID = sessionID
 
 	sess := &session{

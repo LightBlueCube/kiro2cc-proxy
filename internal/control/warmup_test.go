@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -321,15 +322,35 @@ func TestWarmupPassEndToEnd(t *testing.T) {
 		t.Fatalf("disabled warmup started %d procs", len(acct.LiveProcs()))
 	}
 
-	// Enable warmup and run a pass.
+	// Enable warmup: an un-refreshed account with no quota samples is never probed by warmup.
 	s := e.ctl.Settings()
 	s.WarmupFullPools = true
 	if err := e.ctl.UpdateSettings(ctx, s); err != nil {
 		t.Fatal(err)
 	}
+	if next := e.ctl.warmupPass(ctx, time.Now()); next.IsZero() {
+		t.Fatal("enabled warmupPass returned zero next wake")
+	}
+	if len(acct.LiveProcs()) != 0 {
+		t.Fatalf("warmup probed un-refreshed account: %d procs", len(acct.LiveProcs()))
+	}
+
+	// Refresh the account: warmup waits out the 30s post-refresh debounce before sending calls.
+	if err := e.ctl.RefreshAccount(ctx, acct.ID()); err != nil {
+		t.Fatal(err)
+	}
 	next := e.ctl.warmupPass(ctx, time.Now())
 	if next.IsZero() {
 		t.Fatal("enabled warmupPass returned zero next wake")
+	}
+	if reqs, err := e.st.Requests(ctx, store.RequestFilter{}, 0, 20); err != nil || len(reqs) != 0 {
+		t.Fatalf("requests before 30s debounce elapsed = %+v, %v; want none", reqs, err)
+	}
+
+	// Once the 30s post-refresh debounce elapses, warmup runs without re-refreshing.
+	next = e.ctl.warmupPass(ctx, next)
+	if next.IsZero() {
+		t.Fatal("post-debounce warmupPass returned zero next wake")
 	}
 
 	reqs, err := e.st.Requests(ctx, store.RequestFilter{}, 0, 20)
@@ -365,7 +386,7 @@ func TestWarmupPassEndToEnd(t *testing.T) {
 	}
 
 	// A second immediate pass must not repeat warmup calls.
-	e.ctl.warmupPass(ctx, time.Now())
+	e.ctl.warmupPass(ctx, next)
 	reqs2, err := e.st.Requests(ctx, store.RequestFilter{}, 0, 20)
 	if err != nil {
 		t.Fatal(err)
@@ -439,6 +460,13 @@ func TestWarmupSkipsPausedAndRecentGroupUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := e.ctl.RefreshAccount(ctx, active.ID()); err != nil {
+		t.Fatal(err)
+	}
+	// Also refresh paused manually to confirm even a sampled paused account is never warmed.
+	if err := e.ctl.RefreshAccount(ctx, paused.ID()); err != nil {
+		t.Fatal(err)
+	}
 	// Record a recent user request in gemini so warmup skips gemini and only warms claude-gpt.
 	now := time.Now()
 	if err := e.st.AddRequest(ctx, store.Request{
@@ -457,16 +485,95 @@ func TestWarmupSkipsPausedAndRecentGroupUsage(t *testing.T) {
 	if err := e.ctl.UpdateSettings(ctx, s); err != nil {
 		t.Fatal(err)
 	}
-	e.ctl.warmupPass(ctx, now)
+	next := e.ctl.warmupPass(ctx, now)
+	e.ctl.warmupPass(ctx, next)
 
-	if len(paused.LiveProcs()) != 0 {
-		t.Fatalf("paused account started %d procs", len(paused.LiveProcs()))
-	}
 	reqs, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: store.SystemKeyWarmup}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(reqs) != 1 || reqs[0].Account != active.ID() || reqs[0].QuotaGroup != pool.GroupClaudeGPT {
 		t.Fatalf("warmup requests = %+v, want only claude-gpt on active", reqs)
+	}
+}
+
+func TestWarmupDebounceSkipsPausedUncheckedAndOutOfRotationAccounts(t *testing.T) {
+	e := newWarmupEnv(t)
+	ctx := context.Background()
+
+	addFull := func(name, proxy string) *pool.Account {
+		t.Helper()
+		a, err := e.ctl.AddAccount(ctx, name, []string{agytest.EnvRun + "=1", "FAKE_AGY_QUOTA_RESET_HOURS=168"}, proxy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	const acctProxy = "http://127.0.0.1:7890"
+	unchecked := addFull("unchecked", acctProxy)
+	pausedInWindow := addFull("paused-in-window", acctProxy)
+	banned := addFull("banned", acctProxy)
+	disabled := addFull("disabled", acctProxy)
+	verify := addFull("verify", acctProxy)
+	noProxy := addFull("noproxy", "")
+
+	for _, a := range []*pool.Account{pausedInWindow, banned, verify} {
+		if err := e.ctl.RefreshAccount(ctx, a.ID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disabled.Disable(errors.New("session/new: Authentication required"))
+
+	s := e.ctl.Settings()
+	s.AllowDirect = false
+	s.WarmupFullPools = true
+	if err := e.ctl.UpdateSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass 1 enters the 30s debounce window for refreshed accounts and leaves unchecked/out-of-rotation untouched.
+	due := e.ctl.warmupPass(ctx, time.Now())
+	if reqs, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: store.SystemKeyWarmup}, 0, 20); err != nil || len(reqs) != 0 {
+		t.Fatalf("warmup sent during debounce window: %+v, %v", reqs, err)
+	}
+	for _, untouched := range []*pool.Account{unchecked, disabled, noProxy} {
+		if n := len(untouched.LiveProcs()); n != 0 {
+			t.Errorf("account %s spawned %d agy procs", untouched.Name(), n)
+		}
+	}
+
+	// During the 30s window after refresh, accounts are paused or leave rotation.
+	if err := e.ctl.SetAccountPaused(ctx, pausedInWindow.ID(), true); err != nil {
+		t.Fatal(err)
+	}
+	e.ctl.pauseAccountForBan(banned.ID(), "PERMISSION_DENIED (code 403): TOS_VIOLATION")
+	verify.SetVerification(true, "https://accounts.google.com/v")
+
+	// Pass 2 after the 30s debounce must skip all of them (and still not probe unchecked).
+	e.ctl.warmupPass(ctx, due)
+	if n := len(unchecked.LiveProcs()); n != 0 {
+		t.Fatalf("unchecked account spawned %d agy procs after debounce", n)
+	}
+	if reqs, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: store.SystemKeyWarmup}, 0, 20); err != nil || len(reqs) != 0 {
+		t.Fatalf("warmup requests on paused/out-of-rotation accounts = %+v, %v; want none", reqs, err)
+	}
+
+	// Resuming returns the account to rotation; warmup now proceeds since 30s already elapsed.
+	if err := e.ctl.SetAccountPaused(ctx, pausedInWindow.ID(), false); err != nil {
+		t.Fatal(err)
+	}
+	e.ctl.warmupPass(ctx, due)
+	reqs, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: store.SystemKeyWarmup}, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("warmup requests after resume = %d (%+v), want 2", len(reqs), reqs)
+	}
+	for _, r := range reqs {
+		if r.Account != pausedInWindow.ID() {
+			t.Errorf("warmed unexpected account %s (%s)", r.AccountName, r.Account)
+		}
 	}
 }

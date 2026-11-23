@@ -46,11 +46,6 @@ var fallbackModels = []modelEntry{
 // Models lists what the accounts offer.
 func (g *Gateway) Models() []conv.ModelInfo { return modelInfos(g.offered()) }
 
-func inRotation(account *pool.Account) bool {
-	st := account.Status()
-	return !st.Paused && st.Disabled == "" && st.Blocked == "" && !st.Verify
-}
-
 // offered merges the catalogs agy reported for accounts in rotation, a
 // model's tiers being those of any in-rotation account that allows the
 // model; an in-rotation account without a report falls back to the merged
@@ -59,7 +54,7 @@ func (g *Gateway) offered() []modelEntry {
 	var catalog, allowed []modelEntry
 	var unreported []*pool.Account
 	for _, account := range g.pool.Accounts() {
-		if !inRotation(account) {
+		if !account.InRotation() {
 			continue
 		}
 		models := account.Models()
@@ -125,7 +120,7 @@ func (g *Gateway) refreshUnreported(ctx context.Context) {
 	}
 	var waits []chan struct{}
 	for _, account := range g.pool.Accounts() {
-		if !inRotation(account) || account.Models() != nil {
+		if !account.InRotation() || account.Models() != nil {
 			continue
 		}
 		if done := g.startRefresh(account); done != nil {

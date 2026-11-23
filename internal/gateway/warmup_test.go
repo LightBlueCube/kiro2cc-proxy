@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"agyrelay/internal/agy"
 	"agyrelay/internal/conv"
@@ -155,5 +156,63 @@ func TestWarmupDefersWhenSlotsOccupiedWithoutEvictingIdleUserSession(t *testing.
 	}
 	if recs := h.records.all(t, 1); len(recs) != 1 {
 		t.Fatalf("records = %d, want 1 (deferred warmup must not record a failure)", len(recs))
+	}
+}
+
+func TestWarmupRefusesOutOfRotationAndAbortsIfPausedDuringOpen(t *testing.T) {
+	h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_OPEN_DELAY=150ms"}})
+	account := h.p.Account("acct0")
+	req := SystemCall{
+		KeyHash: "system:warmup",
+		KeyName: "warmup",
+		Model:   "gemini-3.8-flash",
+		Slug:    "gemini-3.8-flash-low",
+		Effort:  "low",
+		Group:   pool.GroupGemini,
+	}
+
+	states := []struct {
+		name  string
+		enter func()
+		leave func()
+	}{
+		{"paused", func() { account.SetPaused(true) }, func() { account.SetPaused(false) }},
+		{"auto_paused", func() { account.PauseWithReason("banned") }, func() { account.SetPaused(false) }},
+		{"disabled", func() { account.Disable(errors.New("sign in")) }, func() { account.Enable() }},
+		{"blocked", func() { account.SetBlocked(errors.New("no proxy")) }, func() { account.SetBlocked(nil) }},
+		{"verify", func() { account.SetVerification(true, "https://accounts.google.com/v") }, func() { account.SetVerification(false, "") }},
+	}
+	for _, tc := range states {
+		tc.enter()
+		if err := h.gw.Warmup(context.Background(), account, req); err == nil {
+			t.Fatalf("%s: Warmup succeeded on out-of-rotation account", tc.name)
+		}
+		tc.leave()
+	}
+	if len(account.LiveProcs()) != 0 {
+		t.Fatalf("out-of-rotation Warmup started %d procs", len(account.LiveProcs()))
+	}
+
+	// If an account leaves rotation during session/new (e.g. loadCodeAssist 403
+	// or admin pause), Warmup must close the session without sending a prompt or
+	// recording a warmup call.
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		account.PauseWithReason("TOS_VIOLATION")
+	}()
+	if err := h.gw.Warmup(context.Background(), account, req); err == nil {
+		t.Fatal("Warmup succeeded after account was auto-paused during session/new")
+	}
+	if prompts := h.requests("session/prompt"); len(prompts) != 0 {
+		t.Fatalf("prompts sent on paused account = %d, want 0", len(prompts))
+	}
+	if len(h.gw.Sessions()) != 0 || account.Turns() != 0 {
+		t.Fatalf("leaked session/turn after abort: sessions=%+v turns=%d", h.gw.Sessions(), account.Turns())
+	}
+	h.records.mu.Lock()
+	gotRecs := len(h.records.list)
+	h.records.mu.Unlock()
+	if gotRecs != 0 {
+		t.Fatalf("recorded warmup calls = %d, want 0", gotRecs)
 	}
 }

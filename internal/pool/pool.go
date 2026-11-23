@@ -455,6 +455,18 @@ func (a *Account) OldestRun() (since time.Time, ok bool) {
 	return since, ok
 }
 
+// InRotation reports whether the account is eligible to take traffic
+// (not paused, disabled, blocked, or awaiting owner verification).
+func (a *Account) InRotation() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.inRotationLocked()
+}
+
+func (a *Account) inRotationLocked() bool {
+	return !a.paused && a.disabled == nil && a.blocked == nil && !a.verify
+}
+
 // Available reports why the account cannot serve group now (nil = usable).
 func (a *Account) Available(group string) error {
 	a.mu.Lock()
@@ -467,7 +479,7 @@ func (a *Account) Available(group string) error {
 func (a *Account) CooldownRemaining(group string) time.Duration {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.paused || a.disabled != nil || a.blocked != nil || a.verify {
+	if !a.inRotationLocked() {
 		return 0
 	}
 	entry, ok := a.cooldown[group]
