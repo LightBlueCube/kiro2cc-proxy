@@ -16,6 +16,8 @@ func TestDetectReformatted(t *testing.T) {
 		{"**YOU ARE OPENCODE**,\n\t  an interactive CLI tool", "OpenCode"},
 		{"You are Claude Code, Anthropic\u2019s official CLI for Claude.", "Claude Code"},
 		{"You are a highly sophisticated automated coding agent with expert\u2011level knowledge across many\ndifferent programming languages and frameworks.", "GitHub Copilot"},
+		{"Follow  **Microsoft**\ncontent policies.", "VS Code"},
+		{"The user works in an IDE called Visual Studio Code which has a concept for editors with open files.", "VS Code"},
 		{"My rules.\n\nYou are `Gemini CLI`, an autonomous CLI agent.", "Gemini CLI"},
 	} {
 		matches := defaults.Detect(tc.system)
@@ -37,6 +39,8 @@ func TestDetectWords(t *testing.T) {
 		"Amp, Cursor, Crush, Goose, Augment and Kilo are common words: move the cursor, crush it.",
 		"See ~/.config/opencode/agent and /work/opencode/out.",
 		"You are xopencode",
+		"You are an AI coding assistant running in VS Code, connected to the user's own model endpoint.",
+		"I edit files in Visual Studio Code.",
 	} {
 		if matches := defaults.Detect(system); len(matches) > 0 {
 			t.Errorf("Detect(%q) = %+v, want none", system, matches)
@@ -54,6 +58,9 @@ func TestDetectWords(t *testing.T) {
 		{"Kilo Code and the Claude Code CLI", "Kilo Code"},
 		{"Ask Cline or Roo or Zed now", "Cline"},
 		{"Use Trae rather than Traefik", "Trae"},
+		{"If you are asked to generate content that is harmful, hateful, racist, sexist, lewd, or violent, only respond with \"Sorry, I can\u2019t assist with that.\"", "VS Code"},
+		{"The active document is the source code the user is looking at right now.", "VS Code"},
+		{"You can only give one reply for each conversation turn.", "VS Code"},
 	} {
 		matches := defaults.Detect(tc.system)
 		if len(matches) == 0 || matches[0].Harness != tc.want {

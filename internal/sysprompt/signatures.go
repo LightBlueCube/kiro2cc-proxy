@@ -48,6 +48,13 @@ var DefaultSignatures = []Signature{
 		"You are an expert AI programming assistant, working with a user in the VS Code editor",
 		"You are a highly sophisticated automated coding agent with expert-level knowledge across many different programming languages and frameworks",
 	}},
+	{Name: "VS Code", Phrases: []string{
+		"Follow Microsoft content policies",
+		"If you are asked to generate content that is harmful, hateful, racist, sexist, lewd, or violent, only respond with \"Sorry, I can't assist with that.\"",
+		"The user works in an IDE called Visual Studio Code",
+		"The active document is the source code the user is looking at right now",
+		"You can only give one reply for each conversation turn",
+	}},
 	{Name: "Gemini CLI", Phrases: []string{
 		"Gemini CLI",
 		"You are Gemini CLI",
