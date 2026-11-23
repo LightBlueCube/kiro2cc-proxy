@@ -675,6 +675,8 @@ func (c *Control) addToPool(id, name string, env []string, accountProxy string) 
 		account.SetVerification(true, v.URL)
 	}, func(reason string) {
 		c.pauseAccountForLocation(id, reason)
+	}, func(reason string) {
+		c.pauseAccountForBan(id, reason)
 	}, func(session, model string, callErr *cloudcode.CallError) bool {
 		account := c.cfg.Pool.Account(id)
 		if account == nil {
@@ -735,6 +737,25 @@ func (c *Control) pauseAccountForLocation(id, reason string) {
 		c.log.Error("failed to persist account pause for unsupported location", "account", account.Name(), "err", err)
 	}
 	c.log.Error("account paused because Google rejected its location; change its proxy and resume manually", "account", account.Name(), "reason", reason)
+}
+
+// pauseAccountForBan takes an account out of rotation and persists the
+// reason after Google bans it for a Terms of Service violation. The account
+// stays paused across restarts until an administrator manually resumes it.
+func (c *Control) pauseAccountForBan(id, reason string) {
+	account := c.cfg.Pool.Account(id)
+	if account == nil {
+		return
+	}
+	if !account.PauseWithReason(reason) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), autoPauseTimeout)
+	defer cancel()
+	if err := c.cfg.Store.SetAccountPaused(ctx, id, true, reason); err != nil {
+		c.log.Error("failed to persist account pause for Google ban", "account", account.Name(), "err", err)
+	}
+	c.log.Error("account paused because Google banned it; appeal the ban, then resume manually", "account", account.Name(), "reason", reason)
 }
 
 func (c *Control) SetAccountPaused(ctx context.Context, id string, paused bool) error {

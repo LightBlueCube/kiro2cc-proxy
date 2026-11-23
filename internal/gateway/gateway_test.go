@@ -159,6 +159,9 @@ func modelCallRecorder(t *testing.T, currentPool func() *pool.Pool, currentGatew
 			if call.Code == http.StatusBadRequest && isLocationUnsupported(call.Message) {
 				account.PauseWithReason(call.Message)
 			}
+			if call.Code == http.StatusForbidden && isAccountBanned(call.Message) {
+				account.PauseWithReason(call.Message)
+			}
 			failure = &pool.ModelFailure{Code: call.Code, Message: call.Message, Truncated: call.Truncated}
 			if call.RetryAfter > 0 {
 				failure.Reset = time.Now().Add(call.RetryAfter)
@@ -2870,6 +2873,13 @@ func TestUpstreamErrorsPassThrough(t *testing.T) {
 			wantMsg:  "PERMISSION_DENIED (code 403): caller lacks entitlement",
 		},
 		{
+			name:     "403 account banned passes message through when last account",
+			code:     "403",
+			msg:      "PERMISSION_DENIED (code 403): This service has been disabled in this account for violation of Terms of Service.",
+			wantKind: conv.ErrForbidden,
+			wantMsg:  "PERMISSION_DENIED (code 403): This service has been disabled in this account for violation of Terms of Service.",
+		},
+		{
 			name:     "403 validation required hides verify",
 			code:     "403",
 			msg:      "PERMISSION_DENIED (code 403): VALIDATION_REQUIRED verify account",
@@ -2940,6 +2950,7 @@ func TestUpstreamErrorsPassThrough(t *testing.T) {
 		{"401", "401", "UNAUTHENTICATED (code 401): bad token", ""},
 		{"403-permission", "403", "PERMISSION_DENIED (code 403): caller lacks entitlement", ""},
 		{"403-validation", "403", "PERMISSION_DENIED (code 403): VALIDATION_REQUIRED", ""},
+		{"403-banned", "403", "PERMISSION_DENIED (code 403): This service has been disabled in this account for violation of Terms of Service.", "violation of Terms of Service"},
 		{"404", "404", "NOT_FOUND (code 404): model missing", ""},
 	} {
 		t.Run("switch/"+tc.name, func(t *testing.T) {

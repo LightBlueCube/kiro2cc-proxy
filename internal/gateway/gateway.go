@@ -925,6 +925,13 @@ func isLocationUnsupported(msg string) bool {
 		strings.Contains(strings.ToLower(msg), "user location is not supported")
 }
 
+// isAccountBanned reports whether a 403 model failure message is Google's
+// PERMISSION_DENIED ban of the account for a Terms of Service violation.
+func isAccountBanned(msg string) bool {
+	return strings.HasPrefix(msg, "PERMISSION_DENIED ") &&
+		strings.Contains(strings.ToLower(msg), "violation of terms of service")
+}
+
 // modelFailure maps the failed model call that ended the turn. Messages
 // pass through: clients recognize overflow by their text as well. A 429
 // that names a retry time is the account's quota: the account cools down
@@ -954,6 +961,11 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 		// The account's exit location is unsupported (cloudcode already paused
 		// it); pass Google's message through and let the conversation switch.
 		return definite(&conv.Error{Kind: conv.ErrInvalidRequest, Message: failure.Message}, 0)
+	case failure.Code == http.StatusForbidden && isAccountBanned(failure.Message):
+		// Google banned the account (cloudcode already paused it); pass
+		// Google's message through instead of hiding it as an unavailable
+		// model, and let the conversation switch.
+		return definite(&conv.Error{Kind: conv.ErrForbidden, Message: failure.Message}, 0)
 	case failure.Code == http.StatusRequestEntityTooLarge:
 		return rejected(&conv.Error{Kind: conv.ErrContextLength, Message: failure.Message, HTTPStatus: failure.Code})
 	case failure.Code == http.StatusBadRequest:

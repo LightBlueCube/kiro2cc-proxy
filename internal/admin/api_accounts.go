@@ -345,9 +345,9 @@ func (h *Handler) refreshAccount(w http.ResponseWriter, r *http.Request) {
 	case err != nil && h.awaitsVerification(id):
 		writeError(w, http.StatusBadGateway, "Google asks for the account to be verified first: open the link on its card, "+
 			"finish the check, then refresh. Quota refresh failed: "+err.Error())
-	case err != nil && h.locationPaused(id):
-		writeError(w, http.StatusBadGateway, "Google rejected this account's location, so it has been paused: change its proxy to a supported region, "+
-			"then click Resume. Quota refresh failed: "+err.Error())
+	case err != nil && h.autoPaused(id):
+		writeError(w, http.StatusBadGateway, "Google's refusal paused this account automatically: read the reason on its card, "+
+			"fix the cause, then click Resume. Quota refresh failed: "+err.Error())
 	case err != nil:
 		writeError(w, http.StatusBadGateway, "quota refresh failed: "+err.Error())
 	default:
@@ -360,7 +360,7 @@ func (h *Handler) awaitsVerification(id string) bool {
 	return account != nil && account.Status().Verify
 }
 
-func (h *Handler) locationPaused(id string) bool {
+func (h *Handler) autoPaused(id string) bool {
 	account := h.pool.Account(id)
 	if account == nil {
 		return false

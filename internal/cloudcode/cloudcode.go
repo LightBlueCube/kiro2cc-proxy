@@ -95,6 +95,7 @@ type accountProxy struct {
 	transport             *http.Transport
 	onVerification        VerificationFunc
 	onLocationUnsupported LocationUnsupportedFunc
+	onAccountDisabled     AccountDisabledFunc
 	onModelCall           ModelCallFunc
 
 	mu sync.Mutex
@@ -131,9 +132,10 @@ func (s *Server) Close() error { return s.http.Close() }
 // egress proxy URL with credentials) and returns the endpoint its agy
 // must use. onVerification learns whether Google wants the account
 // verified; onLocationUnsupported learns when Google rejects a call for
-// the account's exit location; onModelCall learns how each generation
-// call went and may stop a session.
-func (s *Server) Register(name, egressURL string, onVerification VerificationFunc, onLocationUnsupported LocationUnsupportedFunc, onModelCall ModelCallFunc) (string, error) {
+// the account's exit location; onAccountDisabled learns when Google bans
+// the account; onModelCall learns how each generation call went and may
+// stop a session.
+func (s *Server) Register(name, egressURL string, onVerification VerificationFunc, onLocationUnsupported LocationUnsupportedFunc, onAccountDisabled AccountDisabledFunc, onModelCall ModelCallFunc) (string, error) {
 	egress, err := url.Parse(egressURL)
 	if err != nil {
 		return "", fmt.Errorf("egress URL for %s: %w", name, err)
@@ -150,6 +152,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		transport:             transport,
 		onVerification:        onVerification,
 		onLocationUnsupported: onLocationUnsupported,
+		onAccountDisabled:     onAccountDisabled,
 		onModelCall:           onModelCall,
 		stopped:               map[string]time.Time{},
 	}
@@ -169,6 +172,7 @@ func (s *Server) Register(name, egressURL string, onVerification VerificationFun
 		ModifyResponse: func(resp *http.Response) error {
 			s.watchVerification(name, resp)
 			ap.watchUnsupportedLocation(resp)
+			ap.watchAccountDisabled(resp)
 			ap.watchModelCall(resp)
 			recordResponse(resp)
 			if !isCatalog(resp.Request) || resp.StatusCode != http.StatusOK {
