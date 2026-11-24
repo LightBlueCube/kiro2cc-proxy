@@ -387,7 +387,7 @@ function totalsCell(totals) {
 // admin and user pages.
 function keyColumns(groups) {
   return [
-    { title: t("keys.col.key"), hint: t("keys.col.key.hint"), cell: keyCell },
+    { title: t("keys.col.key"), cell: keyCell },
     { title: t("keys.col.access"), cell: accessCell },
     { title: t("keys.col.usage"), cell: k => spendCell(k, usageGroups(k, groups)) },
     { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), num: true, fit: true, cell: k => quotaCell(k, usageGroups(k, groups)) },
@@ -780,7 +780,6 @@ views.settings = (container, openTopic) => {
           h("span", { class: "with-reset" }, h("label", { class: "check" }, riskControl, t("settings.risk.enable")), resetButton(riskControl, d.risk_control)),
           h("label", {}, t("settings.risk.retention"), withReset(flaggedRetention, d.flagged_prompt_retention_days))),
         h("p", { class: "muted" }, t("flagged.note")),
-        h("p", { class: "muted" }, t("settings.risk.note")),
         flaggedList),
       topic(t("settings.prices"),
         h("p", { class: "muted" }, t("settings.prices.note")),
@@ -881,7 +880,7 @@ views.accounts = container => {
     }, event.submitter);
   } },
     h("label", {}, t("common.name"), name),
-    h("label", { title: t("accounts.proxy.hint") }, t("accounts.proxy"), proxy),
+    h("label", {}, t("accounts.proxy"), proxy),
     h("label", { class: "grow" }, t("accounts.env"), env),
     h("button", { type: "submit" }, t("accounts.add")),
     h("button", { type: "submit", "data-then": "import" }, t("accounts.add_import")));
@@ -1386,8 +1385,7 @@ views.accounts = container => {
         modelTable(g.models, true))),
       ...unavailable.map(g => h("div", { class: "model-group" },
         h("h3", { class: "warn" }, t("accounts.models.unavailable_on"), " ", accountSet(g.accounts)), modelTable(g.models, true))),
-      ...(unreported ? [h("p", { class: "muted" }, t("accounts.models.unreported", { count: unreported }))] : []),
-      h("p", { class: "muted" }, t("accounts.models.hint")));
+      ...(unreported ? [h("p", { class: "muted" }, t("accounts.models.unreported", { count: unreported }))] : []));
   }
 
   function pickAnchorCard(anchorID) {
@@ -1639,7 +1637,7 @@ views.workers = container => {
 
   function sessions(a, now) {
     const enc = encodeURIComponent(a.id);
-    const where = s => s.worker ? term(t("workers.kind.worker", { number: s.worker }), lookup("process", "worker"))
+    const where = s => s.worker ? t("workers.kind.worker", { number: s.worker })
       : s.pid ? t("workers.in_process")
       : term(t("workers.closed"), t("workers.closed.hint"));
     const turnTime = s => !s.turn || !s.turn.started ? "" : s.turn.parked_at
@@ -1928,7 +1926,7 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
             r.session ? [" · ", h("span", { class: "mono muted", title: r.session }, shortHash(r.session))] : null),
           [r.account || t("calls.no_account"), " · ", r.api || "—", r.stream ? term(" ⇢", t("calls.stream.hint")) : "", anchorBadge(r.anchor)]) },
       { title: t("calls.model_mode"), cell: r => stack(
-          [h("span", { title: r.slug }, r.model), r.effort ? term(" · " + r.effort, t("calls.effort.hint")) : ""],
+          [h("span", { title: r.slug }, r.model), r.effort ? " · " + r.effort : ""],
           modeLine(r)) },
       { title: t("calls.status"), cell: r => r.status === "ok" ? term(r.finish || "ok", lookup("status", r.finish || "ok"))
           : h("span", { class: r.status === "cancelled" ? "cancelled" : "bad", title: joined(lookup("status", r.status), r.error) }, r.status) },
