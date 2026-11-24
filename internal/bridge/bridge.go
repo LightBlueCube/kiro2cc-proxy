@@ -40,8 +40,8 @@ type Tool struct {
 	InputSchema json.RawMessage
 }
 
-// Image is base64 image data.
-type Image struct {
+// Media is inline base64 media data.
+type Media struct {
 	Data     string
 	MimeType string
 }
@@ -49,7 +49,7 @@ type Image struct {
 // Result answers one tool call.
 type Result struct {
 	Text    string
-	Images  []Image
+	Media   []Media
 	IsError bool
 }
 
@@ -195,18 +195,20 @@ func toMCPResult(result Result) *mcp.CallToolResult {
 	text := result.Text
 	if text == "" {
 		text = "(no output)"
-		if len(result.Images) > 0 {
-			text = "(image result)"
+		if len(result.Media) > 0 {
+			text = "(media result)"
 		}
 	}
 	content := []mcp.Content{&mcp.TextContent{Text: text}}
-	for _, image := range result.Images {
-		data, err := base64.StdEncoding.DecodeString(image.Data)
+	for _, media := range result.Media {
+		data, err := base64.StdEncoding.DecodeString(media.Data)
 		if err != nil {
-			content = append(content, &mcp.TextContent{Text: "[image could not be decoded]"})
+			content = append(content, &mcp.TextContent{Text: "[media could not be decoded]"})
 			continue
 		}
-		content = append(content, &mcp.ImageContent{Data: data, MIMEType: image.MimeType})
+		// agy's parseCallToolResult drops mcp.AudioContent, whereas
+		// mcp.ImageContent forwards any MIMEType into upstream inlineData.
+		content = append(content, &mcp.ImageContent{Data: data, MIMEType: media.MimeType})
 	}
 	return &mcp.CallToolResult{Content: content, IsError: result.IsError}
 }

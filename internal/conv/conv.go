@@ -16,8 +16,8 @@ const (
 	RoleTool      Role = "tool"
 )
 
-// Image is inline base64 image data.
-type Image struct {
+// Media is inline base64 media data (image, audio, video, PDF, or document).
+type Media struct {
 	Data     string
 	MimeType string
 }
@@ -32,9 +32,9 @@ type ToolCall struct {
 
 // Message is one transcript entry.
 type Message struct {
-	Role   Role
-	Text   string
-	Images []Image
+	Role  Role
+	Text  string
+	Media []Media
 	// ToolCalls are the assistant's calls (RoleAssistant).
 	ToolCalls []ToolCall
 	// ToolCallID and ToolName identify the call a RoleTool message answers.

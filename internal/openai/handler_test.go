@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,7 +117,7 @@ func TestChatDecodeToolTranscript(t *testing.T) {
 	if got.Effort != "high" || len(got.Messages) != 4 || len(got.Tools) != 1 {
 		t.Fatalf("request = %+v", got)
 	}
-	if got.Messages[0].Role != conv.RoleSystem || got.Messages[1].Images[0].MimeType != "image/png" {
+	if got.Messages[0].Role != conv.RoleSystem || got.Messages[1].Media[0].MimeType != "image/png" {
 		t.Fatalf("messages = %+v", got.Messages)
 	}
 	assistant := got.Messages[2]
@@ -319,7 +320,7 @@ func TestResponsesDecodeGroupsAssistantItems(t *testing.T) {
 	if assistant.Role != conv.RoleAssistant || assistant.Text != "on it" || len(assistant.ToolCalls) != 1 || assistant.Anchors[0] != "agr1.x" {
 		t.Fatalf("assistant = %+v", assistant)
 	}
-	if m[3].Role != conv.RoleTool || m[3].ToolName != "read" || m[3].Text != "data" || len(m[3].Images) != 1 || m[4].Text != "next" {
+	if m[3].Role != conv.RoleTool || m[3].ToolName != "read" || m[3].Text != "data" || len(m[3].Media) != 1 || m[4].Text != "next" {
 		t.Fatalf("tail = %+v", m[3:])
 	}
 }
@@ -439,5 +440,132 @@ func TestBillingSubscriptionAndUsage(t *testing.T) {
 	}
 	if usage["object"] != "list" || usage["total_usage"] != float64(125) {
 		t.Fatalf("usage = %v", usage)
+	}
+}
+
+func TestChatMultimodalDecodeAndValidation(t *testing.T) {
+	backend := &stubBackend{events: []conv.Event{{Finish: conv.FinishStop}}}
+	// Unpadded "JVBERi0xLjQK" ("%PDF-1.4\n", 9 bytes -> 12 chars) and unpadded "AQIDBA" (4 bytes -> 8 chars "AQIDBA==").
+	body := `{"model":"m","messages":[
+		{"role":"user","content":[
+			{"type":"text","text":"analyze"},
+			{"type":"input_audio","input_audio":{"data":"AQID\nBA","format":"wav"}},
+			{"type":"file","file":{"file_data":"data:application/pdf;base64,JVBERi0xLjQK"}},
+			{"type":"file","file":{"filename":"clip.mp4","file_data":"AAAAFGZ0eXBpc29t"}},
+			{"type":"file","file":{"file_data":"JVBERi0xLjQK"}},
+			{"type":"image_url","image_url":{"url":"data:video/webm;base64,AQID"}}
+		]},
+		{"role":"assistant","content":[{"type":"refusal","refusal":"hold"}],"tool_calls":[{"id":"c1","type":"function","function":{"name":"fetch","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"c1","content":[
+			{"type":"text","text":"fetched"},
+			{"type":"input_audio","input_audio":{"data":"AQID","format":"mp3"}},
+			{"type":"file","file":{"filename":"notes.md","file_data":"aGVsbG8="}}
+		]}
+	],"tools":[{"type":"function","function":{"name":"fetch","parameters":{"type":"object"}}}]}`
+
+	if rec := post(t, NewHandler(backend).Chat, body); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	msgs := backend.got.Messages
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %+v", msgs)
+	}
+	wantUser := []conv.Media{
+		{MimeType: "audio/wav", Data: "AQIDBA=="},
+		{MimeType: "application/pdf", Data: "JVBERi0xLjQK"},
+		{MimeType: "video/mp4", Data: "AAAAFGZ0eXBpc29t"},
+		{MimeType: "application/pdf", Data: "JVBERi0xLjQK"},
+		{MimeType: "video/webm", Data: "AQID"},
+	}
+	if !slices.Equal(msgs[0].Media, wantUser) {
+		t.Fatalf("user media = %+v, want %+v", msgs[0].Media, wantUser)
+	}
+	if msgs[1].Text != "hold" {
+		t.Fatalf("assistant refusal = %q", msgs[1].Text)
+	}
+	wantTool := []conv.Media{
+		{MimeType: "audio/mp3", Data: "AQID"},
+		{MimeType: "text/markdown", Data: "aGVsbG8="},
+	}
+	if !slices.Equal(msgs[2].Media, wantTool) {
+		t.Fatalf("tool media = %+v, want %+v", msgs[2].Media, wantTool)
+	}
+
+	h := NewHandler(&stubBackend{})
+	for _, bad := range []string{
+		`{"model":"m","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-123"}}]}]}`,
+		`{"model":"m","messages":[{"role":"user","content":[{"type":"file","file":{"file_url":"https://example.com/a.pdf"}}]}]}`,
+		`{"model":"m","messages":[{"role":"user","content":[{"type":"file","file":{"file_data":"AQID"}}]}]}`,
+		`{"model":"m","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AQID","format":"unknown"}}]}]}`,
+		`{"model":"m","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"!!!","format":"wav"}}]}]}`,
+		`{"model":"m","messages":[{"role":"system","content":[{"type":"input_audio","input_audio":{"data":"AQID","format":"wav"}}]}]}`,
+		`{"model":"m","messages":[{"role":"assistant","content":[{"type":"image_url","image_url":"data:image/png;base64,AAAA"}]}]}`,
+	} {
+		if rec := post(t, h.Chat, bad); rec.Code != http.StatusBadRequest {
+			t.Errorf("accepted invalid chat request %s: status %d", bad, rec.Code)
+		}
+	}
+}
+
+func TestResponsesMultimodalDecodeAndValidation(t *testing.T) {
+	backend := &stubBackend{events: []conv.Event{{Finish: conv.FinishStop}}}
+	body := `{"model":"m","input":[
+		{"type":"input_text","text":"standalone text"},
+		{"type":"input_audio","input_audio":{"data":"AQID","format":"wav"}},
+		{"type":"input_file","filename":"spec.pdf","file_data":"JVBERi0xLjQK"},
+		{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"bundle"},
+			{"type":"input_audio","input_audio":{"data":"data:audio/webm;codecs=opus;base64,AQID"}},
+			{"type":"input_file","file_url":"data:video/mp4;base64,AAAAFGZ0eXBpc29t"},
+			{"type":"input_image","image_url":"data:application/pdf;base64,JVBERi0xLjQK"}
+		]},
+		{"type":"function_call","call_id":"c1","name":"inspect","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":[
+			{"type":"input_text","text":"ok"},
+			{"type":"input_audio","input_audio":{"data":"AQID","format":"flac"}},
+			{"type":"input_file","filename":"table.csv","file_data":"YSwxCg=="}
+		]}
+	],"tools":[{"type":"function","name":"inspect","parameters":{"type":"object"}}]}`
+
+	if rec := post(t, NewHandler(backend).Responses, body); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	msgs := backend.got.Messages
+	if len(msgs) != 6 {
+		t.Fatalf("messages = %+v", msgs)
+	}
+	if msgs[0].Text != "standalone text" ||
+		msgs[1].Media[0].MimeType != "audio/wav" ||
+		msgs[2].Media[0].MimeType != "application/pdf" {
+		t.Fatalf("standalone items = %+v", msgs[:3])
+	}
+	wantBundle := []conv.Media{
+		{MimeType: "audio/webm;codecs=opus", Data: "AQID"},
+		{MimeType: "video/mp4", Data: "AAAAFGZ0eXBpc29t"},
+		{MimeType: "application/pdf", Data: "JVBERi0xLjQK"},
+	}
+	if !slices.Equal(msgs[3].Media, wantBundle) {
+		t.Fatalf("bundle media = %+v, want %+v", msgs[3].Media, wantBundle)
+	}
+	wantTool := []conv.Media{
+		{MimeType: "audio/flac", Data: "AQID"},
+		{MimeType: "text/csv", Data: "YSwxCg=="},
+	}
+	if !slices.Equal(msgs[5].Media, wantTool) {
+		t.Fatalf("tool media = %+v, want %+v", msgs[5].Media, wantTool)
+	}
+
+	h := NewHandler(&stubBackend{})
+	for _, bad := range []string{
+		`{"model":"m","input":[{"type":"input_file","file_id":"file-123"}]}`,
+		`{"model":"m","input":[{"type":"input_file","file_url":"https://example.com/a.pdf"}]}`,
+		`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_image","file_id":"file-123"}]}]}`,
+		`{"model":"m","input":[{"type":"message","role":"system","content":[{"type":"input_file","filename":"a.pdf","file_data":"JVBERi0xLjQK"}]}]}`,
+		`{"model":"m","input":[{"type":"message","role":"assistant","content":[{"type":"input_file","filename":"a.pdf","file_data":"JVBERi0xLjQK"}]}]}`,
+		`{"model":"m","input":[{"type":"input_audio","input_audio":{"data":"data:image/png;base64,AAAA"}}]}`,
+	} {
+		if rec := post(t, h.Responses, bad); rec.Code != http.StatusBadRequest {
+			t.Errorf("accepted invalid responses request %s: status %d", bad, rec.Code)
+		}
 	}
 }

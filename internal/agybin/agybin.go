@@ -155,7 +155,7 @@ func inspect(path string) (*Report, []byte, error) {
 
 func applySite(im *image, patchName string, s site) SiteResult {
 	result := SiteResult{Patch: patchName, Function: s.function, Matches: -1}
-	fn, err := im.function(s.function)
+	fn, err := im.function(append([]string{s.function}, s.aliases...)...)
 	if err != nil {
 		result.Err = err
 		return result

@@ -1015,8 +1015,11 @@ func callTool(ctx context.Context, s *fakeSession, name string, args json.RawMes
 	}
 	var texts []string
 	for _, content := range result.Content {
-		if text, ok := content.(*mcp.TextContent); ok {
-			texts = append(texts, text.Text)
+		switch item := content.(type) {
+		case *mcp.TextContent:
+			texts = append(texts, item.Text)
+		case *mcp.ImageContent:
+			texts = append(texts, fmt.Sprintf("[media:%s:%d]", item.MIMEType, len(item.Data)))
 		}
 	}
 	return strings.Join(texts, "\n"), nil

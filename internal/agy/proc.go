@@ -110,7 +110,9 @@ type Resource struct {
 
 func TextBlock(text string) ContentBlock { return ContentBlock{Type: "text", Text: text} }
 
-func ImageBlock(data, mimeType string) ContentBlock {
+// MediaBlock encodes inline base64 media. ACP's "image" block is the wire
+// carrier for all inline media once agy's isImageMimeType check is patched.
+func MediaBlock(data, mimeType string) ContentBlock {
 	return ContentBlock{Type: "image", Data: data, MimeType: mimeType}
 }
 

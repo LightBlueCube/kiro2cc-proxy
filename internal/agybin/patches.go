@@ -45,6 +45,8 @@ const (
 	fnStepToMessage          = "serializers.DefaultSerializer.stepToMessage"
 	fnFileWatcherListen      = "file_watcher.(*FileWatcherDefault).listenAndForwardEvents"
 	fnRuntimeSelectgo        = "runtime.selectgo"
+	fnACPImageMimeType       = "acp.isImageMimeType"
+	fnACPServerImageMimeType = "server.isImageMimeType"
 )
 
 var (
@@ -70,7 +72,10 @@ type patch struct {
 // len(rewrites) == 1.
 type site struct {
 	function string
-	locate   func(im *image, fn function) ([]func() error, error)
+	// aliases are alternative short names when an agy release renames the
+	// package holding the function; all names together must still match once.
+	aliases []string
+	locate  func(im *image, fn function) ([]func() error, error)
 }
 
 // Binary patches applied to agy using structural amd64 locators instead
@@ -156,6 +161,18 @@ var patches = []patch{
 		name: "file-watcher-closed-channel",
 		sites: []site{
 			{function: fnFileWatcherListen, locate: locateFileWatcherSelect},
+		},
+	},
+	{
+		// Allow non-image inline media (audio/*, video/*, application/pdf, …)
+		// through ACP image content blocks into agy's inlineData pipeline.
+		name: "acp-media-mime",
+		sites: []site{
+			{
+				function: fnACPImageMimeType,
+				aliases:  []string{fnACPServerImageMimeType},
+				locate:   locateReturnTrue,
+			},
 		},
 	},
 }

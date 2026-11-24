@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -284,14 +285,14 @@ func (im *image) fileToVA(off uint64) (uint64, bool) {
 
 var errNoFunction = errors.New("function not found")
 
-// function resolves a Go function by its trailing package-qualified short name
-// (e.g. "model.SelectorModel.offersContextWindow", or "runtime.selectgo").
-// Matching by short name survives internal package path reorganizations while
-// failing closed if more than one symbol shares the name.
-func (im *image) function(shortName string) (function, error) {
+// function resolves a Go function by one or more trailing package-qualified
+// short names (e.g. "model.SelectorModel.offersContextWindow"). Matching by
+// short name survives internal package path reorganizations while failing
+// closed unless all candidate names together match a single symbol.
+func (im *image) function(shortNames ...string) (function, error) {
 	var matched []*gosym.Func
 	for i := range im.table.Funcs {
-		if shortSymbolName(im.table.Funcs[i].Name) == shortName {
+		if slices.Contains(shortNames, shortSymbolName(im.table.Funcs[i].Name)) {
 			matched = append(matched, &im.table.Funcs[i])
 		}
 	}
@@ -305,7 +306,7 @@ func (im *image) function(shortName string) (function, error) {
 		for i, fn := range matched {
 			names[i] = fn.Name
 		}
-		return function{}, fmt.Errorf("ambiguous function %s: %s", shortName, strings.Join(names, ", "))
+		return function{}, fmt.Errorf("ambiguous function %s: %s", strings.Join(shortNames, "|"), strings.Join(names, ", "))
 	}
 }
 

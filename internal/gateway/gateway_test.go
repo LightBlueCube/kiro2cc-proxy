@@ -1048,34 +1048,38 @@ func TestHistoryNamesToolsAsTheModelCallsThem(t *testing.T) {
 	}
 }
 
-// A replayed conversation keeps the images of its history, numbered in the
-// text and attached ahead of the newest input's own.
+// A replayed conversation keeps the inline media of its history, numbered in
+// the text and attached ahead of the newest input's own.
 func TestFreshPromptCarriesHistoryImages(t *testing.T) {
-	image := func(data string) []conv.Image { return []conv.Image{{Data: data, MimeType: "image/png"}} }
 	messages := []conv.Message{
-		{Role: conv.RoleUser, Text: "first", Images: image("AAAA")},
+		{Role: conv.RoleUser, Text: "first", Media: []conv.Media{{Data: "AAAA", MimeType: "image/png"}}},
 		{Role: conv.RoleAssistant, ToolCalls: []conv.ToolCall{{ID: "c1", Name: "shot", Arguments: json.RawMessage(`{}`)}}},
-		{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "shot", Text: "done", Images: image("BBBB")},
+		{Role: conv.RoleTool, ToolCallID: "c1", ToolName: "shot", Text: "done", Media: []conv.Media{{Data: "BBBB", MimeType: "audio/wav"}}},
 		{Role: conv.RoleAssistant, Text: "seen"},
-		{Role: conv.RoleUser, Text: "newest", Images: image("CCCC")},
+		{Role: conv.RoleUser, Text: "newest", Media: []conv.Media{{Data: "CCCC", MimeType: "application/pdf"}}},
 	}
 	blocks := freshPrompt(newTranscript(messages))
 
 	var got []string
 	for _, block := range blocks[:len(blocks)-1] {
-		got = append(got, block.Type+":"+block.Data)
+		got = append(got, block.Type+":"+block.MimeType+":"+block.Data)
 	}
-	if want := []string{"image:AAAA", "image:BBBB", "image:CCCC"}; !slices.Equal(got, want) {
+	want := []string{"image:image/png:AAAA", "image:audio/wav:BBBB", "image:application/pdf:CCCC"}
+	if !slices.Equal(got, want) {
 		t.Fatalf("blocks before the text = %v, want %v", got, want)
 	}
 	text := blocks[len(blocks)-1].Text
-	for _, want := range []string{"first\n[Attached image 1]", "done\n[Attached image 2]", "\n\nnewest"} {
+	for _, want := range []string{
+		"first\n[Attached media 1 (image/png)]",
+		"done\n[Attached media 2 (audio/wav)]",
+		"\n\nnewest",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("prompt lacks %q:\n%s", want, text)
 		}
 	}
 	if strings.Contains(text, historyPlaceholder) {
-		t.Errorf("history images still replaced by a placeholder:\n%s", text)
+		t.Errorf("history media still replaced by a placeholder:\n%s", text)
 	}
 }
 
@@ -1141,11 +1145,11 @@ func TestToolResultSteersTrailingUserMessage(t *testing.T) {
 		t.Fatalf("first = %+v", first)
 	}
 
-	steerImg := conv.Image{MimeType: "image/png", Data: "iVBORw0KGgo="}
+	steerImg := conv.Media{MimeType: "image/png", Data: "iVBORw0KGgo="}
 	messages = append(messages,
 		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls, Anchors: []string{first.anchor}},
 		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "contents"},
-		conv.Message{Role: conv.RoleUser, Text: "check line 10", Images: []conv.Image{steerImg}},
+		conv.Message{Role: conv.RoleUser, Text: "check line 10", Media: []conv.Media{steerImg}},
 	)
 	second := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
 	wantText := "tool said: contents\nuser steered: [image:image/png] check line 10"
@@ -1178,6 +1182,48 @@ func TestToolResultSteersTrailingUserMessage(t *testing.T) {
 		t.Fatalf("branched = %+v, want steps: 5", branched)
 	}
 	h.assertRewound(prompts[0].Params.SessionID, 5)
+}
+
+func TestMultimodalPromptAndToolResult(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+
+	userMedia := []conv.Media{
+		{MimeType: "audio/wav", Data: "AQIDBA=="},
+		{MimeType: "application/pdf", Data: "JVBERi0xLjQK"},
+	}
+	messages := []conv.Message{{Role: conv.RoleUser, Text: `@tool read {}`, Media: userMedia}}
+	first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+
+	toolMedia := []conv.Media{
+		{MimeType: "audio/mp3", Data: "AQID"},
+		{MimeType: "video/mp4", Data: "AAAAFGZ0eXBpc29t"},
+	}
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls, Anchors: []string{first.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Media: toolMedia},
+	)
+	second := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+	wantText := "tool said: (media result)\n[media:audio/mp3:3]\n[media:video/mp4:12]"
+	if second.err != nil || second.finish != conv.FinishStop || second.text != wantText {
+		t.Fatalf("second = %+v, want %q", second, wantText)
+	}
+
+	prompts := h.requests("session/prompt")
+	if len(prompts) != 1 {
+		t.Fatalf("prompts = %+v, want 1 prompt", prompts)
+	}
+	blocks := prompts[0].Params.Prompt
+	if len(blocks) != 3 ||
+		blocks[0].Type != "image" || blocks[0].MimeType != "audio/wav" || blocks[0].Data != "AQIDBA==" ||
+		blocks[1].Type != "image" || blocks[1].MimeType != "application/pdf" || blocks[1].Data != "JVBERi0xLjQK" {
+		t.Fatalf("initial prompt blocks = %+v", blocks)
+	}
 }
 
 func TestToolResultSplitsSystemAndUserMessages(t *testing.T) {

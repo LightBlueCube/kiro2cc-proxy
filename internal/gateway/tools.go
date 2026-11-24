@@ -272,22 +272,22 @@ type parallelBlock struct {
 	MimeType string `json:"mimeType,omitempty"`
 }
 
-// formatParallel aggregates a batch's results in input order; images are
-// referenced by their 1-based position among the attached images.
+// formatParallel aggregates a batch's results in input order; media items are
+// referenced by their 1-based position among the attached media.
 func formatParallel(calls []*pendingCall, results []bridge.Result) bridge.Result {
-	var images []bridge.Image
+	var media []bridge.Media
 	entries := make([]parallelEntry, len(calls))
 	isError := false
 	for i, call := range calls {
 		r := results[i]
 		blocks := []parallelBlock{{Type: "text", Text: r.Text}}
-		for _, image := range r.Images {
-			images = append(images, image)
-			blocks = append(blocks, parallelBlock{Type: "image", Index: len(images), MimeType: image.MimeType})
+		for _, item := range r.Media {
+			media = append(media, item)
+			blocks = append(blocks, parallelBlock{Type: "media", Index: len(media), MimeType: item.MimeType})
 		}
 		entries[i] = parallelEntry{CallID: call.id, Name: agy.ModelToolName(call.name), IsError: r.IsError, Content: blocks}
 		isError = isError || r.IsError
 	}
 	text, _ := json.MarshalIndent(map[string]any{"results": entries}, "", "  ")
-	return bridge.Result{Text: string(text), Images: images, IsError: isError}
+	return bridge.Result{Text: string(text), Media: media, IsError: isError}
 }

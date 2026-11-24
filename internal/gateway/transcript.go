@@ -64,12 +64,12 @@ func chainHashes(base string, keys []string) []string {
 }
 
 // messageKey fingerprints what a message contributes to the session: role,
-// visible text, images, and tool identities. Reasoning is excluded; clients
+// visible text, media, and tool identities. Reasoning is excluded; clients
 // drop or rewrite it.
 func messageKey(m conv.Message) string {
 	parts := []any{string(m.Role), strings.TrimSpace(m.Text)}
-	for _, image := range m.Images {
-		parts = append(parts, hashString(image.MimeType+":"+image.Data))
+	for _, media := range m.Media {
+		parts = append(parts, hashString(media.MimeType+":"+media.Data))
 	}
 	for _, call := range m.ToolCalls {
 		parts = append(parts, []string{call.ID, call.Name, canonicalJSON(call.Arguments)})
@@ -112,22 +112,22 @@ func toolsKey(tools []conv.ToolSpec) string {
 
 const (
 	continuationPrompt = "Continue the task from the latest tool results above."
-	imageOnlyPrompt    = "See the attached images."
-	deltaPrompt        = "The transcript delta above lists, in order, the messages the client recorded after your last reply: tool results, user messages, replies from other models, and client system messages. Attached images are numbered in delta order. Continue the conversation from there, with the same tool rules as before."
+	mediaOnlyPrompt    = "See the attached media."
+	deltaPrompt        = "The transcript delta above lists, in order, the messages the client recorded after your last reply: tool results, user messages, replies from other models, and client system messages. Attached media are numbered in delta order. Continue the conversation from there, with the same tool rules as before."
 	deltaURI           = "transcript://delta"
-	historyPlaceholder = "[Image in original transcript]"
+	historyPlaceholder = "[Media in original transcript]"
 )
 
-// renderMessage writes one message as transcript text. Images are numbered
-// from imageBase+1, or replaced by a placeholder when imageBase < 0.
-func renderMessage(m conv.Message, imageBase int) string {
+// renderMessage writes one message as transcript text. Media attachments are
+// numbered from mediaBase+1, or replaced by a placeholder when mediaBase < 0.
+func renderMessage(m conv.Message, mediaBase int) string {
 	var refs []string
-	for i := range m.Images {
-		if imageBase < 0 {
+	for i, media := range m.Media {
+		if mediaBase < 0 {
 			refs = append(refs, historyPlaceholder)
 			continue
 		}
-		refs = append(refs, fmt.Sprintf("[Attached image %d]", imageBase+i+1))
+		refs = append(refs, fmt.Sprintf("[Attached media %d (%s)]", mediaBase+i+1, media.MimeType))
 	}
 	content := strings.Join(nonEmpty(append([]string{m.Text}, refs...)), "\n")
 	switch m.Role {
@@ -198,24 +198,24 @@ func nonEmpty(values []string) []string {
 	return out
 }
 
-// renderHistory renders every message and returns the images they carry,
+// renderHistory renders every message and returns the media they carry,
 // numbered in the text from 1 in the order returned. Nothing is dropped:
 // the patched agy keeps a whole USER_INPUT (6 MB arrived intact), and a
 // conversation over the model's window fails with context_length_exceeded,
 // on which clients compact, instead of silently losing its oldest part.
-func renderHistory(messages []conv.Message) (string, []conv.Image) {
+func renderHistory(messages []conv.Message) (string, []conv.Media) {
 	rendered := make([]string, 0, len(messages))
-	var images []conv.Image
+	var media []conv.Media
 	for _, m := range messages {
-		if text := renderMessage(m, len(images)); text != "" {
+		if text := renderMessage(m, len(media)); text != "" {
 			rendered = append(rendered, text)
 		}
-		images = append(images, m.Images...)
+		media = append(media, m.Media...)
 	}
 	if len(rendered) == 0 {
 		return "", nil
 	}
-	return "<history>\n" + strings.Join(rendered, "\n\n") + "\n</history>", images
+	return "<history>\n" + strings.Join(rendered, "\n\n") + "\n</history>", media
 }
 
 // newestInput is where the newest user input begins in body: its last
@@ -229,20 +229,20 @@ func newestInput(body []conv.Message) int {
 }
 
 // freshPrompt is the whole input for a new session: history, then the
-// newest user input verbatim. The images come with it, the history's first
-// and then the newest input's. The leading system messages travel in agy's
-// system prompt (sessionSpec).
+// newest user input verbatim. Media attachments come with it, the history's
+// first and then the newest input's. The leading system messages travel in
+// agy's system prompt (sessionSpec).
 func freshPrompt(t *transcript) []agy.ContentBlock {
 	body := t.body
 	inputStart := newestInput(body)
-	history, images := renderHistory(body[:inputStart])
+	history, media := renderHistory(body[:inputStart])
 	live := continuationPrompt
 	if inputStart < len(body) {
 		input := body[inputStart]
-		images = append(images, input.Images...)
+		media = append(media, input.Media...)
 		live = input.Text
 		if strings.TrimSpace(live) == "" {
-			live = imageOnlyPrompt
+			live = mediaOnlyPrompt
 		}
 	}
 	var sections []string
@@ -250,7 +250,7 @@ func freshPrompt(t *transcript) []agy.ContentBlock {
 		sections = append(sections, history)
 	}
 	sections = append(sections, live)
-	return withImages(strings.Join(sections, "\n\n"), images)
+	return withMedia(strings.Join(sections, "\n\n"), media)
 }
 
 // deltaPromptBlocks is the input for a warm session: plain user text when
@@ -264,43 +264,43 @@ func deltaPromptBlocks(delta []conv.Message) []agy.ContentBlock {
 	}
 	if onlyUsers {
 		var texts []string
-		var images []conv.Image
+		var media []conv.Media
 		for _, m := range delta {
 			if text := strings.TrimSpace(m.Text); text != "" {
 				texts = append(texts, m.Text)
 			}
-			images = append(images, m.Images...)
+			media = append(media, m.Media...)
 		}
 		text := strings.Join(texts, "\n\n")
 		if text == "" {
-			text = imageOnlyPrompt
+			text = mediaOnlyPrompt
 		}
-		return withImages(text, images)
+		return withMedia(text, media)
 	}
 
 	var parts []string
-	var images []conv.Image
+	var media []conv.Media
 	for _, m := range delta {
-		if text := renderMessage(m, len(images)); text != "" {
+		if text := renderMessage(m, len(media)); text != "" {
 			parts = append(parts, text)
 		}
-		images = append(images, m.Images...)
+		media = append(media, m.Media...)
 	}
 	// agy joins the resource and the next block without a separator.
 	blocks := []agy.ContentBlock{{
 		Type:     "resource",
 		Resource: &agy.Resource{URI: deltaURI, MimeType: "text/markdown", Text: strings.Join(parts, "\n\n") + "\n\n"},
 	}}
-	for _, image := range images {
-		blocks = append(blocks, agy.ImageBlock(image.Data, image.MimeType))
+	for _, item := range media {
+		blocks = append(blocks, agy.MediaBlock(item.Data, item.MimeType))
 	}
 	return append(blocks, agy.TextBlock(deltaPrompt))
 }
 
-func withImages(text string, images []conv.Image) []agy.ContentBlock {
-	blocks := make([]agy.ContentBlock, 0, len(images)+1)
-	for _, image := range images {
-		blocks = append(blocks, agy.ImageBlock(image.Data, image.MimeType))
+func withMedia(text string, media []conv.Media) []agy.ContentBlock {
+	blocks := make([]agy.ContentBlock, 0, len(media)+1)
+	for _, item := range media {
+		blocks = append(blocks, agy.MediaBlock(item.Data, item.MimeType))
 	}
 	return append(blocks, agy.TextBlock(text))
 }

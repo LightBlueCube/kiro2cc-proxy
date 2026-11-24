@@ -87,7 +87,7 @@ func groupResult(group *callGroup, results map[string]conv.Message, sysNotes []c
 		if i == len(group.calls)-1 {
 			notes = sysNotes
 		}
-		parts[i] = bridge.Result{Text: toolResultText(msg, notes), Images: bridgeImages(msg.Images)}
+		parts[i] = bridge.Result{Text: toolResultText(msg, notes), Media: bridgeMedia(msg.Media)}
 	}
 	if !group.parallel {
 		return parts[0]
@@ -108,10 +108,10 @@ func splitTrailing(trailing []conv.Message) (sysNotes, steer []conv.Message) {
 	return trailing, nil
 }
 
-func bridgeImages(images []conv.Image) []bridge.Image {
-	out := make([]bridge.Image, len(images))
-	for i, image := range images {
-		out[i] = bridge.Image{Data: image.Data, MimeType: image.MimeType}
+func bridgeMedia(media []conv.Media) []bridge.Media {
+	out := make([]bridge.Media, len(media))
+	for i, item := range media {
+		out[i] = bridge.Media{Data: item.Data, MimeType: item.MimeType}
 	}
 	return out
 }

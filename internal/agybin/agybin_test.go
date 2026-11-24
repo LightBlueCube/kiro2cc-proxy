@@ -111,6 +111,11 @@ func TestOriginalSnippetsMatch(t *testing.T) {
 			body:   "83 fa 0e 75 0a 48 8b bc 24 18 02 00 00 eb 11 83 fa 17 75 04 31 ff eb 08 48 8b bc 24 10 02 00 00 48 85 ff 7f 01 90 c3",
 			locate: locateStepDefaultLimit,
 		},
+		{
+			name:   "acp-media-mime",
+			body:   "49 3b 66 10 76 3c 55 48 89 e5 48 83 ec 10 48 89 44 24 20 e8 48 00 00 00 90 48 83 fb 06 7c 1f 8b 08 0f b7 50 04 48 c1 e2 20 48 09 d1 48 ba 69 6d 61 67 65 2f 00 00 48 39 ca 0f 94 c0 eb 02 31 c0 c9 c3",
+			locate: locateReturnTrue,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
