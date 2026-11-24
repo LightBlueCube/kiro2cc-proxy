@@ -230,8 +230,6 @@
   "accounts.turns": { "one": "{count} turn running", "other": "{count} turns running" },
   "accounts.procs": { "one": "{count} agy process", "other": "{count} agy processes" },
   "accounts.sampled": "quota checked {time}",
-  "accounts.not_sampled": "quota never checked",
-  "accounts.sampled_when_running": "agy not running: quota is checked again once a request or Refresh starts it",
   "accounts.traffic": "traffic: {route}",
   "accounts.traffic.no_own_proxy": "traffic: {route} (no own proxy)",
   "accounts.route_unknown": "unknown",

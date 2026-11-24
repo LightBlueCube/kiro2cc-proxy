@@ -34,6 +34,9 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .account-remove { margin-left: auto; }
 .account-more { flex-basis: 100%; gap: 8px; }
 .account-quota { margin-top: 8px; }
+.account-checked { margin: 12px 0 4px; font-size: 12px; }
+.account-quota > .account-checked { margin-top: 6px; }
+.account-checked + div > h3 { margin-top: 4px; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 12px; }
 .error { color: var(--bad); min-height: 1em; margin: 0; }

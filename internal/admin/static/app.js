@@ -1137,12 +1137,15 @@ views.accounts = container => {
   }
 
   function quota(a) {
-    if (!a.quota || !a.quota.length) return h("p", { class: "muted" }, a.sample_error ? "" : t("accounts.quota.none"));
+    const checked = a.sampled_at ? h("p", { class: "muted account-checked" }, t("accounts.sampled", { time: fmt.time(a.sampled_at) })) : null;
+    if (!a.quota || !a.quota.length) {
+      return [checked, a.sample_error ? null : h("p", { class: "muted" }, t("accounts.quota.none"))];
+    }
     const poolUsage = g => {
       const group = g.buckets.map(b => bucketQuotaGroup(b.id)).find(Boolean);
       return group && a.pool_usage && a.pool_usage[group];
     };
-    return a.quota.map(g => h("div", {},
+    return [checked, ...a.quota.map(g => h("div", {},
       h("h3", { title: g.description || "" }, g.name),
       g.buckets.map(b => {
         const level = b.remaining <= 0.1 ? "low" : b.remaining <= 0.35 ? "mid" : "";
@@ -1151,7 +1154,7 @@ views.accounts = container => {
           h("div", { class: "bar grow " + level }, h("span", { style: `width:${Math.max(0, Math.min(100, b.remaining * 100))}%` })),
           h("span", { class: "mono", style: "width:150px;text-align:right" }, t("accounts.quota.left", { left: fmt.pct(b.remaining, 1), reset: fmt.until(b.reset_at) })));
       }),
-      poolUsageLine(poolUsage(g))));
+      poolUsageLine(poolUsage(g))))];
   }
 
   function syncCardPanels(entry, a) {
@@ -1244,10 +1247,8 @@ views.accounts = container => {
         t("accounts.priority", { priority: a.priority }),
         t("accounts.turns", { count: a.turns }),
         t("accounts.procs", { count: a.procs }),
-        a.sampled_at ? t("accounts.sampled", { time: fmt.time(a.sampled_at) }) : t("accounts.not_sampled"),
-        a.procs ? "" : t("accounts.sampled_when_running"),
-        a.proxy ? t("accounts.traffic", { route }) : t("accounts.traffic.no_own_proxy", { route }),
         a.env_names.length ? t("accounts.env_names", { names: a.env_names.join(", ") }) : "")),
+      h("p", { class: "muted" }, a.proxy ? t("accounts.traffic", { route }) : t("accounts.traffic.no_own_proxy", { route })),
       h("p", {}, a.models ? t("accounts.models", { models: a.models.map(m => m.id).join(", ") || "—" }) : h("span", { class: "muted" }, t("accounts.models.unknown"))),
       a.allowed_models.length ? h("p", {}, t("accounts.allowed_models", { models: routedModels.join(", ") || "—" })) : null,
       quotaSection(a));
