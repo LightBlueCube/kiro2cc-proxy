@@ -1673,6 +1673,269 @@ func TestSwitchedRequestNamesItsReplayReason(t *testing.T) {
 	}
 }
 
+// Pausing an account (manually or automatically) must stop continuing turns
+// parked on it, release the parked worker slot, and route through the standard
+// account-unavailable switch path even under MaxWorkers = 1.
+func TestPausedAccountRefusesParkedTurnContinueAndSwitches(t *testing.T) {
+	cases := []struct {
+		name  string
+		pause func(a *pool.Account)
+	}{
+		{"manual", func(a *pool.Account) { a.SetPaused(true) }},
+		{"auto", func(a *pool.Account) { a.PauseWithReason("TOS_VIOLATION") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, 2, nil)
+			ctx := context.Background()
+			tools := []conv.ToolSpec{readTool}
+			one := 1
+			alice := testCaller("alice")
+			alice.MaxWorkers = &one
+
+			first := h.completeAs(ctx, alice, conv.Request{
+				Model:    "gemini-3.8-flash",
+				Tools:    tools,
+				Messages: []conv.Message{user(`@tool read {"path":"a.txt"}`)},
+			})
+			if first.err != nil || first.finish != conv.FinishToolCalls || len(first.calls) != 1 {
+				t.Fatalf("first = %+v", first)
+			}
+			firstRec := h.records.all(t, 1)[0]
+			pausedID := firstRec.Account
+			otherID := "acct1"
+			if pausedID == "acct1" {
+				otherID = "acct0"
+			}
+			if !h.turnIs(TurnParked) {
+				t.Fatalf("sessions = %+v, want parked turn on %s", h.gw.Sessions(), pausedID)
+			}
+
+			tc.pause(h.p.Account(pausedID))
+
+			call := first.calls[0]
+			contReq := conv.Request{
+				Model: "gemini-3.8-flash",
+				Tools: tools,
+				Messages: []conv.Message{
+					user(`@tool read {"path":"a.txt"}`),
+					{Role: conv.RoleAssistant, ToolCalls: first.calls},
+					{Role: conv.RoleTool, ToolCallID: call.ID, ToolName: call.Name, Text: "contents of a"},
+				},
+			}
+			refused := h.completeAs(ctx, alice, contReq)
+			if refused.err == nil || refused.err.Kind != conv.ErrOverloaded || refused.err.RetryAfterSeconds != switchRetryAfterSeconds ||
+				!strings.Contains(refused.err.Message, "account holding this conversation is unavailable") ||
+				!strings.Contains(refused.err.Message, switchWarning) {
+				t.Fatalf("continue on paused account = %+v, want 503 switch notice", refused.err)
+			}
+			if h.p.Account(pausedID).Turns() != 0 {
+				t.Fatalf("paused account still has %d active turns after definite rejection", h.p.Account(pausedID).Turns())
+			}
+
+			switched := h.completeAs(ctx, alice, contReq)
+			if switched.err != nil || switched.finish != conv.FinishStop {
+				t.Fatalf("retry after pause = %+v", switched)
+			}
+			recs := h.records.all(t, 3)
+			if recs[2].Account != otherID || recs[2].Mode != ModeReplay || recs[2].ReplayReason != ReplaySwitchDefinite {
+				t.Fatalf("retry = %s %s %s, want %s replay %s", recs[2].Account, recs[2].Mode, recs[2].ReplayReason, otherID, ReplaySwitchDefinite)
+			}
+			// Only the initial turn ran on the paused account; the replay ran on otherID.
+			prompts := h.requests("session/prompt")
+			if len(prompts) != 2 {
+				t.Fatalf("session/prompt count = %d, want 2", len(prompts))
+			}
+			if prompts[0].Params.SessionID == prompts[1].Params.SessionID {
+				t.Fatal("retry reused the paused account's session")
+			}
+		})
+	}
+}
+
+// A short cooldown on a parked turn's account returns a plain 429 and leaves
+// the parked turn intact to continue once it ends; a long cooldown cancels the
+// parked turn and switches accounts on retry.
+func TestCooldownOnParkedTurnWaitsWhenShortAndSwitchesWhenLong(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+
+	first := h.complete(ctx, "alice", conv.Request{
+		Model:    "gemini-3.8-flash",
+		Tools:    tools,
+		Messages: []conv.Message{user(`@tool read {"path":"a.txt"}`)},
+	})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	firstAcct := h.records.all(t, 1)[0].Account
+	call := first.calls[0]
+	contReq := conv.Request{
+		Model: "gemini-3.8-flash",
+		Tools: tools,
+		Messages: []conv.Message{
+			user(`@tool read {"path":"a.txt"}`),
+			{Role: conv.RoleAssistant, ToolCalls: first.calls},
+			{Role: conv.RoleTool, ToolCallID: call.ID, ToolName: call.Name, Text: "ok"},
+		},
+	}
+
+	h.p.Account(firstAcct).Cool(pool.GroupGemini, time.Now().Add(150*time.Millisecond))
+	waiting := h.complete(ctx, "alice", contReq)
+	if waiting.err == nil || waiting.err.Kind != conv.ErrQuota || waiting.err.RetryAfterSeconds <= 0 ||
+		strings.Contains(waiting.err.Message, "[agyrelay]") {
+		t.Fatalf("short cooldown on parked turn = %+v, want plain 429", waiting.err)
+	}
+	if !h.turnIs(TurnParked) {
+		t.Fatalf("short cooldown cancelled parked turn: sessions = %+v", h.gw.Sessions())
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	continued := h.complete(ctx, "alice", contReq)
+	if continued.err != nil || continued.text != "tool said: ok" {
+		t.Fatalf("after short cooldown = %+v", continued)
+	}
+	if recs := h.records.all(t, 3); recs[2].Account != firstAcct || recs[2].Mode != ModeContinue {
+		t.Fatalf("after short cooldown = %s %s, want %s continue", recs[2].Account, recs[2].Mode, firstAcct)
+	}
+	if n := len(h.requests("session/prompt")); n != 1 {
+		t.Fatalf("session/prompt count = %d, want 1 (same parked turn)", n)
+	}
+
+	// Now park a second turn and apply a long cooldown: definite error + switch.
+	second := h.complete(ctx, "bob", conv.Request{
+		Model:    "gemini-3.8-flash",
+		Tools:    tools,
+		Messages: []conv.Message{user(`@tool read {"path":"b.txt"}`)},
+	})
+	if second.err != nil || len(second.calls) != 1 {
+		t.Fatalf("second = %+v", second)
+	}
+	bobAcct := h.records.all(t, 4)[3].Account
+	bobOther := "acct1"
+	if bobAcct == "acct1" {
+		bobOther = "acct0"
+	}
+	bobCall := second.calls[0]
+	bobCont := conv.Request{
+		Model: "gemini-3.8-flash",
+		Tools: tools,
+		Messages: []conv.Message{
+			user(`@tool read {"path":"b.txt"}`),
+			{Role: conv.RoleAssistant, ToolCalls: second.calls},
+			{Role: conv.RoleTool, ToolCallID: bobCall.ID, ToolName: bobCall.Name, Text: "ok2"},
+		},
+	}
+	h.p.Account(bobAcct).Cool(pool.GroupGemini, time.Now().Add(2*time.Hour))
+	long := h.complete(ctx, "bob", bobCont)
+	if long.err == nil || long.err.RetryAfterSeconds != switchRetryAfterSeconds ||
+		!strings.Contains(long.err.Message, "account holding this conversation is unavailable") {
+		t.Fatalf("long cooldown on parked turn = %+v, want switch notice", long.err)
+	}
+	if h.p.Account(bobAcct).Turns() != 0 {
+		t.Fatalf("long cooldown left %d active turns on %s", h.p.Account(bobAcct).Turns(), bobAcct)
+	}
+	moved := h.complete(ctx, "bob", bobCont)
+	if moved.err != nil {
+		t.Fatalf("retry after long cooldown = %+v", moved.err)
+	}
+	if rec := h.records.all(t, 6)[5]; rec.Account != bobOther || rec.Mode != ModeReplay || rec.ReplayReason != ReplaySwitchDefinite {
+		t.Fatalf("moved = %s %s %s, want %s replay %s", rec.Account, rec.Mode, rec.ReplayReason, bobOther, ReplaySwitchDefinite)
+	}
+}
+
+// Pausing an account must leave an already-running turn undisturbed while
+// rejecting new requests on that session and switching them on retry.
+func TestPausedAccountLeavesRunningTurnAlone(t *testing.T) {
+	h := newHarness(t, 2, nil)
+	ctx := context.Background()
+	name := userPreferring(t, h.p, "acct0")
+
+	first := h.complete(ctx, name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("one")}})
+	if first.err != nil {
+		t.Fatalf("first = %+v", first.err)
+	}
+	base := []conv.Message{user("one"), {Role: conv.RoleAssistant, Text: first.text}}
+
+	// Start a running turn on acct0's session and wait until it is in flight.
+	runningDone := make(chan result, 1)
+	go func() {
+		runningDone <- h.complete(ctx, name, conv.Request{
+			Model:    "gemini-3.8-flash",
+			Messages: append(slices.Clone(base), user("@hang")),
+		})
+	}()
+	defer func() {
+		h.cancelTurns()
+		<-runningDone
+	}()
+	h.waitRequests("session/prompt", 2)
+	acct0Running := func() bool {
+		for _, s := range h.gw.Sessions() {
+			if s.Account == "acct0" && s.Turn != nil && s.Turn.State == TurnRunning {
+				return true
+			}
+		}
+		return false
+	}
+	if !acct0Running() {
+		t.Fatalf("sessions = %+v, want running turn on acct0", h.gw.Sessions())
+	}
+
+	h.p.Account("acct0").SetPaused(true)
+
+	// A new request matching acct0's earlier snapshot is rejected without
+	// cancelling the running turn, and its retry switches to acct1.
+	nextReq := conv.Request{Model: "gemini-3.8-flash", Messages: append(slices.Clone(base), user("follow-up"))}
+	refused := h.complete(ctx, name, nextReq)
+	if refused.err == nil || refused.err.Kind != conv.ErrOverloaded ||
+		!strings.Contains(refused.err.Message, "account holding this conversation is unavailable") {
+		t.Fatalf("request while paused = %+v, want 503 unavailable", refused.err)
+	}
+	if !acct0Running() {
+		t.Fatalf("running turn was disturbed by pause rejection: sessions = %+v", h.gw.Sessions())
+	}
+
+	switched := h.complete(ctx, name, nextReq)
+	if switched.err != nil {
+		t.Fatalf("retry = %+v", switched.err)
+	}
+	if !acct0Running() {
+		t.Fatalf("running turn on paused account stopped unexpectedly: sessions = %+v", h.gw.Sessions())
+	}
+	if rec := h.records.all(t, 3)[2]; rec.Account != "acct1" || rec.Mode != ModeReplay || rec.ReplayReason != ReplaySwitchDefinite {
+		t.Fatalf("switched = %s %s %s, want acct1 replay %s", rec.Account, rec.Mode, rec.ReplayReason, ReplaySwitchDefinite)
+	}
+}
+
+// If an account is paused while startFresh is opening a new session on it,
+// the request must not send a prompt there and must move to another account.
+func TestStartFreshSkipsAccountPausedDuringOpen(t *testing.T) {
+	h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_OPEN_DELAY=150ms"}})
+	ctx := context.Background()
+	name := userPreferring(t, h.p, "acct0")
+
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		h.p.Account("acct0").SetPaused(true)
+	}()
+
+	got := h.complete(ctx, name, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if got.err != nil || got.text != "reply to: hi" {
+		t.Fatalf("got = %+v", got)
+	}
+	if rec := h.records.all(t, 1)[0]; rec.Account != "acct1" || rec.Mode != ModeFresh {
+		t.Fatalf("record = %s %s, want acct1 fresh", rec.Account, rec.Mode)
+	}
+	if h.p.Account("acct0").Turns() != 0 {
+		t.Fatalf("acct0 leaked %d active turns", h.p.Account("acct0").Turns())
+	}
+	if prompts := h.requests("session/prompt"); len(prompts) != 1 {
+		t.Fatalf("session/prompt count = %d, want 1 (none on paused acct0)", len(prompts))
+	}
+}
+
 // userPreferring finds a user whose first-choice account is account for the
 // opening prompts used by the routing tests.
 func userPreferring(t *testing.T, p *pool.Pool, account string) string {
