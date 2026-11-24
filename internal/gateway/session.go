@@ -141,7 +141,7 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, r *run) (*active
 	if account == nil {
 		return nil, newAccountError("the account holding this conversation was removed", true, fmt.Errorf("account %s is no longer configured", snap.Account))
 	}
-	if err := account.Available(r.poolGroup(account)); err != nil {
+	if err := account.Available(r.group); err != nil {
 		return nil, unavailableError(account, r, err)
 	}
 	slug, tier, ok := slugOn(account, r)
@@ -255,7 +255,7 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 			g.mu.Unlock()
 			return nil, err
 		}
-		if err := account.TryAcquire(r.poolGroup(account)); err != nil {
+		if err := account.TryAcquire(r.group); err != nil {
 			g.releaseBusyLocked(r.user)
 			g.mu.Unlock()
 			return nil, err
@@ -412,7 +412,7 @@ func (g *Gateway) pinnedFailure(r *run) *attemptFailure {
 	if _, _, ok := slugOn(account, r); !ok {
 		return g.accountFailure(r.pin, newAccountError(fmt.Sprintf("the account holding this conversation does not offer model %q", r.req.Model), true, nil))
 	}
-	if err := account.Available(r.poolGroup(account)); err != nil {
+	if err := account.Available(r.group); err != nil {
 		return g.accountFailure(r.pin, unavailableError(account, r, err))
 	}
 	return nil
@@ -423,7 +423,7 @@ func (g *Gateway) pinnedFailure(r *run) *attemptFailure {
 // on the account; anything else is the account's, and the conversation
 // leaves it.
 func unavailableError(account *pool.Account, r *run, cause error) *accountError {
-	if wait := account.CooldownRemaining(r.poolGroup(account)); wait > 0 && wait <= maxRetryableQuotaWait {
+	if wait := account.CooldownRemaining(r.group); wait > 0 && wait <= maxRetryableQuotaWait {
 		err := newAccountError("rate limit exceeded", false, cause)
 		err.wait = wait
 		return err
@@ -460,7 +460,7 @@ func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
 			}
 		}
 	}
-	return g.pool.Pick(sessionAffinity(r.user, r.t), r.model.id, exclude, idle)
+	return g.pool.Pick(sessionAffinity(r.user, r.t), r.group, exclude, idle)
 }
 
 // sessionAffinity keys rendezvous account selection by API key and the

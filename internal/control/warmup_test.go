@@ -79,19 +79,6 @@ func TestWeeklyBucketNeedsWarmup(t *testing.T) {
 }
 
 func TestPickWarmupModel(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	p, err := pool.New(pool.Config{TurnsPerAccount: 1, Log: log, Accounts: []pool.AccountConfig{
-		{ID: "pro", Name: "pro", Home: filepath.Join(t.TempDir(), "pro")},
-		{ID: "ultra", Name: "ultra", Home: filepath.Join(t.TempDir(), "ultra")},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pro := p.Account("pro")
-	// Restrict routing to a single model to verify warmup ignores AllowedModels.
-	pro.SetRouting(0, []string{"claude-opus-5-5"})
-	pro.SetQuotaGroups([]string{pool.GroupGemini, pool.GroupClaudeGPT, pool.GroupArgon})
-
 	catalog := []conv.ModelInfo{
 		{ID: "gemini-4-neon", Efforts: []string{"low", "high"}, Slugs: []string{"gemini-4-neon-low", "gemini-4-neon-high"}},
 		{ID: "gemini-3.8-flash", Efforts: []string{"low", "medium"}, Slugs: []string{"gemini-3.8-flash-low", "gemini-3.8-flash-medium"}},
@@ -103,32 +90,29 @@ func TestPickWarmupModel(t *testing.T) {
 	}
 
 	// Default picks cheapest priced model in each pool (lowest effort tier).
-	if got, missing, ok := pickWarmupModel(pro, catalog, pool.GroupGemini, "", usage.DefaultPrices); !ok || missing || got.slug != "gemini-3.8-flash-low" || got.effort != "low" {
+	if got, missing, ok := pickWarmupModel(catalog, pool.GroupGemini, "", usage.DefaultPrices); !ok || missing || got.slug != "gemini-3.8-flash-low" || got.effort != "low" {
 		t.Fatalf("gemini default = %+v, missing=%v, ok=%v; want gemini-3.8-flash-low", got, missing, ok)
 	}
-	if got, missing, ok := pickWarmupModel(pro, catalog, pool.GroupClaudeGPT, "", usage.DefaultPrices); !ok || missing || got.slug != "gpt-oss-120b-medium" || got.model != "gpt-oss-120b" {
+	if got, missing, ok := pickWarmupModel(catalog, pool.GroupClaudeGPT, "", usage.DefaultPrices); !ok || missing || got.slug != "gpt-oss-120b-medium" || got.model != "gpt-oss-120b" {
 		t.Fatalf("claude-gpt default (with oss) = %+v, missing=%v, ok=%v; want gpt-oss-120b-medium", got, missing, ok)
 	}
 	// When gpt-oss-120b leaves the catalog, cheapest priced Claude wins over unpriced.
 	noOSS := append([]conv.ModelInfo{}, catalog[:5]...)
 	noOSS = append(noOSS, catalog[6])
-	if got, missing, ok := pickWarmupModel(pro, noOSS, pool.GroupClaudeGPT, "", usage.DefaultPrices); !ok || missing || got.slug != "claude-sonnet-5-5-low" {
+	if got, missing, ok := pickWarmupModel(noOSS, pool.GroupClaudeGPT, "", usage.DefaultPrices); !ok || missing || got.slug != "claude-sonnet-5-5-low" {
 		t.Fatalf("claude-gpt default (without oss) = %+v, missing=%v, ok=%v; want claude-sonnet-5-5-low", got, missing, ok)
-	}
-	if got, missing, ok := pickWarmupModel(pro, catalog, pool.GroupArgon, "", usage.DefaultPrices); !ok || missing || got.slug != "gemini-4-argon-low" {
-		t.Fatalf("argon default = %+v, missing=%v, ok=%v; want gemini-4-argon-low", got, missing, ok)
 	}
 
 	// Explicit override by base model id or exact tier slug.
-	if got, missing, ok := pickWarmupModel(pro, catalog, pool.GroupClaudeGPT, "claude-opus-5-5", usage.DefaultPrices); !ok || missing || got.slug != "claude-opus-5-5-low" {
+	if got, missing, ok := pickWarmupModel(catalog, pool.GroupClaudeGPT, "claude-opus-5-5", usage.DefaultPrices); !ok || missing || got.slug != "claude-opus-5-5-low" {
 		t.Fatalf("configured base = %+v, missing=%v, ok=%v; want claude-opus-5-5-low", got, missing, ok)
 	}
-	if got, missing, ok := pickWarmupModel(pro, catalog, pool.GroupClaudeGPT, "claude-opus-5-5-high", usage.DefaultPrices); !ok || missing || got.slug != "claude-opus-5-5-high" || got.effort != "high" {
+	if got, missing, ok := pickWarmupModel(catalog, pool.GroupClaudeGPT, "claude-opus-5-5-high", usage.DefaultPrices); !ok || missing || got.slug != "claude-opus-5-5-high" || got.effort != "high" {
 		t.Fatalf("configured slug = %+v, missing=%v, ok=%v; want claude-opus-5-5-high", got, missing, ok)
 	}
 
 	// Missing configured model falls back to cheapest and reports configuredMissing.
-	if got, missing, ok := pickWarmupModel(pro, noOSS, pool.GroupClaudeGPT, "gpt-oss-120b", usage.DefaultPrices); !ok || !missing || got.slug != "claude-sonnet-5-5-low" {
+	if got, missing, ok := pickWarmupModel(noOSS, pool.GroupClaudeGPT, "gpt-oss-120b", usage.DefaultPrices); !ok || !missing || got.slug != "claude-sonnet-5-5-low" {
 		t.Fatalf("missing configured = %+v, missing=%v, ok=%v; want fallback claude-sonnet-5-5-low with missing=true", got, missing, ok)
 	}
 
@@ -137,20 +121,17 @@ func TestPickWarmupModel(t *testing.T) {
 		{Model: "claude-opus-5-5", Input: 0.5, Output: 1},
 		{Model: "claude-sonnet-5-5", Input: 2, Output: 10},
 	}
-	if got, _, ok := pickWarmupModel(pro, noOSS, pool.GroupClaudeGPT, "", customPrices); !ok || got.model != "claude-opus-5-5" {
+	if got, _, ok := pickWarmupModel(noOSS, pool.GroupClaudeGPT, "", customPrices); !ok || got.model != "claude-opus-5-5" {
 		t.Fatalf("custom prices = %+v, ok=%v; want claude-opus-5-5", got, ok)
 	}
 
-	// Ultra account merges carbon into gemini when argon bucket is absent.
-	ultra := p.Account("ultra")
-	ultra.SetModels([]agy.ModelInfo{{ModelID: "gemini-4-carbon-low"}})
-	ultra.SetQuotaGroups([]string{pool.GroupGemini, pool.GroupClaudeGPT})
-	ultraCatalog := []conv.ModelInfo{{ID: "gemini-4-carbon", Efforts: []string{"low"}, Slugs: []string{"gemini-4-carbon-low"}}}
-	if got, _, ok := pickWarmupModel(ultra, ultraCatalog, pool.GroupGemini, "", usage.DefaultPrices); !ok || got.slug != "gemini-4-carbon-low" {
-		t.Fatalf("ultra gemini = %+v, ok=%v; want gemini-4-carbon-low", got, ok)
+	// Argon and Carbon models map to the Gemini group.
+	argonCarbon := []conv.ModelInfo{
+		{ID: "gemini-4-argon", Efforts: []string{"low"}, Slugs: []string{"gemini-4-argon-low"}},
+		{ID: "gemini-4-carbon", Efforts: []string{"low"}, Slugs: []string{"gemini-4-carbon-low"}},
 	}
-	if _, _, ok := pickWarmupModel(ultra, ultraCatalog, pool.GroupArgon, "", usage.DefaultPrices); ok {
-		t.Fatal("ultra argon unexpectedly matched gemini-4-carbon")
+	if got, _, ok := pickWarmupModel(argonCarbon, pool.GroupGemini, "gemini-4-carbon", usage.DefaultPrices); !ok || got.slug != "gemini-4-carbon-low" {
+		t.Fatalf("gemini carbon = %+v, ok=%v; want gemini-4-carbon-low", got, ok)
 	}
 }
 
@@ -167,7 +148,7 @@ func TestValidateWarmupModels(t *testing.T) {
 		"warmup_models": map[string]string{
 			"gemini":     " gemini-3.8-flash ",
 			"claude-gpt": "claude-sonnet-5-5-low",
-			"argon":      "  ",
+			"argon":      "gemini-4-argon",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -179,18 +160,15 @@ func TestValidateWarmupModels(t *testing.T) {
 	if !s.WarmupFullPools {
 		t.Fatal("WarmupFullPools = false, want true")
 	}
-	if s.WarmupModels[pool.GroupGemini] != "gemini-3.8-flash" || s.WarmupModels[pool.GroupClaudeGPT] != "claude-sonnet-5-5-low" {
+	if len(s.WarmupModels) != 2 || s.WarmupModels[pool.GroupGemini] != "gemini-3.8-flash" || s.WarmupModels[pool.GroupClaudeGPT] != "claude-sonnet-5-5-low" {
 		t.Fatalf("WarmupModels = %+v", s.WarmupModels)
-	}
-	if _, ok := s.WarmupModels[pool.GroupArgon]; ok {
-		t.Fatalf("blank argon override was not dropped: %+v", s.WarmupModels)
 	}
 
 	for _, bad := range []map[string]string{
 		{"unknown": "gemini-3.8-flash"},
+		{"argon": "gemini-3.8-flash"},
 		{pool.GroupGemini: "claude-opus-5-5"},
 		{pool.GroupClaudeGPT: "gemini-3.8-flash"},
-		{pool.GroupArgon: "gemini-3.8-flash"},
 		{pool.GroupGemini: "bad model"},
 	} {
 		cfg := DefaultSettings()
@@ -475,7 +453,7 @@ func TestWarmupSkipsPausedAndRecentGroupUsage(t *testing.T) {
 		Account: active.ID(), AccountName: active.Name(),
 		Model: "gemini-3.8-flash", Slug: "gemini-3.8-flash-low", Effort: "low",
 		API: "chat", Mode: "fresh", Status: store.StatusOK, Finish: "stop",
-		Input: 100, Output: 20, QuotaGroup: pool.GroupGemini, KeyGroup: pool.GroupGemini,
+		Input: 100, Output: 20, QuotaGroup: pool.GroupGemini,
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -35,7 +35,6 @@
 
   "group.gemini": "Gemini",
   "group.claude-gpt": "Claude + GPT",
-  "group.argon": "Gemini 4 Argon",
 
   "keys.title": "API keys",
   "keys.name.placeholder": "alice",
@@ -46,9 +45,6 @@
   "keys.limit.mode.group": "per quota group",
   "keys.limit.total": "Total limit $",
   "keys.limit.label": "{group} limit $",
-  "keys.group.argon": "Argon & Carbon",
-  "keys.limit.argon.merge": "counts in Gemini limit",
-  "keys.limit.argon.separate": "own limit",
   "keys.limit.placeholder": "unlimited",
   "keys.limit.hint": "Limits cap a key's spend at API list prices, counted since the key was created; it never resets. A limited key cannot use models without a price.",
   "keys.models.label": "Allowed models (none checked = all)",
@@ -61,7 +57,6 @@
   "keys.usage.none": "unlimited · unused",
   "keys.usage.total": "Total",
   "keys.usage.no_limit": "no limit",
-  "keys.usage.merged": "in Gemini",
   "keys.create": "Create key",
   "keys.created.title": "Key for {name}",
   "keys.created.note": "Copy it now. It is shown only once; the server keeps only its hash.",

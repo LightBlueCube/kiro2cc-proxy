@@ -346,15 +346,15 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		return &conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("unknown model %q", req.Model)}
 	}
 	modelID := model.id
-	rec.Model, rec.QuotaGroup, rec.KeyGroup = modelID, pool.QuotaGroup(modelID), pool.KeyGroup(modelID)
+	rec.Model, rec.QuotaGroup = modelID, pool.QuotaGroup(modelID)
 	if !caller.Allows(modelID) {
 		return &conv.Error{Kind: conv.ErrForbidden, Message: fmt.Sprintf("this API key may not use model %q", modelID)}
 	}
-	if err := g.checkLimit(ctx, caller, modelID, rec.KeyGroup); err != nil {
+	if err := g.checkLimit(ctx, caller, modelID, rec.QuotaGroup); err != nil {
 		return err
 	}
 
-	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, exclude: map[string]bool{}, reuse: true}
+	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
 	keys := g.conversationKeys(caller.KeyHash, r.choice(), t)
 	g.applyConversation(r, keys)
 
@@ -367,7 +367,6 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		g.mu.Lock()
 		rec.Account, rec.AccountName, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason = at.account.ID(), at.account.Name(), at.slug, at.tier, r.mode, r.replayReason
 		rec.SessionID = at.sess.id
-		rec.QuotaGroup = r.poolGroup(at.account)
 		at.callToken = rec.CallToken
 		g.mu.Unlock()
 		failure = g.consume(ctx, at, r, w)
@@ -415,31 +414,11 @@ func (g *Gateway) checkSystemPrompt(t *transcript) *conv.Error {
 		strings.Join(sysprompt.Harnesses(matches), "', '"), sysprompt.Excerpts(t.system, matches))}
 }
 
-// limitGroup is the group whose limit covers keyGroup. Argon & Carbon
-// count in Gemini's limit when the key merges them.
-func limitGroup(caller conv.Caller, keyGroup string) string {
-	if keyGroup == pool.GroupArgon && caller.MergeArgon {
-		return pool.GroupGemini
-	}
-	return keyGroup
-}
-
-// spentUnder is the key's spend that counts against the limit of group
-// (a result of limitGroup), given its spend by key group.
-func spentUnder(caller conv.Caller, spent map[string]float64, group string) float64 {
-	if group == pool.GroupGemini && caller.MergeArgon {
-		return spent[pool.GroupGemini] + spent[pool.GroupArgon]
-	}
-	return spent[group]
-}
-
-// checkLimit refuses a key that spent its limit: the total, or the one of
-// its key group (see limitGroup). A model without a price would spend
-// nothing, so a limited key may not use it. A turn running when the limit
-// is reached finishes; later requests, including those continuing a
-// parked turn, are refused.
-func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, modelID, keyGroup string) *conv.Error {
-	group := limitGroup(caller, keyGroup)
+// checkLimit refuses a key that spent its limit: the total, or the quota
+// group's. A model without a price would spend nothing, so a limited key
+// may not use it. A turn running when the limit is reached finishes;
+// later requests, including those continuing a parked turn, are refused.
+func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, modelID, group string) *conv.Error {
 	if !caller.LimitedIn(group) {
 		return nil
 	}
@@ -463,9 +442,9 @@ func (g *Gateway) checkLimit(ctx context.Context, caller conv.Caller, modelID, k
 		}
 		return nil
 	}
-	if limit, used := caller.Limits[group], spentUnder(caller, spent, group); used >= limit {
+	if limit := caller.Limits[group]; spent[group] >= limit {
 		return &conv.Error{Kind: conv.ErrKeyLimit, Message: fmt.Sprintf(
-			"this API key spent %s of its %s limit on %s models (at API list prices)", usd(used), usd(limit), group)}
+			"this API key spent %s of its %s limit on %s models (at API list prices)", usd(spent[group]), usd(limit), group)}
 	}
 	return nil
 }
@@ -508,11 +487,6 @@ func validate(req conv.Request, t *transcript) *conv.Error {
 	return nil
 }
 
-// poolGroup is the quota group account charges the run's model to.
-func (r *run) poolGroup(account *pool.Account) string {
-	return account.PoolGroup(r.model.id)
-}
-
 // run is one request's planning state across attempts.
 type run struct {
 	user       string
@@ -523,6 +497,7 @@ type run struct {
 	model      modelChoice
 	// offered is the merged catalog the model was found in.
 	offered []modelEntry
+	group   string
 	exclude map[string]bool
 	// pin is the account the conversation stays on (empty = any): the one
 	// its earlier requests failed on, until its failures are due.
@@ -975,7 +950,7 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 		// means the caller's API key is invalid.
 		return definite(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, 0)
 	case failure.Code == http.StatusForbidden:
-		if at.account.Available(r.poolGroup(at.account)) != nil {
+		if at.account.Available(r.group) != nil {
 			// VALIDATION_REQUIRED (or similar) removed this account; avoid
 			// leaking account-verification details to callers.
 			return definite(&conv.Error{Kind: conv.ErrUnknownModel, Message: fmt.Sprintf("model %q is currently unavailable", r.req.Model)}, 0)
@@ -990,7 +965,7 @@ func (g *Gateway) modelFailure(at *activeTurn, r *run, failure *pool.ModelFailur
 		if wait <= 0 {
 			return counted(&conv.Error{Kind: conv.ErrOverloaded, Message: failure.Message})
 		}
-		at.account.Cool(r.poolGroup(at.account), failure.Reset)
+		at.account.Cool(r.group, failure.Reset)
 		quota := &conv.Error{Kind: conv.ErrQuota, Message: failure.Message, RetryAfterSeconds: int(math.Ceil(wait.Seconds()))}
 		if wait <= maxRetryableQuotaWait {
 			// A wait the client can sit out: pass Google's 429 on as it is,

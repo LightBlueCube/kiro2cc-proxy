@@ -391,6 +391,7 @@ func TestKeyLimits(t *testing.T) {
 	c.login(testPassword)
 	for _, bad := range []map[string]any{
 		{"limits": map[string]float64{"nope": 1}},
+		{"limits": map[string]float64{"argon": 1}},
 		{"limits": map[string]float64{"gemini": -0.1}},
 		{"limit_total": -1},
 		{"limit_total": 5, "limits": map[string]float64{"gemini": 1}},
@@ -410,7 +411,7 @@ func TestKeyLimits(t *testing.T) {
 	r = c.do("GET", "/admin/api/keys", nil, nil)
 	var list keysView
 	json.Unmarshal([]byte(r.raw), &list)
-	if len(list.Keys) != 1 || list.Keys[0].MaxWorkers == nil || *list.Keys[0].MaxWorkers != 2 || list.Keys[0].Limits["claude-gpt"] != 30 || list.Keys[0].LimitTotal != nil || len(list.Groups) != 3 {
+	if len(list.Keys) != 1 || list.Keys[0].MaxWorkers == nil || *list.Keys[0].MaxWorkers != 2 || list.Keys[0].Limits["claude-gpt"] != 30 || list.Keys[0].LimitTotal != nil || len(list.Groups) != 2 {
 		t.Fatalf("keys = %s", r.raw)
 	}
 
@@ -427,65 +428,6 @@ func TestKeyLimits(t *testing.T) {
 	}
 	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers != nil || caller.LimitTotal != nil {
 		t.Fatalf("limits after clearing = %+v", caller)
-	}
-}
-
-func TestKeyMergeArgon(t *testing.T) {
-	e := newEnv(t)
-	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {
-		t.Fatal(err)
-	}
-	c := e.client("203.0.113.1")
-	c.login(testPassword)
-	keyView := func() keyView {
-		t.Helper()
-		var list keysView
-		r := c.do("GET", "/admin/api/keys", nil, nil)
-		if err := json.Unmarshal([]byte(r.raw), &list); err != nil || len(list.Keys) != 1 {
-			t.Fatalf("keys = %s", r.raw)
-		}
-		return list.Keys[0]
-	}
-
-	// A key merges Argon & Carbon into Gemini unless it says otherwise.
-	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "limits": map[string]float64{"gemini": 5}}, nil)
-	token, _ := r.body["key"].(string)
-	caller, _ := e.ctl.Lookup(token)
-	if v := keyView(); !v.MergeArgon || !caller.MergeArgon || caller.Limits["gemini"] != 5 || len(caller.Limits) != 1 {
-		t.Fatalf("new key: view %+v, caller %+v", v, caller)
-	}
-
-	// A merged key has no limit of its own for them.
-	hash := keyView().Hash
-	both := map[string]float64{"gemini": 5, "argon": 3}
-	for _, update := range []map[string]any{{"limits": both}, {"limits": both, "merge_argon": true}} {
-		if r := c.do("PATCH", "/admin/api/keys/"+hash, update, nil); r.status != http.StatusBadRequest {
-			t.Fatalf("merged key with an Argon limit %v = %d %s", update, r.status, r.raw)
-		}
-	}
-
-	// Unmerged, the limit is the key's own; merging again drops it.
-	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"limits": both, "merge_argon": false}, nil); r.status != http.StatusOK {
-		t.Fatalf("unmerge = %d %s", r.status, r.raw)
-	}
-	caller, _ = e.ctl.Lookup(token)
-	if v := keyView(); v.MergeArgon || caller.MergeArgon || caller.Limits["argon"] != 3 || caller.Limits["gemini"] != 5 {
-		t.Fatalf("unmerged key: view %+v, caller %+v", v, caller)
-	}
-	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"limits": map[string]float64{"gemini": 5}, "merge_argon": true}, nil); r.status != http.StatusOK {
-		t.Fatalf("merge = %d %s", r.status, r.raw)
-	}
-	caller, _ = e.ctl.Lookup(token)
-	if v := keyView(); !v.MergeArgon || len(v.Limits) != 1 || !caller.MergeArgon || len(caller.Limits) != 1 {
-		t.Fatalf("merged again: view %+v, caller %+v", v, caller)
-	}
-
-	// Unmerged without an Argon limit leaves them unlimited.
-	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"limits": map[string]float64{"gemini": 5}, "merge_argon": false}, nil); r.status != http.StatusOK {
-		t.Fatalf("unmerge without a limit = %d %s", r.status, r.raw)
-	}
-	if v := keyView(); v.MergeArgon || len(v.Limits) != 1 {
-		t.Fatalf("unmerged without a limit: %+v", v)
 	}
 }
 
@@ -1123,8 +1065,8 @@ func TestUserKeyUsageAndMetadata(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	costA, costB := 1.25, 2.5
 	for _, req := range []store.Request{
-		{At: now, KeyHash: aliceHash, KeyName: "alice", Account: "main", QuotaGroup: "gemini", KeyGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Cached: 40, Output: 10, CostUSD: &costA},
-		{At: now, KeyHash: bobHash, KeyName: "bob", Account: "other", QuotaGroup: "gemini", KeyGroup: "gemini", Model: "claude-opus-5-5", Status: store.StatusOK, Input: 500, Output: 50, CostUSD: &costB},
+		{At: now, KeyHash: aliceHash, KeyName: "alice", Account: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Cached: 40, Output: 10, CostUSD: &costA},
+		{At: now, KeyHash: bobHash, KeyName: "bob", Account: "other", QuotaGroup: "gemini", Model: "claude-opus-5-5", Status: store.StatusOK, Input: 500, Output: 50, CostUSD: &costB},
 	} {
 		if err := e.st.AddRequest(ctx, req); err != nil {
 			t.Fatal(err)
@@ -1493,7 +1435,7 @@ func TestWarmupSettingsAndCallsView(t *testing.T) {
 	}
 
 	// Warmup calls show in admin Calls APIs and never leak to /user/api/requests.
-	keyToken, _, err := e.ctl.CreateKey(ctx, "alice", store.KeyUpdate{MergeArgon: true})
+	keyToken, _, err := e.ctl.CreateKey(ctx, "alice", store.KeyUpdate{})
 	if err != nil {
 		t.Fatal(err)
 	}

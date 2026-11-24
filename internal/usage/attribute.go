@@ -12,15 +12,14 @@ import (
 )
 
 // weeklyBuckets maps agy's weekly quota buckets to the pool's quota groups
-// (pool.QuotaGroup). Bucket ids as agy 1.5.3 reports them for a Pro plan.
+// (pool.QuotaGroup).
 var weeklyBuckets = map[string]string{
-	"gemini-weekly":           "gemini",
-	"3p-weekly":               "claude-gpt",
-	"gemini-argon-wtu-weekly": "argon",
+	"gemini-weekly": "gemini",
+	"3p-weekly":     "claude-gpt",
 }
 
 // Groups lists the quota groups with a weekly bucket.
-var Groups = []string{"gemini", "claude-gpt", "argon"}
+var Groups = []string{"gemini", "claude-gpt"}
 
 // BucketGroup maps a quota bucket id to its pool quota group.
 func BucketGroup(bucketID string) string {
@@ -30,8 +29,6 @@ func BucketGroup(bucketID string) string {
 	switch {
 	case strings.HasPrefix(bucketID, "3p-"):
 		return "claude-gpt"
-	case strings.HasPrefix(bucketID, "gemini-argon-"):
-		return "argon"
 	case strings.HasPrefix(bucketID, "gemini-"):
 		return "gemini"
 	default:

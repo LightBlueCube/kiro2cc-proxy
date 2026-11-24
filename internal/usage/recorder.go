@@ -49,7 +49,7 @@ func (r *Recorder) Record(rec gateway.Record) {
 	row := store.Request{
 		At: rec.At, KeyHash: rec.KeyHash, KeyName: rec.KeyName, Account: rec.Account, AccountName: rec.AccountName, Model: rec.Model, Slug: rec.Slug, Effort: rec.Effort,
 		API: rec.API, Stream: rec.Stream, Anchor: string(rec.Anchor), Mode: string(rec.Mode), ReplayReason: string(rec.ReplayReason), Status: store.StatusOK, Finish: string(rec.Finish),
-		Duration: rec.Duration, QuotaGroup: rec.QuotaGroup, KeyGroup: rec.KeyGroup, CallToken: rec.CallToken, Session: rec.SessionID,
+		Duration: rec.Duration, QuotaGroup: rec.QuotaGroup, CallToken: rec.CallToken, Session: rec.SessionID,
 	}
 	if rec.TimeToFirstOutput > 0 {
 		ttft := rec.TimeToFirstOutput

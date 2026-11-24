@@ -461,7 +461,7 @@ func (c *Control) warmAccountGroup(ctx context.Context, account *pool.Account, s
 	}
 
 	configured := settings.WarmupModels[g.group]
-	target, configuredMissing, ok := pickWarmupModel(account, c.cfg.Gateway.AccountModels(account.ID()), g.group, configured, settings.Prices)
+	target, configuredMissing, ok := pickWarmupModel(c.cfg.Gateway.AccountModels(account.ID()), g.group, configured, settings.Prices)
 	if !ok {
 		c.warmup.mu.Lock()
 		gs.nextAttempt = now.Add(warmupRetryMax)
@@ -614,15 +614,14 @@ func weeklyBucketNeedsWarmup(b agy.QuotaBucket, sampledAt time.Time) bool {
 	return b.ResetAt.Sub(sampledAt) >= weeklyWindow-fullResetGrace
 }
 
-// pickWarmupModel picks the model and ACP slug to warm up group on account,
-// ignoring per-account allowed_models routing restrictions. When configured is
-// non-empty and offered by account in group, it is used; otherwise the cheapest
-// offered model in group according to prices (using its lowest effort tier) is
-// selected.
-func pickWarmupModel(account *pool.Account, catalog []conv.ModelInfo, group, configured string, prices []usage.Price) (target warmupTarget, configuredMissing bool, ok bool) {
+// pickWarmupModel picks the model and ACP slug to warm up group, ignoring
+// per-account allowed_models routing restrictions. When configured is non-empty
+// and offered in group, it is used; otherwise the cheapest offered model in
+// group according to prices (using its lowest effort tier) is selected.
+func pickWarmupModel(catalog []conv.ModelInfo, group, configured string, prices []usage.Price) (target warmupTarget, configuredMissing bool, ok bool) {
 	var candidates []conv.ModelInfo
 	for _, m := range catalog {
-		if account.PoolGroup(m.ID) == group {
+		if pool.QuotaGroup(m.ID) == group {
 			candidates = append(candidates, m)
 		}
 	}
@@ -736,8 +735,6 @@ func warmupModelAllowedForGroup(group, model string) bool {
 	switch {
 	case strings.HasPrefix(model, "claude-"), strings.HasPrefix(model, "gpt-oss-"):
 		return group == pool.GroupClaudeGPT
-	case strings.HasPrefix(model, "gemini-4-argon"), strings.HasPrefix(model, "gemini-4-carbon"):
-		return group == pool.GroupArgon || group == pool.GroupGemini
 	case strings.HasPrefix(model, "gemini-"):
 		return group == pool.GroupGemini
 	default:

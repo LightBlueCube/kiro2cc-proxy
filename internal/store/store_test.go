@@ -153,7 +153,7 @@ func TestDeleteKey(t *testing.T) {
 		t.Fatalf("after clearing max_workers: %+v, %v", keys, err)
 	}
 	cost := 0.5
-	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Account: "main", Model: "m", Status: StatusOK, QuotaGroup: "gemini", KeyGroup: "argon", Input: 1, CostUSD: &cost}); err != nil {
+	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Account: "main", Model: "m", Status: StatusOK, QuotaGroup: "gemini", Input: 1, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10)
@@ -163,8 +163,7 @@ func TestDeleteKey(t *testing.T) {
 	if err := st.AttributeQuota(ctx, "main", "gemini-weekly", time.Now(), map[int64]float64{rows[0].ID: 0.2}); err != nil {
 		t.Fatal(err)
 	}
-	// The spend counts in the key group, whatever quota group was charged.
-	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.5 || spends[0].Group != "argon" || rows[0].QuotaGroup != "gemini" {
+	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.5 || spends[0].Group != "gemini" || rows[0].QuotaGroup != "gemini" {
 		t.Fatalf("spend = %+v, %v; request group %q", spends, err, rows[0].QuotaGroup)
 	}
 	if totals, err := st.KeyTotals(ctx, ""); err != nil || len(totals) != 1 {
@@ -200,57 +199,6 @@ func TestDeleteKey(t *testing.T) {
 	}
 	if err := st.AddKey(ctx, Key{Hash: "h2", Name: "alice", CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("reuse the name: %v", err)
-	}
-}
-
-func TestKeyMergeArgon(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "db")
-	st, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	for _, k := range []Key{
-		{Hash: "h1", Name: "merged", MergeArgon: true, Limits: map[string]float64{"gemini": 5}, CreatedAt: time.Unix(1, 0)},
-		{Hash: "h2", Name: "apart", Limits: map[string]float64{"argon": 3}, CreatedAt: time.Unix(2, 0)},
-	} {
-		if err := st.AddKey(ctx, k); err != nil {
-			t.Fatal(err)
-		}
-	}
-	keys, err := st.Keys(ctx)
-	if err != nil || len(keys) != 2 || !keys[0].MergeArgon || keys[1].MergeArgon || keys[1].Limits["argon"] != 3 {
-		t.Fatalf("keys = %+v, %v", keys, err)
-	}
-	if err := st.UpdateKey(ctx, "h1", KeyUpdate{Limits: map[string]float64{"gemini": 5, "argon": 3}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.UpdateKey(ctx, "h1", KeyUpdate{MergeArgon: true, Limits: map[string]float64{"gemini": 5}}); err != nil {
-		t.Fatal(err)
-	}
-	keys, err = st.Keys(ctx)
-	if err != nil || !keys[0].MergeArgon || len(keys[0].Limits) != 1 {
-		t.Fatalf("after unmerging and merging h1: %+v, %v", keys, err)
-	}
-
-	// A database from before merge_argon: keys with an Argon limit keep
-	// counting Argon apart from Gemini, the others merge.
-	if _, err := st.db.Exec(`ALTER TABLE api_keys DROP COLUMN merge_argon`); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if st, err = Open(path); err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if err := st.AddKey(ctx, Key{Hash: "h3", Name: "plain", MergeArgon: true, Limits: map[string]float64{"gemini": 1}, CreatedAt: time.Unix(3, 0)}); err != nil {
-		t.Fatal(err)
-	}
-	keys, err = st.Keys(ctx)
-	if err != nil || len(keys) != 3 || !keys[0].MergeArgon || keys[1].MergeArgon || !keys[2].MergeArgon {
-		t.Fatalf("keys after the upgrade = %+v, %v", keys, err)
 	}
 }
 
@@ -673,5 +621,82 @@ func TestSystemKeyWarmupExcludedFromKeyTables(t *testing.T) {
 	}
 	if none, err := st.LastAccountGroupRequestEnd(ctx, "a1", "claude-gpt", now.Add(-time.Minute)); err != nil || !none.IsZero() {
 		t.Fatalf("claude-gpt LastAccountGroupRequestEnd = %v, %v; want zero", none, err)
+	}
+}
+
+func TestLegacyArgonPoolMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	if err := st.AddAccount(ctx, Account{ID: "a1", Name: "pro", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE api_keys ADD COLUMN merge_argon INTEGER NOT NULL DEFAULT 1`,
+		`INSERT INTO api_keys (hash, name, limits, merge_argon, created_at) VALUES ('h1', 'both', '{"gemini":5,"argon":3}', 0, 1)`,
+		`INSERT INTO api_keys (hash, name, limits, merge_argon, created_at) VALUES ('h2', 'argon_only', '{"argon":2}', 0, 2)`,
+		`INSERT INTO key_usage (key_hash, grp, cost_usd) VALUES ('h1', 'gemini', 1.5), ('h1', 'argon', 2.25), ('h2', 'argon', 0.75)`,
+		`INSERT INTO quota_samples (account, at, bucket, grp, win, remaining, reset_at) VALUES ('a1', 1000, 'gemini-argon-wtu-weekly', 'Gemini 4 Argon', 'weekly', 0.8, 2000), ('a1', 1000, 'gemini-weekly', 'Gemini', 'weekly', 0.9, 2000)`,
+		`INSERT INTO quota_cursors (account, bucket, at) VALUES ('a1', 'gemini-argon-wtu-weekly', 1000), ('a1', 'gemini-weekly', 1000)`,
+		`INSERT INTO key_quota (key_hash, account, account_name, grp, used) VALUES ('h1', 'a1', 'pro', 'argon', 0.2), ('h1', 'a1', 'pro', 'gemini', 0.1)`,
+		`INSERT INTO requests (at, key_hash, key_name, account, account_name, model, status, input, output, quota_group, quota_used) VALUES (1000, 'h1', 'both', 'a1', 'pro', 'gemini-4-argon', 'ok', 10, 5, 'argon', 0.2)`,
+		`INSERT INTO settings (name, value) VALUES ('settings', '{"warmup_models":{"gemini":"gemini-3.8-flash","argon":"gemini-4-argon"}}')`,
+	} {
+		if _, err := st.db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	keys, err := st.Keys(ctx)
+	if err != nil || len(keys) != 2 || len(keys[0].Limits) != 1 || keys[0].Limits["gemini"] != 5 || len(keys[1].Limits) != 0 {
+		t.Fatalf("migrated keys = %+v, %v", keys, err)
+	}
+	spends, err := st.KeySpends(ctx, "")
+	if err != nil || len(spends) != 2 {
+		t.Fatalf("migrated spends = %+v, %v", spends, err)
+	}
+	gotSpend := map[string]float64{}
+	for _, s := range spends {
+		if s.Group != "gemini" {
+			t.Fatalf("unexpected spend group: %+v", s)
+		}
+		gotSpend[s.KeyHash] = s.CostUSD
+	}
+	if gotSpend["h1"] != 3.75 || gotSpend["h2"] != 0.75 {
+		t.Fatalf("folded spend = %+v", gotSpend)
+	}
+	samples, err := st.LatestQuotaSamples(ctx, "a1")
+	if err != nil || len(samples) != 1 || samples[0].Bucket != "gemini-weekly" {
+		t.Fatalf("migrated quota samples = %+v, %v", samples, err)
+	}
+	if _, err := st.QuotaCursor(ctx, "a1", "gemini-argon-wtu-weekly"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("argon cursor still present: %v", err)
+	}
+	quotas, err := st.KeyQuotas(ctx, "h1")
+	if err != nil || len(quotas) != 1 || quotas[0].Group != "gemini" || quotas[0].Used != 0.1 {
+		t.Fatalf("migrated key_quota = %+v, %v", quotas, err)
+	}
+	reqs, err := st.Requests(ctx, RequestFilter{}, 0, 10)
+	if err != nil || len(reqs) != 1 || reqs[0].QuotaGroup != "gemini" || reqs[0].QuotaUsed != nil || reqs[0].QuotaSkip != SkipNoBucket {
+		t.Fatalf("migrated requests = %+v, %v", reqs, err)
+	}
+	var saved struct {
+		WarmupModels map[string]string `json:"warmup_models"`
+	}
+	if found, err := st.Setting(ctx, "settings", &saved); err != nil || !found || len(saved.WarmupModels) != 1 || saved.WarmupModels["gemini"] != "gemini-3.8-flash" {
+		t.Fatalf("migrated settings = %+v (found=%v), %v", saved, found, err)
 	}
 }

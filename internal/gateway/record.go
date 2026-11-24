@@ -77,8 +77,6 @@ type Record struct {
 	Effort string
 	// QuotaGroup is the quota group the serving account charged.
 	QuotaGroup string
-	// KeyGroup is the group of the key's spend limit that the request counts in.
-	KeyGroup string
 	// Account (the account ID), AccountName, and Mode are empty when no
 	// attempt started.
 	Account     string

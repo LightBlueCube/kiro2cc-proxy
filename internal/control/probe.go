@@ -9,6 +9,7 @@ import (
 
 	"agyrelay/internal/conv"
 	"agyrelay/internal/gateway"
+	"agyrelay/internal/pool"
 	"agyrelay/internal/store"
 	"agyrelay/internal/usage"
 )
@@ -47,7 +48,7 @@ func (c *Control) TestAccount(ctx context.Context, id, model string) (AccountTes
 		return AccountTestResult{}, err
 	}
 
-	group := account.PoolGroup(target.model)
+	group := pool.QuotaGroup(target.model)
 	if err := account.Available(group); err != nil {
 		return AccountTestResult{}, &InputError{fmt.Sprintf("the account cannot serve %s now: %v", target.model, err)}
 	}

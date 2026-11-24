@@ -29,7 +29,7 @@ func TestWarmupRecordsCallAndCleansUpSession(t *testing.T) {
 
 	recs := h.records.all(t, 1)
 	rec := recs[0]
-	if rec.KeyHash != "system:warmup" || rec.KeyName != "warmup" || rec.API != "" || rec.Mode != "" || rec.KeyGroup != "" {
+	if rec.KeyHash != "system:warmup" || rec.KeyName != "warmup" || rec.API != "" || rec.Mode != "" {
 		t.Errorf("record identity = %+v", rec)
 	}
 	prompts := h.requests("session/prompt")

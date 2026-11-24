@@ -239,12 +239,7 @@ function polling(container, interval, render) {
 
 // groupName labels an account's quota pool (weekly bucket).
 const groupName = g => lookup("group", g) || g;
-// Quota group ids a key's Argon & Carbon merge involves.
-const GEMINI_GROUP = "gemini";
-const ARGON_GROUP = "argon";
-const QUOTA_GROUPS = [GEMINI_GROUP, "claude-gpt", ARGON_GROUP];
-// keyGroupName labels a key's billing group, where Argon & Carbon share one.
-const keyGroupName = g => g === ARGON_GROUP ? t("keys.group.argon") : groupName(g);
+const QUOTA_GROUPS = ["gemini", "claude-gpt"];
 
 // quotaText lists shares by group: "Gemini 0.05% · Claude + GPT 0.11%".
 const quotaText = (byGroup, digits) => joined(...Object.entries(byGroup)
@@ -262,15 +257,7 @@ function limitEditor(groups, k) {
     value: k.max_workers === undefined || k.max_workers === null ? "" : String(k.max_workers) });
   const total = usd(k.limit_total);
   const perGroup = Object.fromEntries(groups.map(g => [g, usd(k.limits[g])]));
-  // Argon & Carbon either count in the Gemini limit or have a limit of
-  // their own; the select picks, and the input shows for the latter.
-  const argonCount = h("select", { onchange: () => show(mode.value) },
-    [["merge", t("keys.limit.argon.merge")], ["separate", t("keys.limit.argon.separate")]]
-      .map(([m, label]) => h("option", { value: m, selected: (m === "merge") === k.merge_argon }, label)));
-  const merged = () => argonCount.value === "merge";
-  const groupFields = () => groups.flatMap(g => g !== ARGON_GROUP ? [h("label", {}, t("keys.limit.label", { group: keyGroupName(g) }), perGroup[g])]
-    : [h("label", {}, keyGroupName(g), argonCount),
-      ...(merged() ? [] : [h("label", {}, t("keys.limit.label", { group: keyGroupName(g) }), perGroup[g])])]);
+  const groupFields = () => groups.map(g => h("label", {}, t("keys.limit.label", { group: groupName(g) }), perGroup[g]));
   const initial = k.limit_total !== null ? "total" : Object.keys(k.limits).length ? "group" : "none";
   const fields = h("div", { class: "row" });
   const show = mode => {
@@ -283,7 +270,7 @@ function limitEditor(groups, k) {
       .map(([m, label]) => h("option", { value: m, selected: m === initial }, label)));
   show(initial);
   const groupLimits = () => Object.fromEntries(groups
-    .filter(g => perGroup[g].value.trim() !== "" && !(g === ARGON_GROUP && merged()))
+    .filter(g => perGroup[g].value.trim() !== "")
     .map(g => [g, Number(perGroup[g].value)]));
   return {
     nodes: [h("label", {}, t("keys.workers"), workers), h("label", {}, t("keys.limit.mode"), mode), fields],
@@ -291,7 +278,6 @@ function limitEditor(groups, k) {
       max_workers: workers.value.trim() !== "" ? Number(workers.value) : null,
       limit_total: mode.value === "total" ? Number(total.value) : null,
       limits: mode.value === "group" ? groupLimits() : {},
-      merge_argon: merged(),
     }),
   };
 }
@@ -339,13 +325,8 @@ function spendBar(spent, limit) {
 //   Claude + GPT  [==------]    $2.52 / $10.00  │    4.71%
 function usageGroups(k, groups) {
   const hasUse = g => (k.spent[g] || 0) > 0 || (k.quota[g]?.used || 0) > 0;
-  const inGemini = g => g === GEMINI_GROUP && argonMerged(k) && hasUse(ARGON_GROUP);
-  return groups.filter(g => k.limits[g] !== undefined || hasUse(g) || inGemini(g));
+  return groups.filter(g => k.limits[g] !== undefined || hasUse(g));
 }
-
-// argonMerged is whether the key counts Argon & Carbon in its Gemini
-// limit; without group limits there is no limit to merge into.
-const argonMerged = k => k.merge_argon && Object.keys(k.limits).length > 0;
 
 // spendCell lines are label, limit bar, and amount. Without a total limit
 // each group line has its own limit or none.
@@ -354,8 +335,6 @@ function spendCell(k, lines) {
   if (!hasTotal && !lines.length) return h("span", { class: "muted" }, t("keys.usage.none"));
 
   const spent = g => k.spent[g] || 0;
-  // A key that merges Argon & Carbon counts their spend in Gemini's line.
-  const counted = g => g === GEMINI_GROUP && argonMerged(k) ? spent(g) + spent(ARGON_GROUP) : spent(g);
   const amount = (value, limit, cls) => h("span", { class: "mono amount " + cls },
     limit === undefined ? fmt.usd(value) : `${fmt.usd(value)} / ${fmt.usd(limit)}`);
   const total = lines.reduce((sum, g) => sum + spent(g), 0);
@@ -363,15 +342,11 @@ function spendCell(k, lines) {
     hasTotal ? spendBar(total, k.limit_total) : h("span"),
     amount(total, hasTotal ? k.limit_total : undefined, "total")];
   for (const g of lines) {
-    if (g === ARGON_GROUP && argonMerged(k)) {
-      cells.push(h("span", {}, keyGroupName(g)), h("span", { class: "muted" }, t("keys.usage.merged")), amount(spent(g), undefined, ""));
-      continue;
-    }
     const limit = k.limits[g];
-    const slot = limit !== undefined ? spendBar(counted(g), limit)
+    const slot = limit !== undefined ? spendBar(spent(g), limit)
       : hasTotal ? h("span")
       : h("span", { class: "muted" }, t("keys.usage.no_limit"));
-    cells.push(h("span", {}, keyGroupName(g)), slot, amount(counted(g), limit, ""));
+    cells.push(h("span", {}, groupName(g)), slot, amount(spent(g), limit, ""));
   }
   return h("div", { class: "lines spend" }, cells);
 }
@@ -493,7 +468,7 @@ views.keys = container => {
     groups = data.groups;
     offered = catalog.map(m => m.id);
     if (!newLimits) {
-      newLimits = limitEditor(groups, { max_workers: null, limit_total: null, limits: {}, merge_argon: true });
+      newLimits = limitEditor(groups, { max_workers: null, limit_total: null, limits: {} });
       limitsRow.replaceChildren(...newLimits.nodes);
     }
     if (!newModels) {
@@ -691,7 +666,6 @@ views.settings = (container, openTopic) => {
     const warmupFullPools = h("input", { type: "checkbox", checked: s.warmup_full_pools });
     const warmupGroupMatches = (group, id) => {
       if (id.startsWith("claude-") || id.startsWith("gpt-oss-")) return group === "claude-gpt";
-      if (id.startsWith("gemini-4-argon") || id.startsWith("gemini-4-carbon")) return group === "argon" || group === "gemini";
       if (id.startsWith("gemini-")) return group === "gemini";
       return true;
     };
@@ -1121,10 +1095,8 @@ views.accounts = container => {
     return h("div", { class: "card" }, h("p", { class: "bad" }, t("accounts.verify")), h("p", {}, link));
   }
 
-  const modelQuotaGroup = id => id.startsWith("claude-") || id.startsWith("gpt-oss-") ? "claude-gpt"
-    : id.startsWith("gemini-4-argon") ? "argon" : "gemini";
+  const modelQuotaGroup = id => id.startsWith("claude-") || id.startsWith("gpt-oss-") ? "claude-gpt" : "gemini";
   const bucketQuotaGroup = id => id.startsWith("3p-") ? "claude-gpt"
-    : id.startsWith("gemini-argon-") ? "argon"
     : id.startsWith("gemini-") ? "gemini" : "";
 
   function quotaExhausted(a, m) {

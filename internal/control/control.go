@@ -100,7 +100,7 @@ type Settings struct {
 	// its 7-day reset timer, ignoring per-account allowed_models routing.
 	WarmupFullPools bool `json:"warmup_full_pools"`
 	// WarmupModels optionally overrides the model used to warm up each quota
-	// group (gemini, claude-gpt, argon). Empty or absent picks the cheapest
+	// group (gemini, claude-gpt). Empty or absent picks the cheapest
 	// offered model in that group according to Prices.
 	WarmupModels map[string]string `json:"warmup_models"`
 }
@@ -249,6 +249,7 @@ func decodeSettings(raw []byte, s *Settings) error {
 		s.EgressRules = defaults.EgressRules
 	}
 	s.WarmupModels = cleanWarmupModels(s.WarmupModels)
+	dropLegacyArgonSettings(s)
 	if s.TurnsPerAccount == 0 {
 		s.TurnsPerAccount = defaults.TurnsPerAccount
 	}
@@ -964,7 +965,7 @@ func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate)
 	token = keyPrefix + rand.Text()
 	hash = keyHash(token)
 	err = c.cfg.Store.AddKey(ctx, store.Key{
-		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), MaxWorkers: u.MaxWorkers, LimitTotal: u.LimitTotal, Limits: u.Limits, MergeArgon: u.MergeArgon, CreatedAt: time.Now(),
+		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), MaxWorkers: u.MaxWorkers, LimitTotal: u.LimitTotal, Limits: u.Limits, CreatedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrExists) {
 		return "", "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
@@ -1070,9 +1071,6 @@ func validateLimits(u store.KeyUpdate) error {
 	if u.LimitTotal != nil && *u.LimitTotal < 0 {
 		return &InputError{"the total limit cannot be negative"}
 	}
-	if _, own := u.Limits[pool.GroupArgon]; own && u.MergeArgon {
-		return &InputError{"a key that merges Argon & Carbon into Gemini has no limit of its own for them"}
-	}
 	for group, limit := range u.Limits {
 		if !slices.Contains(usage.Groups, group) {
 			return &InputError{fmt.Sprintf("unknown quota group %q (known: %s)", group, strings.Join(usage.Groups, ", "))}
@@ -1125,7 +1123,7 @@ func (c *Control) reloadKeys(ctx context.Context) error {
 	for _, k := range keys {
 		all[k.Hash] = k
 		if k.RevokedAt.IsZero() {
-			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits, MergeArgon: k.MergeArgon}
+			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits}
 		}
 	}
 	c.mu.Lock()
@@ -1153,4 +1151,12 @@ func cleanModels(models []string) []string {
 		}
 	}
 	return out
+}
+
+// ---- Legacy compatibility: separate Argon pool removal --------------------
+// Delete dropLegacyArgonSettings and its call in decodeSettings() once
+// pre-upgrade settings blobs no longer need migration.
+
+func dropLegacyArgonSettings(s *Settings) {
+	delete(s.WarmupModels, "argon")
 }

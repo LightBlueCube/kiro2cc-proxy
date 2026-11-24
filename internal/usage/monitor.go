@@ -289,14 +289,11 @@ func (m *Monitor) sampleLocked(ctx context.Context, account *pool.Account, proc 
 	m.mu.Unlock()
 
 	var samples []store.QuotaSample
-	var bucketGroups []string
 	for _, g := range groups {
 		for _, b := range g.Buckets {
-			bucketGroups = append(bucketGroups, BucketGroup(b.ID))
 			samples = append(samples, store.QuotaSample{Account: id, At: q.At, Bucket: b.ID, Group: g.Name, Window: b.Window, Remaining: b.Remaining, ResetAt: b.ResetAt})
 		}
 	}
-	account.SetQuotaGroups(bucketGroups)
 	applySampleCooldowns(account, prev, q, fetchedAt, mode)
 	if err := m.cfg.Store.AddQuotaSamples(ctx, samples); err != nil {
 		m.cfg.Log.Error("quota samples not stored", "account", name, "err", err)
@@ -361,8 +358,7 @@ func applySampleCooldowns(account *pool.Account, prev, cur AccountQuota, fetched
 
 	cooldowns := account.Cooldowns()
 	if mode == cooldownRefresh {
-		// Clear cooldowns for groups absent from this account's quota plan
-		// (e.g. a pre-sample argon cooldown on an Ultra account).
+		// Clear cooldowns for groups absent from this account's quota plan.
 		for group := range cooldowns {
 			if !seenGroups[group] {
 				account.SetCooldown(group, time.Time{}, fetchedAt)

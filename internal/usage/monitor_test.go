@@ -592,7 +592,7 @@ func TestApplySampleCooldownsRefresh(t *testing.T) {
 	t.Run("clears immediately on jump >= 10% even with same reset_at", func(t *testing.T) {
 		a := newAccount(t)
 		a.Cool(pool.GroupGemini, fiveDays)
-		a.Cool(pool.GroupArgon, fiveDays) // orphaned group absent from sample
+		a.Cool(pool.GroupClaudeGPT, fiveDays) // orphaned group absent from sample
 		setAt := a.Cooldowns()[pool.GroupGemini].SetAt
 		prev := quotaSample(now.Add(-2*time.Minute),
 			agy.QuotaBucket{ID: "gemini-weekly", Remaining: 0.02, ResetAt: fiveDays},

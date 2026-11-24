@@ -279,7 +279,7 @@ func (g *Gateway) hasOtherAccount(r *run, id string) bool {
 		if account.ID() == id {
 			continue
 		}
-		if _, _, ok := slugOn(account, r); ok && account.Available(r.poolGroup(account)) == nil {
+		if _, _, ok := slugOn(account, r); ok && account.Available(r.group) == nil {
 			return true
 		}
 	}
@@ -290,7 +290,7 @@ func (g *Gateway) hasOtherAccount(r *run, id string) bool {
 // model and is available for its quota group.
 func (g *Gateway) hasAvailableAccount(r *run) bool {
 	for _, account := range g.pool.Accounts() {
-		if _, _, ok := slugOn(account, r); ok && account.Available(r.poolGroup(account)) == nil {
+		if _, _, ok := slugOn(account, r); ok && account.Available(r.group) == nil {
 			return true
 		}
 	}
@@ -306,7 +306,7 @@ func (g *Gateway) minShortCooldown(r *run) time.Duration {
 		if _, _, ok := slugOn(account, r); !ok {
 			continue
 		}
-		rem := account.CooldownRemaining(r.poolGroup(account))
+		rem := account.CooldownRemaining(r.group)
 		if rem > 0 && rem <= maxRetryableQuotaWait && (shortest == 0 || rem < shortest) {
 			shortest = rem
 		}

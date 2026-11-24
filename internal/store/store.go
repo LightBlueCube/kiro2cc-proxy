@@ -67,7 +67,6 @@ var migrations = []string{
 		max_workers INTEGER,
 		limit_total REAL,
 		limits      TEXT NOT NULL DEFAULT '{}',
-		merge_argon INTEGER NOT NULL DEFAULT 1,
 		created_at  INTEGER NOT NULL DEFAULT 0,
 		revoked_at  INTEGER
 	);
@@ -290,11 +289,6 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	var hadMergeArgon int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name = 'merge_argon'`).Scan(&hadMergeArgon); err != nil {
-		return err
-	}
-
 	reqCols, err := tableColumns(tx, "requests")
 	if err != nil {
 		return err
@@ -374,13 +368,6 @@ func (s *Store) migrate() error {
 			}
 		}
 	}
-	// Before merge_argon, a key with an Argon limit counted Argon apart
-	// from Gemini; keep it so.
-	if hadMergeArgon == 0 {
-		if _, err := tx.Exec(`UPDATE api_keys SET merge_argon = 0 WHERE json_extract(limits, '$.argon') IS NOT NULL`); err != nil {
-			return err
-		}
-	}
 	if hadKeyQuota == 0 {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO key_quota (key_hash, account, account_name, grp, used)
 			SELECT key_hash, account, MAX(account_name), quota_group, SUM(quota_used)
@@ -389,6 +376,9 @@ func (s *Store) migrate() error {
 			GROUP BY key_hash, account, quota_group`); err != nil {
 			return err
 		}
+	}
+	if err := dropLegacyArgonPool(tx); err != nil {
+		return err
 	}
 	if version < len(migrations) {
 		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations))); err != nil {
@@ -539,4 +529,37 @@ func (s *Store) SetSetting(ctx context.Context, name string, v any) error {
 	_, err = s.db.ExecContext(ctx, `INSERT INTO settings (name, value) VALUES (?, ?)
 		ON CONFLICT (name) DO UPDATE SET value = excluded.value`, name, string(raw))
 	return err
+}
+
+// ---- Legacy compatibility: separate Argon pool removal --------------------
+// Delete dropLegacyArgonPool and its call in migrate() once pre-upgrade
+// databases no longer need migration.
+
+func dropLegacyArgonPool(tx *sql.Tx) error {
+	cols, err := tableColumns(tx, "api_keys")
+	if err != nil {
+		return err
+	}
+	if cols["merge_argon"] {
+		if _, err := tx.Exec(`ALTER TABLE api_keys DROP COLUMN merge_argon`); err != nil {
+			return err
+		}
+	}
+	for _, stmt := range []string{
+		`UPDATE api_keys SET limits = json_remove(limits, '$.argon') WHERE json_valid(limits) AND json_type(limits, '$.argon') IS NOT NULL`,
+		`INSERT INTO key_usage (key_hash, grp, cost_usd)
+			SELECT key_hash, 'gemini', cost_usd FROM key_usage WHERE grp = 'argon'
+			ON CONFLICT (key_hash, grp) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd`,
+		`DELETE FROM key_usage WHERE grp = 'argon'`,
+		`DELETE FROM quota_samples WHERE bucket LIKE 'gemini-argon-%'`,
+		`DELETE FROM quota_cursors WHERE bucket LIKE 'gemini-argon-%'`,
+		`DELETE FROM key_quota WHERE grp = 'argon'`,
+		`UPDATE requests SET quota_group = 'gemini', quota_used = NULL, quota_skip = 'no_bucket' WHERE quota_group = 'argon'`,
+		`UPDATE settings SET value = json_remove(value, '$.warmup_models.argon') WHERE name = 'settings' AND json_valid(value) AND json_type(value, '$.warmup_models.argon') IS NOT NULL`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -110,9 +110,6 @@ type Account struct {
 	// models is the ACP model catalog agy last reported for the account,
 	// nil until it opens a session.
 	models []agy.ModelInfo
-	// quotaGroups holds the quota groups with a bucket in the account's
-	// latest quota sample, nil until it was sampled.
-	quotaGroups map[string]bool
 	// priority orders accounts in rotation; higher values take requests
 	// first.
 	priority int
@@ -286,15 +283,14 @@ type IdleSessions struct {
 	Oldest time.Time
 }
 
-// Pick reserves a turn slot on the best account for session and model, by
-// the quota group each account charges the model to, skipping excluded
-// accounts (by ID). It first tries accounts with a
+// Pick reserves a turn slot on the best account for session and the model's
+// quota group, skipping excluded accounts (by ID). It first tries accounts with a
 // free worker slot (busy + idle < TurnsPerAccount), ranked by priority and
 // rendezvous hash of (session, account ID), and only falls back to accounts that
 // must evict an idle worker (oldest idle session first within the same
 // priority) when every eligible account is full. The caller must Release
 // the slot.
-func (p *Pool) Pick(session, model string, exclude map[string]bool, idle map[string]IdleSessions) (*Account, error) {
+func (p *Pool) Pick(session, group string, exclude map[string]bool, idle map[string]IdleSessions) (*Account, error) {
 	ranked := p.Accounts()
 	slices.SortFunc(ranked, func(a, b *Account) int {
 		return compareAccounts(session, a, b, nil)
@@ -303,7 +299,7 @@ func (p *Pool) Pick(session, model string, exclude map[string]bool, idle map[str
 		if exclude[a.id] {
 			continue
 		}
-		if err := a.tryAcquire(a.PoolGroup(model), idle[a.id].Count); err == nil {
+		if err := a.tryAcquire(group, idle[a.id].Count); err == nil {
 			return a, nil
 		}
 	}
@@ -315,7 +311,7 @@ func (p *Pool) Pick(session, model string, exclude map[string]bool, idle map[str
 		if exclude[a.id] {
 			continue
 		}
-		if err := a.TryAcquire(a.PoolGroup(model)); err != nil {
+		if err := a.TryAcquire(group); err != nil {
 			reasons = append(reasons, fmt.Sprintf("%s: %v", a.Name(), err))
 			continue
 		}
@@ -1131,71 +1127,15 @@ func (p *Pool) Close() {
 const (
 	GroupGemini    = "gemini"
 	GroupClaudeGPT = "claude-gpt"
-	GroupArgon     = "argon"
 )
 
-const (
-	argonPrefix  = "gemini-4-argon"
-	carbonPrefix = "gemini-4-carbon"
-)
-
-// QuotaGroup maps a model to the quota bucket agy charges it to on a Pro
-// plan, which is what a request has before an account serves it. agy
-// groups Gemini models, Claude and GPT models, and some dedicated models
-// separately. Use Account.PoolGroup once the account is known.
+// QuotaGroup maps a model to the quota bucket agy charges it to: Claude and
+// GPT models share one bucket, and Gemini models share another.
 func QuotaGroup(model string) string {
 	switch {
 	case strings.HasPrefix(model, "claude-"), strings.HasPrefix(model, "gpt-oss-"):
 		return GroupClaudeGPT
-	case strings.HasPrefix(model, argonPrefix):
-		return GroupArgon
 	default:
 		return GroupGemini
 	}
-}
-
-// KeyGroup maps a model to the group a key's spend limit covers. It
-// follows the model name alone, whichever quota bucket the serving
-// account charges: Argon and Carbon share one group.
-func KeyGroup(model string) string {
-	if strings.HasPrefix(model, carbonPrefix) {
-		return GroupArgon
-	}
-	return QuotaGroup(model)
-}
-
-// PoolGroup maps a model to the quota group this account charges it to.
-// An account that offers Gemini 4 Carbon and reports no Argon bucket (an
-// Ultra plan) charges Argon and Carbon to the Gemini bucket; otherwise
-// both go to the Argon bucket.
-func (a *Account) PoolGroup(model string) string {
-	if !strings.HasPrefix(model, argonPrefix) && !strings.HasPrefix(model, carbonPrefix) {
-		return QuotaGroup(model)
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.sharesGeminiBucketLocked() {
-		return GroupGemini
-	}
-	return GroupArgon
-}
-
-func (a *Account) sharesGeminiBucketLocked() bool {
-	sampled := a.quotaGroups != nil
-	offersCarbon := slices.ContainsFunc(a.models, func(m agy.ModelInfo) bool {
-		return strings.HasPrefix(m.ModelID, carbonPrefix)
-	})
-	return sampled && !a.quotaGroups[GroupArgon] && offersCarbon
-}
-
-// SetQuotaGroups records the quota groups that have a bucket in the
-// account's latest quota sample.
-func (a *Account) SetQuotaGroups(groups []string) {
-	set := make(map[string]bool, len(groups))
-	for _, group := range groups {
-		set[group] = true
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.quotaGroups = set
 }

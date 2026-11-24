@@ -137,17 +137,13 @@ type Key struct {
 	LimitTotal *float64
 	// Limits caps the spend per quota group in USD; absent groups are
 	// unlimited. At most one of LimitTotal and Limits is set.
-	Limits map[string]float64
-	// MergeArgon counts Argon & Carbon spend in the Gemini limit; Limits
-	// then has no limit of their own. Without it they have their own, or
-	// none.
-	MergeArgon bool
-	CreatedAt  time.Time
+	Limits    map[string]float64
+	CreatedAt time.Time
 	// RevokedAt is zero while the key is valid.
 	RevokedAt time.Time
 }
 
-const keyColumns = `hash, name, note, models, max_workers, limit_total, limits, merge_argon, created_at, revoked_at`
+const keyColumns = `hash, name, note, models, max_workers, limit_total, limits, created_at, revoked_at`
 
 func scanKey(scan func(dest ...any) error) (Key, error) {
 	var k Key
@@ -156,7 +152,7 @@ func scanKey(scan func(dest ...any) error) (Key, error) {
 	var total sql.NullFloat64
 	var created int64
 	var revoked sql.NullInt64
-	if err := scan(&k.Hash, &k.Name, &k.Note, &models, &maxWorkers, &total, &limits, &k.MergeArgon, &created, &revoked); err != nil {
+	if err := scan(&k.Hash, &k.Name, &k.Note, &models, &maxWorkers, &total, &limits, &created, &revoked); err != nil {
 		return Key{}, err
 	}
 	if maxWorkers.Valid {
@@ -205,8 +201,8 @@ func (s *Store) AddKey(ctx context.Context, k Key) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, max_workers, limit_total, limits, merge_argon, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		k.Hash, k.Name, k.Note, string(models), k.MaxWorkers, k.LimitTotal, string(limits), k.MergeArgon, k.CreatedAt.Unix())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, max_workers, limit_total, limits, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		k.Hash, k.Name, k.Note, string(models), k.MaxWorkers, k.LimitTotal, string(limits), k.CreatedAt.Unix())
 	return uniqueErr(err)
 }
 
@@ -217,7 +213,6 @@ type KeyUpdate struct {
 	MaxWorkers *int
 	LimitTotal *float64
 	Limits     map[string]float64
-	MergeArgon bool
 }
 
 func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
@@ -229,8 +224,8 @@ func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
 	if err != nil {
 		return err
 	}
-	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, max_workers = ?, limit_total = ?, limits = ?, merge_argon = ? WHERE hash = ?`,
-		u.Note, string(models), u.MaxWorkers, u.LimitTotal, string(limits), u.MergeArgon, hash))
+	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, max_workers = ?, limit_total = ?, limits = ? WHERE hash = ?`,
+		u.Note, string(models), u.MaxWorkers, u.LimitTotal, string(limits), hash))
 }
 
 func (s *Store) RevokeKey(ctx context.Context, hash string, at time.Time) error {
