@@ -46,7 +46,7 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 			r.pin = snap.Account
 			return g.startFresh(ctx, r, ReplayToolsChanged)
 		}
-		if at := g.tryContinue(snap, r); at != nil {
+		if at := g.tryContinue(ctx, snap, r); at != nil {
 			r.mode = ModeContinue
 			return at, nil
 		}
@@ -103,9 +103,9 @@ func (g *Gateway) accountFailure(id string, err *accountError) *attemptFailure {
 	}
 }
 
-// tryContinue hands the client's tool results to a parked turn whose
-// boundary snapshot is the request's prefix.
-func (g *Gateway) tryContinue(snap snapshot, r *run) *activeTurn {
+// tryContinue hands the client's tool results (and any trailing user message)
+// to a parked turn whose boundary snapshot is the request's prefix.
+func (g *Gateway) tryContinue(ctx context.Context, snap snapshot, r *run) *activeTurn {
 	g.mu.Lock()
 	sess := g.sessions[sessionRef(snap.Account, snap.SessionID)]
 	if sess == nil || sess.turn == nil {
@@ -114,6 +114,13 @@ func (g *Gateway) tryContinue(snap snapshot, r *run) *activeTurn {
 	}
 	at := sess.turn
 	sameTurn := at.parked != nil && !at.finished && at.choice == r.choice()
+	if sameTurn {
+		select {
+		case <-at.turn.Done():
+			sameTurn = false
+		default:
+		}
+	}
 	if !sameTurn {
 		g.mu.Unlock()
 		return nil
@@ -131,7 +138,18 @@ func (g *Gateway) tryContinue(snap snapshot, r *run) *activeTurn {
 	g.mu.Unlock()
 
 	g.movedPast(snap.Account, snap.SessionID)
-	group.settle(groupResult(group, results, trailing), nil)
+	sysNotes, steer := splitTrailing(trailing)
+	if len(steer) > 0 {
+		if err := at.turn.Steer(ctx, deltaPromptBlocks(steer)); err != nil {
+			if ctx.Err() == nil {
+				g.mu.Lock()
+				at.steerErr = err
+				g.mu.Unlock()
+			}
+			return at
+		}
+	}
+	group.settle(groupResult(group, results, sysNotes), nil)
 	return at
 }
 

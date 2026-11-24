@@ -159,6 +159,7 @@ type activeTurn struct {
 	// stuck is set when the turn was cancelled because its session kept
 	// failing generation calls; it is the last failure.
 	stuck    *pool.ModelFailure
+	steerErr error
 	finished bool
 	// baseSteps is a lower bound of the session's native steps at launch.
 	baseSteps int
@@ -652,7 +653,7 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 	truncated := at.account.Truncated(at.sess.id)
 	at.account.ForgetModelFailure(at.sess.id)
 	g.mu.Lock()
-	risky, stuck := at.risky, at.stuck
+	risky, stuck, steerErr := at.risky, at.stuck, at.steerErr
 	g.mu.Unlock()
 	if risky {
 		// The session holds the refused input now.
@@ -663,6 +664,9 @@ func (g *Gateway) finish(at *activeTurn, r *run, w *response, release func() boo
 		// The session holds the input of the failed calls now.
 		g.forget(account, at.sess.id)
 		return g.modelFailure(at, r, stuck)
+	}
+	if outcome.Err == nil && outcome.StopReason != agy.StopCancelled && steerErr != nil {
+		outcome.Err = steerErr
 	}
 	if outcome.Err != nil {
 		g.log.Warn("turn failed", "account", accountName, "session", at.sess.id, "err", outcome.Err)

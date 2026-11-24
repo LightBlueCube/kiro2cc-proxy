@@ -87,9 +87,10 @@ import (
 
 // Step types the fake records, as agy names them.
 const (
-	stepUserInput = "CORTEX_STEP_TYPE_USER_INPUT"
-	stepPlanner   = "CORTEX_STEP_TYPE_PLANNER_RESPONSE"
-	stepGeneric   = "CORTEX_STEP_TYPE_GENERIC"
+	stepUserInput  = "CORTEX_STEP_TYPE_USER_INPUT"
+	stepSteerInput = "CORTEX_STEP_TYPE_USER_INPUT:steer"
+	stepPlanner    = "CORTEX_STEP_TYPE_PLANNER_RESPONSE"
+	stepGeneric    = "CORTEX_STEP_TYPE_GENERIC"
 	// stepErrorMessage records a failed model call.
 	stepErrorMessage = "CORTEX_STEP_TYPE_ERROR_MESSAGE"
 )
@@ -268,8 +269,29 @@ type fakeSession struct {
 	url, token string
 	model      string
 	cancel     context.CancelFunc
+	turn       *fakeTurn
 	steps      []string
 	stale      bool
+}
+
+type fakeTurn struct {
+	ownerID   json.RawMessage
+	stepStart int
+	steered   []fakeSteer
+}
+
+type fakeSteer struct {
+	echo    string
+	summary string
+}
+
+type promptBlock struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	MimeType string `json:"mimeType"`
+	Resource *struct {
+		Text string `json:"text"`
+	} `json:"resource"`
 }
 
 type rpcMessage struct {
@@ -567,15 +589,19 @@ func (f *fake) serveLanguageServer(w http.ResponseWriter, r *http.Request) {
 		steps := []map[string]any{}
 		execution := ""
 		for i, step := range s.steps {
-			// Like agy, each prompt's steps share an executionId.
+			// Like agy, each turn's steps (including mid-turn steers) share an executionId.
 			if step == stepUserInput {
 				execution = fmt.Sprintf("exec-%d", i)
 			}
 			if i < req.StepOffset {
 				continue
 			}
+			stepType := step
+			if step == stepSteerInput {
+				stepType = stepUserInput
+			}
 			metadata := map[string]any{"executionId": execution}
-			entry := map[string]any{"type": step, "metadata": metadata}
+			entry := map[string]any{"type": stepType, "metadata": metadata}
 			switch step {
 			case stepPlanner:
 				metadata["modelUsage"] = stepModelUsage
@@ -602,17 +628,56 @@ func writeJSON(w http.ResponseWriter, v any) {
 	w.Write(raw)
 }
 
+func parsePrompt(blocks []promptBlock) (text string, steer fakeSteer) {
+	var parts []string
+	for _, block := range blocks {
+		switch block.Type {
+		case "image":
+			parts = append(parts, fmt.Sprintf("[image:%s]", block.MimeType))
+		case "resource":
+			if block.Resource != nil && block.Resource.Text != "" {
+				parts = append(parts, strings.TrimSpace(block.Resource.Text))
+			}
+		case "text":
+			text = block.Text
+		}
+	}
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, text)
+	}
+	return text, fakeSteer{echo: text, summary: strings.Join(parts, " ")}
+}
+
+// endTurnReply formats a prompt's end_turn result, summing the model calls in
+// steps and omitting usage when none ran in that prompt's window (as agy does).
+func endTurnReply(steps []string) map[string]any {
+	calls := int64(0)
+	for _, step := range steps {
+		if step == stepPlanner {
+			calls++
+		}
+	}
+	reply := map[string]any{"stopReason": "end_turn"}
+	if calls > 0 {
+		reply["usage"] = map[string]int64{
+			"inputTokens":      calls * StepInput,
+			"cachedReadTokens": calls * StepCached,
+			"outputTokens":     calls * StepOutput,
+			"thoughtTokens":    calls * StepThought,
+			"totalTokens":      calls * (StepInput + StepCached + StepOutput),
+		}
+	}
+	return reply
+}
+
 func (f *fake) prompt(msg rpcMessage) {
 	var p struct {
-		SessionID string `json:"sessionId"`
-		Prompt    []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"prompt"`
+		SessionID string        `json:"sessionId"`
+		Prompt    []promptBlock `json:"prompt"`
 	}
 	json.Unmarshal(msg.Params, &p)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	input, steer := parsePrompt(p.Prompt)
+
 	f.mu.Lock()
 	s := f.sessions[p.SessionID]
 	if s == nil {
@@ -620,22 +685,29 @@ func (f *fake) prompt(msg rpcMessage) {
 		f.fail(msg.ID, -32602, "unknown session")
 		return
 	}
-	s.cancel = cancel
-	f.mu.Unlock()
-
-	input := ""
-	for _, block := range p.Prompt {
-		if block.Type == "text" {
-			input = block.Text
+	if s.turn != nil {
+		if strings.TrimSpace(input) == "@failsteer" {
+			f.mu.Unlock()
+			f.fail(msg.ID, -32603, "Failed to send user message")
+			return
 		}
+		s.steps = append(s.steps, stepSteerInput)
+		f.saveLocked(p.SessionID, s)
+		prevID := s.turn.ownerID
+		prevReply := endTurnReply(s.steps[s.turn.stepStart:])
+		s.turn.ownerID = msg.ID
+		s.turn.stepStart = len(s.steps)
+		s.turn.steered = append(s.turn.steered, steer)
+		f.mu.Unlock()
+		f.reply(prevID, prevReply)
+		return
 	}
-	f.chunk(p.SessionID, "user_message_chunk", input)
-	if i := strings.LastIndex(input, "</history>"); i >= 0 {
-		input = input[i+len("</history>"):]
-	}
-	input = strings.TrimSpace(input)
 
-	f.mu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	turn := &fakeTurn{ownerID: msg.ID, stepStart: len(s.steps)}
+	s.cancel = cancel
+	s.turn = turn
 	stepsBefore, stale := len(s.steps), s.stale
 	if strings.HasPrefix(s.model, "claude-") || strings.HasPrefix(s.model, "gpt-oss-") {
 		f.prompts3p++
@@ -643,26 +715,43 @@ func (f *fake) prompt(msg rpcMessage) {
 		f.prompts++
 	}
 	f.mu.Unlock()
+
+	finishTurn := func() json.RawMessage {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		ownerID := turn.ownerID
+		if s.turn == turn {
+			s.turn = nil
+		}
+		return ownerID
+	}
+
+	f.chunk(p.SessionID, "user_message_chunk", input)
+	if i := strings.LastIndex(input, "</history>"); i >= 0 {
+		input = input[i+len("</history>"):]
+	}
+	input = strings.TrimSpace(input)
+
 	f.addSteps(p.SessionID, s, stepUserInput)
 	if failure, line := scriptedFailure(input); failure != nil {
 		// agy ends the turn with a line about the error as the reply.
 		failure.Session = p.SessionID
 		if err := f.modelCall(*failure); err != nil {
-			f.fail(msg.ID, -32603, err.Error())
+			f.fail(finishTurn(), -32603, err.Error())
 			return
 		}
 		f.addSteps(p.SessionID, s, stepErrorMessage)
 		f.chunk(p.SessionID, "agent_message_chunk", "\n"+line+"\n")
-		f.reply(msg.ID, map[string]any{"stopReason": "end_turn"})
+		f.reply(finishTurn(), map[string]any{"stopReason": "end_turn"})
 		return
 	}
-	text, err := f.respond(ctx, s, p.SessionID, input)
+	text, err := f.respond(ctx, s, turn, p.SessionID, input)
 	if ctx.Err() != nil {
-		f.reply(msg.ID, map[string]any{"stopReason": "cancelled"})
+		f.reply(finishTurn(), map[string]any{"stopReason": "cancelled"})
 		return
 	}
 	if err != nil {
-		f.fail(msg.ID, -32603, err.Error())
+		f.fail(finishTurn(), -32603, err.Error())
 		return
 	}
 	if input == "@steps" {
@@ -674,18 +763,14 @@ func (f *fake) prompt(msg rpcMessage) {
 	f.addSteps(p.SessionID, s, stepPlanner)
 	f.chunk(p.SessionID, "agent_message_chunk", text)
 
-	// Like agy's, the turn's usage sums its model calls.
 	f.mu.Lock()
-	calls := int64(0)
-	for _, step := range s.steps[stepsBefore:] {
-		if step == stepPlanner {
-			calls++
-		}
+	reply := endTurnReply(s.steps[turn.stepStart:])
+	ownerID := turn.ownerID
+	if s.turn == turn {
+		s.turn = nil
 	}
 	f.mu.Unlock()
-	f.reply(msg.ID, map[string]any{"stopReason": "end_turn", "usage": map[string]int64{
-		"inputTokens": calls * StepInput, "cachedReadTokens": calls * StepCached, "outputTokens": calls * StepOutput,
-		"thoughtTokens": calls * StepThought, "totalTokens": calls * (StepInput + StepCached + StepOutput)}})
+	f.reply(ownerID, reply)
 }
 
 // scriptedFailure is the failed model call that ends a prompt with this
@@ -741,7 +826,29 @@ func (f *fake) modelCall(call ModelCall) error {
 	return nil
 }
 
-func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input string) (string, error) {
+func (f *fake) drainSteered(sessionID string, turn *fakeTurn) []string {
+	f.mu.Lock()
+	items := turn.steered
+	turn.steered = nil
+	f.mu.Unlock()
+
+	var out []string
+	for _, item := range items {
+		f.chunk(sessionID, "user_message_chunk", item.echo)
+		out = append(out, item.summary)
+	}
+	return out
+}
+
+func formatToolReply(result string, steered []string) string {
+	reply := "tool said: " + result
+	if len(steered) > 0 {
+		reply += "\nuser steered: " + strings.Join(steered, " | ")
+	}
+	return reply
+}
+
+func (f *fake) respond(ctx context.Context, s *fakeSession, turn *fakeTurn, sessionID, input string) (string, error) {
 	fields := strings.Fields(input)
 	directive := ""
 	if len(fields) > 0 {
@@ -816,25 +923,28 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		if err != nil {
 			return "", err
 		}
+		steered := f.drainSteered(sessionID, turn)
 		if result == "@hang" {
 			<-ctx.Done()
 			return "", nil
 		}
-		return "tool said: " + result, nil
+		return formatToolReply(result, steered), nil
 	case "@toolchain":
 		result := ""
+		var steered []string
 		for _, name := range fields[1:] {
 			f.addSteps(sessionID, s, stepPlanner, stepGeneric)
 			var err error
 			if result, err = callTool(ctx, s, name, json.RawMessage("{}")); err != nil {
 				return "", err
 			}
+			steered = append(steered, f.drainSteered(sessionID, turn)...)
 			if result == "@hang" {
 				<-ctx.Done()
 				return "", nil
 			}
 		}
-		return "tool said: " + result, nil
+		return formatToolReply(result, steered), nil
 	case "@nativetool":
 		name, args, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(input, "@nativetool")), " ")
 		f.chunk(sessionID, "tool_call", "")
@@ -843,7 +953,7 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		if err != nil {
 			return "", err
 		}
-		return "tool said: " + result, nil
+		return formatToolReply(result, f.drainSteered(sessionID, turn)), nil
 	case "@serial":
 		names := fields[1:]
 		initSteps := make([]string, 0, 1+len(names))
@@ -859,7 +969,7 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 				return "", err
 			}
 		}
-		return "tool said: " + result, nil
+		return formatToolReply(result, f.drainSteered(sessionID, turn)), nil
 	case "@parallel":
 		var calls []map[string]any
 		for _, name := range fields[1:] {
@@ -871,7 +981,7 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		if err != nil {
 			return "", err
 		}
-		return "tool said: " + result, nil
+		return formatToolReply(result, f.drainSteered(sessionID, turn)), nil
 	}
 	f.chunk(sessionID, "agent_thought_chunk", "thinking")
 	return "reply to: " + input, nil

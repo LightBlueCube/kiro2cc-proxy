@@ -306,12 +306,11 @@ func withImages(text string, images []conv.Image) []agy.ContentBlock {
 }
 
 // toolResultText formats the client's tool result for the parked MCP call,
-// carrying the user and system messages the client added after it as
-// steering.
-func toolResultText(result conv.Message, trailing []conv.Message) string {
+// carrying any client system messages added right after it.
+func toolResultText(result conv.Message, sysNotes []conv.Message) string {
 	text := result.Text
 	var notes []string
-	for _, m := range trailing {
+	for _, m := range sysNotes {
 		if rendered := renderMessage(m, -1); rendered != "" {
 			notes = append(notes, rendered)
 		}

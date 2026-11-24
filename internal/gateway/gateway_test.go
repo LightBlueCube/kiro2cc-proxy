@@ -310,6 +310,8 @@ type acpRequest struct {
 		Prompt    []struct {
 			Type     string `json:"type"`
 			Text     string `json:"text"`
+			Data     string `json:"data"`
+			MimeType string `json:"mimeType"`
 			Resource *struct {
 				Text string `json:"text"`
 			} `json:"resource"`
@@ -1124,6 +1126,171 @@ func TestToolResultCarriesLaterSystemMessage(t *testing.T) {
 	}
 	if n := len(h.requests("session/prompt")); n != 1 {
 		t.Fatalf("session/prompt count = %d, want 1 (same turn)", n)
+	}
+}
+
+func TestToolResultSteersTrailingUserMessage(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+
+	messages := []conv.Message{user(`@tool read {}`)}
+	first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+
+	steerImg := conv.Image{MimeType: "image/png", Data: "iVBORw0KGgo="}
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls, Anchors: []string{first.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "contents"},
+		conv.Message{Role: conv.RoleUser, Text: "check line 10", Images: []conv.Image{steerImg}},
+	)
+	second := h.complete(ctx, "alice", conv.Request{Model: model, Messages: messages, Tools: tools})
+	wantText := "tool said: contents\nuser steered: [image:image/png] check line 10"
+	if second.err != nil || second.finish != conv.FinishStop || second.text != wantText {
+		t.Fatalf("second = %+v, want %q", second, wantText)
+	}
+	if first.usage == nil || *first.usage != oneCall || second.usage == nil || *second.usage != oneCall {
+		t.Fatalf("usage = (%+v, %+v), want (%+v, %+v)", first.usage, second.usage, oneCall, oneCall)
+	}
+
+	prompts := h.requests("session/prompt")
+	if len(prompts) != 2 || prompts[0].Params.SessionID != prompts[1].Params.SessionID {
+		t.Fatalf("prompts = %+v, want 2 prompts on the same session", prompts)
+	}
+	gotBlocks := prompts[1].Params.Prompt
+	if len(gotBlocks) != 2 || gotBlocks[0].Type != "image" || gotBlocks[0].MimeType != "image/png" || gotBlocks[0].Data != steerImg.Data || gotBlocks[1].Type != "text" || gotBlocks[1].Text != "check line 10" {
+		t.Fatalf("steer prompt blocks = %+v", gotBlocks)
+	}
+
+	// Follow-up warm turn sees all 5 steps (USER_INPUT, PLANNER, GENERIC,
+	// steered USER_INPUT, final PLANNER), and rewinding back to the post-steer
+	// reply keeps those 5 steps.
+	afterSteer := append(slices.Clone(messages), conv.Message{Role: conv.RoleAssistant, Text: second.text, Anchors: []string{second.anchor}})
+	warm := h.complete(ctx, "alice", conv.Request{Model: model, Messages: append(slices.Clone(afterSteer), user("@steps")), Tools: tools})
+	if warm.err != nil || warm.text != "steps: 5" {
+		t.Fatalf("warm = %+v, want steps: 5", warm)
+	}
+	branched := h.complete(ctx, "alice", conv.Request{Model: model, Messages: append(slices.Clone(afterSteer), user("@steps")), Tools: tools})
+	if branched.err != nil || branched.text != "steps: 5" {
+		t.Fatalf("branched = %+v, want steps: 5", branched)
+	}
+	h.assertRewound(prompts[0].Params.SessionID, 5)
+}
+
+func TestToolResultSplitsSystemAndUserMessages(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	messages := []conv.Message{user(`@tool read {}`)}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "contents"},
+		conv.Message{Role: conv.RoleSystem, Text: "before user"},
+		conv.Message{Role: conv.RoleUser, Text: "user question"},
+		conv.Message{Role: conv.RoleSystem, Text: "after user"},
+	)
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	if second.err != nil {
+		t.Fatalf("second = %+v", second)
+	}
+	if !strings.Contains(second.text, "tool said: contents\n\n<client-steering>") || !strings.Contains(second.text, "<system>\nbefore user\n</system>") {
+		t.Fatalf("second.text = %q, want pre-user system note on tool result", second.text)
+	}
+	if !strings.Contains(second.text, "user steered: <user>\nuser question\n</user>\n\n<system>\nafter user\n</system>") {
+		t.Fatalf("second.text = %q, want user and trailing system in steer prompt", second.text)
+	}
+	if n := len(h.requests("session/prompt")); n != 2 {
+		t.Fatalf("session/prompt count = %d, want 2", n)
+	}
+}
+
+func TestSerialAndChainedToolSteers(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	req := func(messages []conv.Message) conv.Request {
+		return conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools}
+	}
+
+	// 1. Serial tool calls steered on both steps: call 2 reports zero usage,
+	// and both user messages arrive before the final model call.
+	mSerial := []conv.Message{user("@serial read read")}
+	s1 := h.complete(ctx, "alice", req(mSerial))
+	mSerial = append(mSerial,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: s1.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: s1.calls[0].ID, Text: "s1"},
+		user("steer 1"),
+	)
+	s2 := h.complete(ctx, "alice", req(mSerial))
+	if s2.err != nil || s2.finish != conv.FinishToolCalls || s2.usage == nil || (*s2.usage != conv.Usage{}) {
+		t.Fatalf("s2 = %+v, want tool_calls with zero usage", s2)
+	}
+	mSerial = append(mSerial,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: s2.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: s2.calls[0].ID, Text: "s2"},
+		user("steer 2"),
+	)
+	s3 := h.complete(ctx, "alice", req(mSerial))
+	wantSerial := "tool said: s2\nuser steered: steer 1 | steer 2"
+	if s3.err != nil || s3.text != wantSerial || s3.usage == nil || *s3.usage != oneCall {
+		t.Fatalf("s3 = %+v, want %q and usage %+v", s3, wantSerial, oneCall)
+	}
+
+	// 2. Chained tool calls steered after call 1 record a rewindable position
+	// at step 4 (USER_INPUT, PLANNER, GENERIC, steered USER_INPUT), so when
+	// call 3's response is retried, it rewinds to step 4 instead of step 1.
+	mChain := []conv.Message{user("@toolchain read read read")}
+	c1 := h.complete(ctx, "bob", req(mChain))
+	mChain = append(mChain,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: c1.calls, Anchors: []string{c1.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: c1.calls[0].ID, Text: "c1"},
+		user("chain steer"),
+	)
+	c2 := h.complete(ctx, "bob", req(mChain))
+	if c2.err != nil || c2.finish != conv.FinishToolCalls || c2.usage == nil || *c2.usage != oneCall {
+		t.Fatalf("c2 = %+v", c2)
+	}
+	mChain = append(mChain,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: c2.calls, Anchors: []string{c2.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: c2.calls[0].ID, Text: "c2"},
+	)
+	c3 := h.complete(ctx, "bob", req(mChain))
+	if c3.err != nil || c3.finish != conv.FinishToolCalls {
+		t.Fatalf("c3 = %+v", c3)
+	}
+	retryChain := h.complete(ctx, "bob", req(mChain))
+	if retryChain.err != nil {
+		t.Fatalf("retryChain = %+v", retryChain)
+	}
+	prompts := h.requests("session/prompt")
+	h.assertRewound(prompts[len(prompts)-1].Params.SessionID, 4)
+}
+
+func TestFailedSteerReportsUpstreamError(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	messages := []conv.Message{user(`@tool read {}`)}
+	first := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "contents"},
+		user("@failsteer"),
+	)
+	second := h.complete(ctx, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools})
+	if second.err == nil || second.err.Kind != conv.ErrUpstream {
+		t.Fatalf("second = %+v, want ErrUpstream when steer fails", second)
 	}
 }
 

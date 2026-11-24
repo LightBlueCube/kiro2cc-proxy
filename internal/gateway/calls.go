@@ -77,23 +77,35 @@ func newGroup(name string, args json.RawMessage, known map[string]bool) (*callGr
 	return group, nil
 }
 
-// groupResult answers a group from the client's tool messages. User and
-// system messages the client added after the results ride on the last
-// result.
-func groupResult(group *callGroup, results map[string]conv.Message, trailing []conv.Message) bridge.Result {
+// groupResult answers a group from the client's tool messages. System
+// messages the client added right after the results ride on the last result.
+func groupResult(group *callGroup, results map[string]conv.Message, sysNotes []conv.Message) bridge.Result {
 	parts := make([]bridge.Result, len(group.calls))
 	for i, call := range group.calls {
 		msg := results[call.id]
-		var steering []conv.Message
+		var notes []conv.Message
 		if i == len(group.calls)-1 {
-			steering = trailing
+			notes = sysNotes
 		}
-		parts[i] = bridge.Result{Text: toolResultText(msg, steering), Images: bridgeImages(msg.Images)}
+		parts[i] = bridge.Result{Text: toolResultText(msg, notes), Images: bridgeImages(msg.Images)}
 	}
 	if !group.parallel {
 		return parts[0]
 	}
 	return formatParallel(group.calls, parts)
+}
+
+// splitTrailing separates messages the client appended after tool results:
+// system messages before the first user message stay on the tool result in
+// order; from the first user message onward they are sent as a real user
+// prompt.
+func splitTrailing(trailing []conv.Message) (sysNotes, steer []conv.Message) {
+	for i, m := range trailing {
+		if m.Role == conv.RoleUser {
+			return trailing[:i], trailing[i:]
+		}
+	}
+	return trailing, nil
 }
 
 func bridgeImages(images []conv.Image) []bridge.Image {

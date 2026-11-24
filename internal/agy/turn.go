@@ -66,12 +66,24 @@ type TurnSpec struct {
 	IdleTimeout time.Duration
 }
 
+type promptCall struct {
+	done   chan struct{}
+	result promptResult
+	err    error
+}
+
+type steerRequest struct {
+	prompt []ContentBlock
+	ack    chan error
+}
+
 // Turn is one running session/prompt. Events are buffered without bound:
 // the consumer may be away while the turn is parked on a client tool.
 type Turn struct {
 	proc      *Proc
 	sessionID string
 	idleAfter time.Duration
+	steerCh   chan steerRequest
 
 	mu        sync.Mutex
 	events    []Event
@@ -100,6 +112,7 @@ func (p *Proc) RunTurn(spec TurnSpec) *Turn {
 		proc:      p,
 		sessionID: spec.SessionID,
 		idleAfter: idle,
+		steerCh:   make(chan steerRequest),
 		wake:      make(chan struct{}, 1),
 		natives:   map[string]string{},
 		done:      make(chan struct{}),
@@ -135,17 +148,100 @@ func (t *Turn) run(spec TurnSpec) {
 	t.armIdleLocked()
 	t.mu.Unlock()
 
-	result, err := t.proc.prompt(ctx, spec.SessionID, spec.Prompt)
-	if err != nil {
-		if t.isCancelled() {
-			t.settle(Outcome{StopReason: StopCancelled})
+	cur := t.startPrompt(ctx, spec.Prompt)
+	var total *Usage
+
+	for {
+		select {
+		case <-cur.done:
+			t.finishCur(cur, total)
 			return
+		case req := <-t.steerCh:
+			next, ok := t.handover(ctx, cur, &total, req)
+			if !ok {
+				return
+			}
+			cur = next
 		}
-		t.settle(Outcome{Err: err})
+	}
+}
+
+func (t *Turn) startPrompt(ctx context.Context, blocks []ContentBlock) *promptCall {
+	call := &promptCall{done: make(chan struct{})}
+	go func() {
+		call.result, call.err = t.proc.prompt(ctx, t.sessionID, blocks)
+		close(call.done)
+	}()
+	return call
+}
+
+func (t *Turn) finishCur(cur *promptCall, total *Usage) {
+	if cur.err != nil {
+		t.settlePromptErr(cur.err)
 		return
 	}
+	total = addPromptUsage(total, cur.result.Usage)
 	t.finishPrompt()
-	t.settle(Outcome{StopReason: result.StopReason, Usage: result.Usage})
+	t.settle(Outcome{StopReason: cur.result.StopReason, Usage: total})
+}
+
+// handover sends a mid-turn session/prompt while cur is parked on an MCP tool
+// call. agy queues the user message in its language server before ending cur
+// with end_turn, so cur's return proves the message is queued.
+func (t *Turn) handover(ctx context.Context, cur *promptCall, total **Usage, req steerRequest) (*promptCall, bool) {
+	next := t.startPrompt(ctx, req.prompt)
+
+	select {
+	case <-cur.done:
+		if cur.err != nil {
+			req.ack <- cur.err
+			t.settlePromptErr(cur.err)
+			return nil, false
+		}
+		if cur.result.StopReason == StopCancelled {
+			req.ack <- errors.New("antigravity turn cancelled")
+			t.settle(Outcome{StopReason: StopCancelled})
+			return nil, false
+		}
+		*total = addPromptUsage(*total, cur.result.Usage)
+		req.ack <- nil
+		return next, true
+
+	case <-next.done:
+		err := next.err
+		if err == nil {
+			err = fmt.Errorf("steer session/prompt ended early with %s", next.result.StopReason)
+		}
+		req.ack <- err
+		t.proc.cancel(t.sessionID)
+		t.settlePromptErr(err)
+		return nil, false
+	}
+}
+
+func (t *Turn) settlePromptErr(err error) {
+	if t.isCancelled() {
+		t.settle(Outcome{StopReason: StopCancelled})
+		return
+	}
+	t.settle(Outcome{Err: err})
+}
+
+func addPromptUsage(total, part *Usage) *Usage {
+	if part == nil {
+		return total
+	}
+	var out Usage
+	if total != nil {
+		out = *total
+	}
+	out.InputTokens += part.InputTokens
+	out.OutputTokens += part.OutputTokens
+	out.ThoughtTokens += part.ThoughtTokens
+	out.CachedReadTokens += part.CachedReadTokens
+	out.CachedWriteTokens += part.CachedWriteTokens
+	out.TotalTokens += part.TotalTokens
+	return &out
 }
 
 // Next returns the next event, or false once the turn settled and all
@@ -182,15 +278,41 @@ func (t *Turn) Outcome() Outcome {
 	return t.outcome
 }
 
+// Steer queues a user message into the running session while an MCP tool call
+// is parked, and returns once agy accepted it and handed the turn to the new
+// session/prompt.
+func (t *Turn) Steer(ctx context.Context, prompt []ContentBlock) error {
+	req := steerRequest{prompt: prompt, ack: make(chan error, 1)}
+
+	select {
+	case t.steerCh <- req:
+	case <-t.done:
+		return errors.New("antigravity turn ended")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-req.ack:
+		return err
+	case <-t.done:
+		return errors.New("antigravity turn ended")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Inject queues payload as an EventExternal behind the frames received so
-// far. Text held for a possible system-message block is released first, so
-// the payload follows all text agy sent before it. No-op once settled.
+// far. Frames held for a prompt echo or a possible system-message block are
+// released first, so the payload follows all text agy sent before it. No-op
+// once settled.
 func (t *Turn) Inject(payload any) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
 		return
 	}
+	t.releaseHeldLocked()
 	if text := t.text.flush(); text != "" {
 		t.pushLocked(Event{Kind: EventText, Text: text})
 	}
@@ -299,18 +421,23 @@ func (t *Turn) applyLocked(update mappedUpdate) {
 	}
 }
 
+func (t *Turn) releaseHeldLocked() {
+	if t.echoSeen {
+		return
+	}
+	held := t.held
+	t.held = nil
+	t.echoSeen = true
+	for _, update := range held {
+		t.applyLocked(update)
+	}
+}
+
 // finishPrompt applies frames held for an echo that never came.
 func (t *Turn) finishPrompt() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.echoSeen {
-		held := t.held
-		t.held = nil
-		t.echoSeen = true
-		for _, update := range held {
-			t.applyLocked(update)
-		}
-	}
+	t.releaseHeldLocked()
 	if text := t.text.flush(); text != "" {
 		t.pushLocked(Event{Kind: EventText, Text: text})
 	}
