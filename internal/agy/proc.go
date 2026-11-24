@@ -315,6 +315,41 @@ func (p *Proc) Kill() {
 	}()
 }
 
+// killWorker terminates only the per-session worker serving sessionID, leaving
+// the front process and other sessions' workers alive. It returns false when
+// no separate worker in the front's process group can be verified.
+func (p *Proc) killWorker(sessionID string) bool {
+	if p.cmd.Process == nil {
+		return false
+	}
+	frontPID := p.cmd.Process.Pid
+	workerPID, err := p.workerPID(sessionID)
+	if err != nil || workerPID <= 0 || workerPID == frontPID {
+		return false
+	}
+	if _, group, err := readResources(workerPID); err != nil || group != frontPID {
+		return false
+	}
+	p.mu.Lock()
+	delete(p.live, sessionID)
+	p.lastActive = time.Now()
+	p.mu.Unlock()
+	_ = syscall.Kill(workerPID, syscall.SIGTERM)
+	go func() {
+		timer := time.NewTimer(killGrace)
+		defer timer.Stop()
+		select {
+		case <-p.done:
+			return
+		case <-timer.C:
+		}
+		if _, group, err := readResources(workerPID); err == nil && group == frontPID {
+			_ = syscall.Kill(workerPID, syscall.SIGKILL)
+		}
+	}()
+	return true
+}
+
 // NewSession creates a session and returns its id and the model catalog.
 func (p *Proc) NewSession(ctx context.Context, spec SessionSpec) (string, []ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, sessionOpTimeout)
@@ -455,18 +490,26 @@ type promptResult struct {
 	Usage      *Usage `json:"usage"`
 }
 
-// prompt runs session/prompt until it ends. There is no request timeout:
-// the turn's inactivity guard governs it.
-func (p *Proc) prompt(ctx context.Context, sessionID string, blocks []ContentBlock) (promptResult, error) {
-	var result promptResult
-	err := p.call(ctx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": blocks}, &result)
+// sendPrompt writes session/prompt synchronously and returns a wait function
+// that blocks until agy answers. Separating write from wait lets Turn ensure
+// session/cancel is never written ahead of session/prompt. There is no request
+// timeout: the turn's inactivity guard governs it.
+func (p *Proc) sendPrompt(ctx context.Context, sessionID string, blocks []ContentBlock) (func() (promptResult, error), error) {
+	pending, err := p.rpc.send(ctx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": blocks})
 	if err != nil {
-		return result, err
+		return nil, authError("session/prompt", err)
 	}
-	if result.StopReason == "" {
-		return result, errors.New("session/prompt returned no stopReason")
-	}
-	return result, nil
+	return func() (promptResult, error) {
+		var result promptResult
+		_, err := pending.wait(ctx, &result, nil)
+		if err != nil {
+			return result, authError("session/prompt", err)
+		}
+		if result.StopReason == "" {
+			return result, errors.New("session/prompt returned no stopReason")
+		}
+		return result, nil
+	}, nil
 }
 
 // cancel asks agy to end the session's running prompt.

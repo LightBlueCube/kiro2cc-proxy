@@ -203,13 +203,23 @@ func (c *rpcConn) CallLate(ctx context.Context, method string, params, out any, 
 	return c.call(ctx, method, params, out, late)
 }
 
-func (c *rpcConn) call(ctx context.Context, method string, params, out any, late func(json.RawMessage, bool)) (abandoned bool, err error) {
+type pendingCall struct {
+	conn   *rpcConn
+	method string
+	id     int64
+	ch     chan rpcResult
+}
+
+func (c *rpcConn) send(ctx context.Context, method string, params any) (*pendingCall, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", method, err)
+	}
 	ch := make(chan rpcResult, 1)
 	c.mu.Lock()
 	if c.closed {
 		reason := c.reason
 		c.mu.Unlock()
-		return false, fmt.Errorf("%s: connection closed: %w", method, reason)
+		return nil, fmt.Errorf("%s: connection closed: %w", method, reason)
 	}
 	c.nextID++
 	id := c.nextID
@@ -220,26 +230,29 @@ func (c *rpcConn) call(ctx context.Context, method string, params, out any, late
 	rawParams, err := json.Marshal(params)
 	if err != nil {
 		c.forget(id)
-		return false, fmt.Errorf("%s: encode params: %w", method, err)
+		return nil, fmt.Errorf("%s: encode params: %w", method, err)
 	}
 	if err := c.write(rpcMessage{JSONRPC: "2.0", ID: rawID, Method: method, Params: rawParams}); err != nil {
 		c.forget(id)
-		return false, fmt.Errorf("%s: %w", method, err)
+		return nil, fmt.Errorf("%s: %w", method, err)
 	}
+	return &pendingCall{conn: c, method: method, id: id, ch: ch}, nil
+}
 
+func (p *pendingCall) wait(ctx context.Context, out any, late func(json.RawMessage, bool)) (abandoned bool, err error) {
 	select {
 	case <-ctx.Done():
 		if late == nil {
-			c.forget(id)
-			return false, fmt.Errorf("%s: %w", method, ctx.Err())
+			p.conn.forget(p.id)
+			return false, fmt.Errorf("%s: %w", p.method, ctx.Err())
 		}
 		// The pending entry stays: dispatch or close fills ch.
 		go func() {
-			res := <-ch
+			res := <-p.ch
 			late(res.result, res.err == nil)
 		}()
-		return true, fmt.Errorf("%s: %w", method, ctx.Err())
-	case res := <-ch:
+		return true, fmt.Errorf("%s: %w", p.method, ctx.Err())
+	case res := <-p.ch:
 		if res.err != nil {
 			return false, res.err
 		}
@@ -247,10 +260,18 @@ func (c *rpcConn) call(ctx context.Context, method string, params, out any, late
 			return false, nil
 		}
 		if err := json.Unmarshal(res.result, out); err != nil {
-			return false, fmt.Errorf("%s: decode result: %w", method, err)
+			return false, fmt.Errorf("%s: decode result: %w", p.method, err)
 		}
 		return false, nil
 	}
+}
+
+func (c *rpcConn) call(ctx context.Context, method string, params, out any, late func(json.RawMessage, bool)) (abandoned bool, err error) {
+	pending, err := c.send(ctx, method, params)
+	if err != nil {
+		return false, err
+	}
+	return pending.wait(ctx, out, late)
 }
 
 // Notify sends a notification (no id, no answer).

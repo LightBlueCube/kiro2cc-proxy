@@ -63,6 +63,10 @@
 //	FAKE_AGY_OPEN_DELAY
 //	                a duration, e.g. 300ms: session/new, resume and load
 //	                take that long, as agy does while it starts a worker
+//	FAKE_AGY_INIT_DELAY
+//	                a duration: initialize takes that long
+//	FAKE_AGY_CONFIG_DELAY
+//	                a duration: session/set_config_option takes that long
 package agytest
 
 import (
@@ -255,8 +259,10 @@ type fake struct {
 	outMu sync.Mutex
 	out   *bufio.Writer
 
-	// openDelay is FAKE_AGY_OPEN_DELAY.
-	openDelay time.Duration
+	// Delays controlled by FAKE_AGY_*_DELAY.
+	openDelay   time.Duration
+	initDelay   time.Duration
+	configDelay time.Duration
 
 	mu        sync.Mutex
 	sessions  map[string]*fakeSession
@@ -318,14 +324,9 @@ func Main() {
 		login()
 		return
 	}
-	if raw := os.Getenv("FAKE_AGY_OPEN_DELAY"); raw != "" {
-		delay, err := time.ParseDuration(raw)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "fake agy:", err)
-			os.Exit(1)
-		}
-		f.openDelay = delay
-	}
+	f.openDelay = envDuration("FAKE_AGY_OPEN_DELAY")
+	f.initDelay = envDuration("FAKE_AGY_INIT_DELAY")
+	f.configDelay = envDuration("FAKE_AGY_CONFIG_DELAY")
 	// The fake is its own only worker (agy acp --process-per-session).
 	f.appendLog("acp-front", fmt.Sprintf("front: started worker 1 (pid %d)", os.Getpid()))
 	if path := os.Getenv("FAKE_AGY_LOG"); path != "" {
@@ -393,9 +394,23 @@ type sessionParams struct {
 	} `json:"mcpServers"`
 }
 
+func envDuration(name string) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0
+	}
+	delay, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake agy:", err)
+		os.Exit(1)
+	}
+	return delay
+}
+
 func (f *fake) handle(msg rpcMessage) {
 	switch msg.Method {
 	case "initialize":
+		time.Sleep(f.initDelay)
 		f.reply(msg.ID, map[string]any{
 			"protocolVersion":   1,
 			"agentInfo":         map[string]string{"name": "fake-agy", "version": "1.5.3"},
@@ -446,6 +461,7 @@ func (f *fake) handle(msg rpcMessage) {
 			Value     string `json:"value"`
 		}
 		json.Unmarshal(msg.Params, &p)
+		time.Sleep(f.configDelay)
 		offered := slices.ContainsFunc(catalog(), func(m map[string]string) bool { return m["modelId"] == p.Value })
 		if p.ConfigID == "model" && !offered {
 			// agy 1.5.3's answer to a slug outside the account's catalog.

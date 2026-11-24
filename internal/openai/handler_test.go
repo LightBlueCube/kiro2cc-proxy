@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"agyrelay/internal/conv"
 )
@@ -567,5 +570,134 @@ func TestResponsesMultimodalDecodeAndValidation(t *testing.T) {
 		if rec := post(t, h.Responses, bad); rec.Code != http.StatusBadRequest {
 			t.Errorf("accepted invalid responses request %s: status %d", bad, rec.Code)
 		}
+	}
+}
+
+type blockingBackend struct {
+	started   chan struct{}
+	cancelled chan struct{}
+}
+
+func (b *blockingBackend) Complete(ctx context.Context, _ conv.Caller, _ conv.Request) <-chan conv.Event {
+	out := make(chan conv.Event)
+	go func() {
+		defer close(out)
+		b.started <- struct{}{}
+		<-ctx.Done()
+		b.cancelled <- struct{}{}
+	}()
+	return out
+}
+
+func (b *blockingBackend) Models() []conv.ModelInfo                           { return []conv.ModelInfo{{ID: "m"}} }
+func (b *blockingBackend) Spent(_ context.Context, _ string) (float64, error) { return 0, nil }
+
+// padJSONTo512WithNewline pads a JSON object with trailing spaces inside its
+// closing brace to exactly 512 bytes, then appends a newline (513 bytes total),
+// crossing json.Decoder's initial 512-byte read buffer boundary.
+func padJSONTo512WithNewline(raw string) string {
+	const bufBoundary = 512
+	pad := bufBoundary - len(raw)
+	if pad < 0 {
+		panic("payload longer than 512 bytes")
+	}
+	return raw[:len(raw)-1] + strings.Repeat(" ", pad) + "}\n"
+}
+
+func TestClientDisconnectCancelsBackendContext(t *testing.T) {
+	backend := &blockingBackend{
+		started:   make(chan struct{}, 1),
+		cancelled: make(chan struct{}, 1),
+	}
+	h := NewHandler(backend)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		h.Chat(w, r, conv.Caller{Name: "alice"})
+	})
+	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		h.Responses(w, r, conv.Caller{Name: "alice"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cases := []struct {
+		name    string
+		path    string
+		body    string
+		chunked bool
+	}{
+		{
+			name:    "chat/non-stream/chunked-split-terminator",
+			path:    "/v1/chat/completions",
+			body:    `{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`,
+			chunked: true,
+		},
+		{
+			name:    "chat/stream/chunked-split-terminator",
+			path:    "/v1/chat/completions",
+			body:    `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			chunked: true,
+		},
+		{
+			name:    "chat/non-stream/content-length-trailing-newline",
+			path:    "/v1/chat/completions",
+			body:    padJSONTo512WithNewline(`{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`),
+			chunked: false,
+		},
+		{
+			name:    "responses/non-stream/chunked-split-terminator",
+			path:    "/v1/responses",
+			body:    `{"model":"m","stream":false,"input":"hi"}`,
+			chunked: true,
+		},
+	}
+
+	addr := srv.Listener.Addr().String()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+
+			if tc.chunked {
+				req := fmt.Sprintf(
+					"POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n",
+					tc.path, addr, len(tc.body), tc.body,
+				)
+				if _, err := conn.Write([]byte(req)); err != nil {
+					t.Fatal(err)
+				}
+				// Send the terminating 0-chunk in a second packet so the body
+				// does not hit EOF in the same read as the closing '}'.
+				time.Sleep(10 * time.Millisecond)
+				if _, err := conn.Write([]byte("0\r\n\r\n")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				req := fmt.Sprintf(
+					"POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+					tc.path, addr, len(tc.body), tc.body,
+				)
+				if _, err := conn.Write([]byte(req)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			select {
+			case <-backend.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("backend.Complete never started")
+			}
+
+			conn.Close()
+
+			select {
+			case <-backend.cancelled:
+			case <-time.After(2 * time.Second):
+				t.Fatal("backend ctx was not cancelled after client disconnect")
+			}
+		})
 	}
 }

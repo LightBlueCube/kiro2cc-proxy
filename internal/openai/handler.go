@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -95,9 +96,16 @@ func (h *Handler) BillingUsage(w http.ResponseWriter, r *http.Request, caller co
 	})
 }
 
-// decodeBody reads a JSON request body into v, answering 400 on failure.
+// decodeBody reads the full JSON request body into v, answering 400 on failure.
+// Reading to EOF lets net/http start its background read for HTTP/1.1 client
+// disconnect detection before the handler blocks on the backend.
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(v); err != nil {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	if err != nil {
+		WriteError(w, &conv.Error{Kind: conv.ErrInvalidRequest, Message: "invalid JSON body: " + err.Error()})
+		return false
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
 		WriteError(w, &conv.Error{Kind: conv.ErrInvalidRequest, Message: "invalid JSON body: " + err.Error()})
 		return false
 	}

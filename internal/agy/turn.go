@@ -12,6 +12,7 @@ import (
 const (
 	defaultIdleTimeout = 5 * time.Minute
 	cancelGrace        = 10 * time.Second
+	workerKillGrace    = 2 * time.Second
 )
 
 // EventKind discriminates turn events.
@@ -80,23 +81,30 @@ type steerRequest struct {
 // Turn is one running session/prompt. Events are buffered without bound:
 // the consumer may be away while the turn is parked on a client tool.
 type Turn struct {
-	proc      *Proc
-	sessionID string
-	idleAfter time.Duration
-	steerCh   chan steerRequest
+	proc            *Proc
+	sessionID       string
+	idleAfter       time.Duration
+	cancelAfter     time.Duration
+	workerKillAfter time.Duration
+	steerCh         chan steerRequest
+	setupCtx        context.Context
+	cancelSetup     context.CancelFunc
 
-	mu        sync.Mutex
-	events    []Event
-	wake      chan struct{}
-	closed    bool
-	outcome   Outcome
-	parks     int
-	natives   map[string]string // toolCallId → name, running native calls
-	idleTimer *time.Timer
-	cancelled bool
-	echoSeen  bool
-	held      []mappedUpdate
-	text      sanitizer
+	mu          sync.Mutex
+	events      []Event
+	wake        chan struct{}
+	closed      bool
+	outcome     Outcome
+	parks       int
+	natives     map[string]string // toolCallId → name, running native calls
+	idleTimer   *time.Timer
+	cancelled   bool
+	sending     bool // a session/prompt frame is currently being written
+	prompted    bool // at least one session/prompt frame was written to agy
+	cancelGrace bool // watchCancelGrace has been started
+	echoSeen    bool
+	held        []mappedUpdate
+	text        sanitizer
 
 	done chan struct{}
 }
@@ -104,26 +112,36 @@ type Turn struct {
 // RunTurn sets the model and starts the prompt. The turn runs until agy
 // ends it, Cancel is called, the process exits, or it stalls.
 func (p *Proc) RunTurn(spec TurnSpec) *Turn {
+	return p.runTurn(spec, cancelGrace, workerKillGrace)
+}
+
+func (p *Proc) runTurn(spec TurnSpec, cancelAfter, workerKillAfter time.Duration) *Turn {
 	idle := spec.IdleTimeout
 	if idle == 0 {
 		idle = defaultIdleTimeout
 	}
+	setupCtx, cancelSetup := context.WithCancel(context.Background())
 	t := &Turn{
-		proc:      p,
-		sessionID: spec.SessionID,
-		idleAfter: idle,
-		steerCh:   make(chan steerRequest),
-		wake:      make(chan struct{}, 1),
-		natives:   map[string]string{},
-		done:      make(chan struct{}),
+		proc:            p,
+		sessionID:       spec.SessionID,
+		idleAfter:       idle,
+		cancelAfter:     cancelAfter,
+		workerKillAfter: workerKillAfter,
+		steerCh:         make(chan steerRequest),
+		setupCtx:        setupCtx,
+		cancelSetup:     cancelSetup,
+		wake:            make(chan struct{}, 1),
+		natives:         map[string]string{},
+		done:            make(chan struct{}),
 	}
 	go t.run(spec)
 	return t
 }
 
 func (t *Turn) run(spec TurnSpec) {
-	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
+	defer t.cancelSetup()
+	promptCtx, stopPrompt := context.WithCancel(context.Background())
+	defer stopPrompt()
 	go func() {
 		select {
 		case <-t.proc.Done():
@@ -132,23 +150,40 @@ func (t *Turn) run(spec TurnSpec) {
 		}
 	}()
 
-	if err := t.proc.SetConfigOption(ctx, spec.SessionID, "model", spec.Model); err != nil {
+	if err := t.proc.SetConfigOption(t.setupCtx, spec.SessionID, "model", spec.Model); err != nil {
 		t.settle(Outcome{Err: fmt.Errorf("select model %s: %w", spec.Model, err)})
+		return
+	}
+	if t.isCancelled() {
+		t.settle(Outcome{StopReason: StopCancelled})
 		return
 	}
 	// agy 1.5 offers default, accept-edits, and plan. In default agy asks
 	// before native commands, and the permission handler denies them.
-	if err := t.proc.SetConfigOption(ctx, spec.SessionID, "mode", "default"); err != nil {
+	if err := t.proc.SetConfigOption(t.setupCtx, spec.SessionID, "mode", "default"); err != nil {
+		if t.isCancelled() {
+			t.settle(Outcome{StopReason: StopCancelled})
+			return
+		}
 		t.proc.log.Warn("set mode failed", "session", spec.SessionID, "err", err)
 	}
 
 	unsubscribe := t.proc.subscribe(spec.SessionID, t.onUpdate)
 	defer unsubscribe()
 	t.mu.Lock()
+	if t.cancelled || t.closed {
+		t.mu.Unlock()
+		t.settle(Outcome{StopReason: StopCancelled})
+		return
+	}
 	t.armIdleLocked()
 	t.mu.Unlock()
 
-	cur := t.startPrompt(ctx, spec.Prompt)
+	cur := t.startPrompt(promptCtx, spec.Prompt)
+	if cur == nil {
+		t.settle(Outcome{StopReason: StopCancelled})
+		return
+	}
 	var total *Usage
 
 	for {
@@ -157,7 +192,7 @@ func (t *Turn) run(spec TurnSpec) {
 			t.finishCur(cur, total)
 			return
 		case req := <-t.steerCh:
-			next, ok := t.handover(ctx, cur, &total, req)
+			next, ok := t.handover(promptCtx, cur, &total, req)
 			if !ok {
 				return
 			}
@@ -166,12 +201,50 @@ func (t *Turn) run(spec TurnSpec) {
 	}
 }
 
+// startPrompt writes session/prompt synchronously before waiting in a
+// goroutine, so Cancel never writes session/cancel ahead of it. Returns nil
+// when the turn is already cancelled or closed.
 func (t *Turn) startPrompt(ctx context.Context, blocks []ContentBlock) *promptCall {
+	t.mu.Lock()
+	if t.cancelled || t.closed {
+		t.mu.Unlock()
+		return nil
+	}
+	t.sending = true
+	t.mu.Unlock()
+
+	waitFn, err := t.proc.sendPrompt(ctx, t.sessionID, blocks)
+
+	t.mu.Lock()
+	t.sending = false
+	if err == nil {
+		t.prompted = true
+	}
+	needCancel := t.prompted && t.cancelled && !t.closed
+	armGrace := false
+	if needCancel && !t.cancelGrace {
+		t.cancelGrace = true
+		armGrace = true
+	}
+	t.mu.Unlock()
+
 	call := &promptCall{done: make(chan struct{})}
-	go func() {
-		call.result, call.err = t.proc.prompt(ctx, t.sessionID, blocks)
+	if err != nil {
+		call.err = err
 		close(call.done)
-	}()
+	} else {
+		go func() {
+			call.result, call.err = waitFn()
+			close(call.done)
+		}()
+	}
+
+	if needCancel {
+		t.proc.cancel(t.sessionID)
+		if armGrace {
+			go t.watchCancelGrace()
+		}
+	}
 	return call
 }
 
@@ -190,20 +263,39 @@ func (t *Turn) finishCur(cur *promptCall, total *Usage) {
 // with end_turn, so cur's return proves the message is queued.
 func (t *Turn) handover(ctx context.Context, cur *promptCall, total **Usage, req steerRequest) (*promptCall, bool) {
 	next := t.startPrompt(ctx, req.prompt)
+	if next == nil {
+		req.ack <- errors.New("antigravity turn cancelled")
+		return cur, true
+	}
 
 	select {
 	case <-cur.done:
-		if cur.err != nil {
-			req.ack <- cur.err
-			t.settlePromptErr(cur.err)
-			return nil, false
-		}
-		if cur.result.StopReason == StopCancelled {
-			req.ack <- errors.New("antigravity turn cancelled")
-			t.settle(Outcome{StopReason: StopCancelled})
+		if cur.err != nil || cur.result.StopReason == StopCancelled {
+			err := cur.err
+			if err == nil {
+				err = errors.New("antigravity turn cancelled")
+			}
+			req.ack <- err
+			t.cancelInFlight()
+			select {
+			case <-next.done:
+			case <-t.done:
+			}
+			if cur.err != nil {
+				t.settlePromptErr(cur.err)
+			} else {
+				t.settle(Outcome{StopReason: StopCancelled})
+			}
 			return nil, false
 		}
 		*total = addPromptUsage(*total, cur.result.Usage)
+		if t.isCancelled() {
+			// A cancel written before agy handed off to next may not have
+			// reached next; resend it and keep waiting for next to settle.
+			t.cancelInFlight()
+			req.ack <- errors.New("antigravity turn cancelled")
+			return next, true
+		}
 		req.ack <- nil
 		return next, true
 
@@ -248,6 +340,9 @@ func addPromptUsage(total, part *Usage) *Usage {
 // events were consumed (or ctx ended).
 func (t *Turn) Next(ctx context.Context) (Event, bool) {
 	for {
+		if ctx.Err() != nil {
+			return Event{}, false
+		}
 		t.mu.Lock()
 		if len(t.events) > 0 {
 			ev := t.events[0]
@@ -338,7 +433,7 @@ func (t *Turn) Unpark() {
 }
 
 // Cancel ends the prompt through ACP. When agy does not settle it within
-// the grace period, the process is torn down.
+// the grace period, the worker (or, if needed, the process) is torn down.
 func (t *Turn) Cancel() {
 	t.mu.Lock()
 	if t.closed || t.cancelled {
@@ -346,18 +441,73 @@ func (t *Turn) Cancel() {
 		return
 	}
 	t.cancelled = true
+	// If startPrompt is writing a session/prompt frame right now, it sends
+	// session/cancel immediately after the write so agy sees them in order.
+	sendCancel := t.prompted && !t.sending
+	armGrace := false
+	if sendCancel && !t.cancelGrace {
+		t.cancelGrace = true
+		armGrace = true
+	}
+	t.mu.Unlock()
+
+	t.cancelSetup()
+	if sendCancel {
+		t.proc.cancel(t.sessionID)
+		if armGrace {
+			go t.watchCancelGrace()
+		}
+	}
+}
+
+func (t *Turn) cancelInFlight() {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	armGrace := false
+	if !t.cancelGrace {
+		t.cancelGrace = true
+		armGrace = true
+	}
 	t.mu.Unlock()
 
 	t.proc.cancel(t.sessionID)
-	go func() {
+	if armGrace {
+		go t.watchCancelGrace()
+	}
+}
+
+func (t *Turn) watchCancelGrace() {
+	timer := time.NewTimer(t.cancelAfter)
+	defer timer.Stop()
+	select {
+	case <-t.done:
+	case <-timer.C:
+		t.forceStop("agy ignored cancel", Outcome{StopReason: StopCancelled})
+	}
+}
+
+func (t *Turn) forceStop(reason string, fallback Outcome) {
+	select {
+	case <-t.done:
+		return
+	default:
+	}
+	if t.proc.killWorker(t.sessionID) {
+		t.proc.log.Warn(reason+"; killing worker", "session", t.sessionID)
+		timer := time.NewTimer(t.workerKillAfter)
+		defer timer.Stop()
 		select {
 		case <-t.done:
-		case <-time.After(cancelGrace):
-			t.proc.log.Warn("agy ignored cancel; killing process", "session", t.sessionID)
-			t.proc.Kill()
-			t.settle(Outcome{StopReason: StopCancelled})
+			return
+		case <-timer.C:
 		}
-	}()
+	}
+	t.proc.log.Warn(reason+"; killing process", "session", t.sessionID)
+	t.proc.Kill()
+	t.settle(fallback)
 }
 
 func (t *Turn) isCancelled() bool {
@@ -457,9 +607,7 @@ func (t *Turn) armIdleLocked() {
 		return
 	}
 	t.idleTimer = time.AfterFunc(t.idleAfter, func() {
-		t.proc.log.Warn("turn stalled; killing process", "session", t.sessionID)
-		t.proc.Kill()
-		t.settle(Outcome{Err: fmt.Errorf("antigravity produced no output for %s", t.idleAfter)})
+		t.forceStop("turn stalled", Outcome{Err: fmt.Errorf("antigravity produced no output for %s", t.idleAfter)})
 	})
 }
 

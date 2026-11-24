@@ -3660,3 +3660,157 @@ func TestParkTTLExpiresAndReschedulesParkedTurns(t *testing.T) {
 		t.Fatalf("mode after park timeout = %q, want %q", got.Mode, ModeWarm)
 	}
 }
+
+func TestCancelDuringProcStartAndConfigSetup(t *testing.T) {
+	h := newHarness(t, 1, map[int][]string{
+		0: {"FAKE_AGY_INIT_DELAY=180ms", "FAKE_AGY_CONFIG_DELAY=150ms"},
+	})
+
+	// 1. Cancel while Account.Proc is still initializing: returns promptly
+	// without waiting for init or opening a session.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer cancel1()
+	start := time.Now()
+	h.complete(ctx1, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("hi")}})
+	if elapsed := time.Since(start); elapsed > 140*time.Millisecond {
+		t.Fatalf("cancel during init blocked %v", elapsed)
+	}
+	if rec := h.records.all(t, 1)[0]; rec.Err == nil || rec.Err.Kind != conv.ErrCancelled {
+		t.Fatalf("cancel during init record = %+v, want ErrCancelled", rec)
+	}
+
+	// 2. Cancel during SetConfigOption: returns promptly and never sends session/prompt.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 260*time.Millisecond)
+	defer cancel2()
+	h.complete(ctx2, "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("second")}})
+	if rec := h.records.all(t, 2)[1]; rec.Err == nil || rec.Err.Kind != conv.ErrCancelled {
+		t.Fatalf("cancel during config setup record = %+v, want ErrCancelled", rec)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if prompts := h.requests("session/prompt"); len(prompts) != 0 {
+		t.Fatalf("session/prompt sent despite early cancel: %+v", prompts)
+	}
+
+	// Subsequent normal request succeeds on the healthy account.
+	ok := h.complete(context.Background(), "alice", conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("ok")}})
+	if ok.err != nil || ok.text != "reply to: ok" {
+		t.Fatalf("subsequent request = %+v, want reply to: ok", ok)
+	}
+}
+
+func TestCancelledContinueLeavesParkedTurnIntact(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+
+	first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: []conv.Message{user(`@tool read {}`)}, Tools: tools})
+	if first.err != nil || len(first.calls) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	contMessages := []conv.Message{
+		user(`@tool read {}`),
+		{Role: conv.RoleAssistant, ToolCalls: first.calls},
+		{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "file body"},
+	}
+
+	// An already-cancelled continuation must not unpark or cancel the parked turn.
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	h.complete(cancelledCtx, "alice", conv.Request{Model: model, Messages: contMessages, Tools: tools})
+	if rec := h.records.all(t, 2)[1]; rec.Err == nil || rec.Err.Kind != conv.ErrCancelled {
+		t.Fatalf("cancelled continue record = %+v, want ErrCancelled", rec)
+	}
+	sessions := h.gw.Sessions()
+	if len(sessions) != 1 || sessions[0].Turn == nil || sessions[0].Turn.State != TurnParked {
+		t.Fatalf("sessions after cancelled continue = %+v, want parked turn intact", sessions)
+	}
+
+	// A real continuation afterwards still resumes the parked turn in place.
+	resumed := h.complete(ctx, "alice", conv.Request{Model: model, Messages: contMessages, Tools: tools})
+	if resumed.err != nil || resumed.text != "tool said: file body" {
+		t.Fatalf("resumed = %+v, want tool said: file body", resumed)
+	}
+	if recs := h.records.all(t, 3); recs[2].Mode != ModeContinue {
+		t.Fatalf("resumed mode = %q, want %q", recs[2].Mode, ModeContinue)
+	}
+}
+
+func TestCancelDuringSteerSettlesCleanly(t *testing.T) {
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	model := "gemini-3.8-flash"
+
+	for i := range 6 {
+		t.Run(fmt.Sprintf("iter-%d", i), func(t *testing.T) {
+			h := newHarness(t, 1, nil)
+			t.Cleanup(func() {
+				procs := h.p.Account("acct0").LiveProcs()
+				h.p.Close()
+				for _, proc := range procs {
+					<-proc.Done()
+				}
+			})
+			prompt := fmt.Sprintf("@tool read {\"n\":%d}", i)
+			first := h.complete(ctx, "alice", conv.Request{Model: model, Messages: []conv.Message{user(prompt)}, Tools: tools})
+			if first.err != nil || len(first.calls) != 1 {
+				t.Fatalf("first = %+v", first)
+			}
+			// Tool result "@hang" keeps the fake turn parked on a hang if steer
+			// settles the tool call before cancel reaches agy, exposing any leaked
+			// cancel immediately instead of letting the turn finish on its own.
+			steerMessages := []conv.Message{
+				user(prompt),
+				{Role: conv.RoleAssistant, ToolCalls: first.calls},
+				{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "@hang"},
+				user(fmt.Sprintf("steer %d", i)),
+			}
+
+			steerCtx, cancel := context.WithCancel(ctx)
+			done := make(chan result, 1)
+			go func() {
+				done <- h.complete(steerCtx, "alice", conv.Request{Model: model, Messages: steerMessages, Tools: tools})
+			}()
+			if i == 0 {
+				// Wait until the steer session/prompt is actually written to agy.
+				deadline := time.Now().Add(2 * time.Second)
+				for len(h.requests("session/prompt")) < 2 {
+					if time.Now().After(deadline) {
+						t.Fatal("steer session/prompt never sent")
+					}
+					time.Sleep(time.Millisecond)
+				}
+			} else {
+				time.Sleep(time.Duration(i-1) * time.Millisecond)
+			}
+			cancel()
+
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("cancelled steer did not return")
+			}
+			if rec := h.records.all(t, 2)[1]; rec.Err == nil || rec.Err.Kind != conv.ErrCancelled {
+				t.Fatalf("steer cancel record = %+v, want ErrCancelled", rec)
+			}
+			sessions := h.gw.Sessions()
+			if len(sessions) == 1 && sessions[0].Turn != nil && sessions[0].Turn.State == TurnParked {
+				if i == 0 {
+					t.Fatal("iter 0 cancelled after steer prompt was sent; turn must not stay parked")
+				}
+				// Cancel arrived before tryContinue unparked the turn: no steer prompt was sent.
+				if got := len(h.requests("session/prompt")); got != 1 {
+					t.Fatalf("parked turn left with %d prompts, want 1", got)
+				}
+			} else {
+				h.waitRun(0, false)
+			}
+
+			// Account process must still be healthy and usable.
+			ok := h.complete(ctx, "alice", conv.Request{Model: model, Messages: []conv.Message{user("still alive")}, Tools: tools})
+			if ok.err != nil || ok.text != "reply to: still alive" {
+				t.Fatalf("after steer cancel = %+v, want reply to: still alive", ok)
+			}
+		})
+	}
+}

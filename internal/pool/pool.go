@@ -1043,55 +1043,60 @@ func (a *Account) RetireIdleProcs(idle time.Duration) int {
 }
 
 // Proc returns the live process for profile, starting it when needed.
-// Concurrent callers share one start.
+// Concurrent callers share one start; cancelling ctx stops waiting without
+// aborting a start another caller may need.
 func (a *Account) Proc(ctx context.Context, profile agy.Profile) (*agy.Proc, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		a.mu.Lock()
 		if a.removed {
 			a.mu.Unlock()
 			return nil, fmt.Errorf("account %s was removed", a.name)
 		}
 		slot := a.procs[profile.Name]
-		if slot != nil && slot.starting != nil {
-			starting := slot.starting
-			a.mu.Unlock()
-			select {
-			case <-starting:
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			a.mu.Lock()
-			err := slot.err
-			a.mu.Unlock()
-			if err != nil {
-				return nil, err
-			}
-			continue
-		}
 		if slot != nil && slot.proc != nil && slot.proc.Alive() {
 			slot.proc.Touch()
 			a.mu.Unlock()
 			return slot.proc, nil
 		}
-		slot = &procSlot{starting: make(chan struct{})}
-		a.procs[profile.Name] = slot
+		if slot == nil || slot.starting == nil {
+			slot = &procSlot{starting: make(chan struct{})}
+			a.procs[profile.Name] = slot
+			go a.finishStart(slot, profile)
+		}
+		starting := slot.starting
 		a.mu.Unlock()
 
-		proc, err := a.startProc(ctx, profile)
+		select {
+		case <-starting:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 		a.mu.Lock()
-		if err == nil && a.removed {
-			proc.Kill()
-			proc, err = nil, fmt.Errorf("account %s was removed", a.name)
-		}
-		slot.proc, slot.err = proc, err
-		close(slot.starting)
-		slot.starting = nil
-		if err != nil {
-			delete(a.procs, profile.Name)
-		}
+		err := slot.err
 		a.mu.Unlock()
-		return proc, err
+		if err != nil {
+			return nil, err
+		}
 	}
+}
+
+func (a *Account) finishStart(slot *procSlot, profile agy.Profile) {
+	proc, err := a.startProc(context.Background(), profile)
+	a.mu.Lock()
+	if err == nil && a.removed {
+		proc.Kill()
+		proc, err = nil, fmt.Errorf("account %s was removed", a.name)
+	}
+	slot.proc, slot.err = proc, err
+	close(slot.starting)
+	slot.starting = nil
+	if err != nil && a.procs[profile.Name] == slot {
+		delete(a.procs, profile.Name)
+	}
+	a.mu.Unlock()
 }
 
 func (a *Account) startProc(ctx context.Context, profile agy.Profile) (*agy.Proc, error) {

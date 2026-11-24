@@ -1,14 +1,27 @@
 package pool
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
+
+	"agyrelay/internal/agy"
+	"agyrelay/internal/agy/agytest"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv(agytest.EnvRun) == "1" {
+		agytest.Main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestProxyEnvAndBlocking(t *testing.T) {
 	p, err := New(Config{TurnsPerAccount: 1, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
@@ -205,4 +218,78 @@ func TestCooldownSetAndSync(t *testing.T) {
 	if len(a.Status().Cooldowns) != 0 || len(a.Cooldowns()) != 0 {
 		t.Fatalf("cooldowns after clear = %v, want empty", a.Status().Cooldowns)
 	}
+}
+
+func TestProcCancelsWaitWithoutAbortingSharedStart(t *testing.T) {
+	p, err := New(Config{
+		Bin:             os.Args[0],
+		TurnsPerAccount: 1,
+		Log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+
+	a, err := p.Add(AccountConfig{
+		Name: "a",
+		Home: filepath.Join(t.TempDir(), "a"),
+		Env:  []string{agytest.EnvRun + "=1", "FAKE_AGY_INIT_DELAY=150ms"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := agy.Profile{Name: "agent-test"}
+
+	// An already-cancelled ctx must return immediately without starting agy.
+	cancelledCtx, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	if _, err := a.Proc(cancelledCtx, profile); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Proc(cancelled) err = %v, want context.Canceled", err)
+	}
+	if len(a.LiveProcs()) != 0 {
+		t.Fatalf("cancelled Proc started a process: %v", a.LiveProcs())
+	}
+
+	// Caller 1 starts the shared proc and cancels early; caller 2 waits on the
+	// same start and must still receive the live process.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel1()
+
+	type res struct {
+		proc    *agy.Proc
+		err     error
+		elapsed time.Duration
+	}
+	ch1 := make(chan res, 1)
+	go func() {
+		start := time.Now()
+		proc, err := a.Proc(ctx1, profile)
+		ch1 <- res{proc, err, time.Since(start)}
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	ch2 := make(chan res, 1)
+	go func() {
+		start := time.Now()
+		proc, err := a.Proc(context.Background(), profile)
+		ch2 <- res{proc, err, time.Since(start)}
+	}()
+
+	r1 := <-ch1
+	if !errors.Is(r1.err, context.DeadlineExceeded) {
+		t.Fatalf("caller 1 err = %v, want DeadlineExceeded", r1.err)
+	}
+	if r1.elapsed > 120*time.Millisecond {
+		t.Fatalf("caller 1 waited %v for slow init instead of cancelling", r1.elapsed)
+	}
+
+	r2 := <-ch2
+	if r2.err != nil || r2.proc == nil || !r2.proc.Alive() {
+		t.Fatalf("caller 2 = (%v, %v), want live shared proc", r2.proc, r2.err)
+	}
+	t.Cleanup(func() {
+		r2.proc.Kill()
+		<-r2.proc.Done()
+	})
 }

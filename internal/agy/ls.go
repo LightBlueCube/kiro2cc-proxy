@@ -223,15 +223,27 @@ func (p *Proc) lsPorts() ([]string, error) {
 // lsPort finds the HTTP port of the language server holding the session.
 // It reads the logs on every call: a worker may have been replaced.
 func (p *Proc) lsPort(sessionID string) (string, error) {
+	workerPid, err := p.workerPID(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return p.listenPort("acp-worker", workerPid)
+}
+
+// workerPID finds the pid of the worker process serving sessionID from the front log.
+func (p *Proc) workerPID(sessionID string) (int, error) {
+	if p.cmd.Process == nil {
+		return 0, errors.New("process not started")
+	}
 	pid := p.cmd.Process.Pid
 	front, err := p.readLog("acp-front", pid)
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	servedBy := regexp.MustCompile(`session ` + regexp.QuoteMeta(sessionID) + ` served by worker (\d+)`)
 	served := servedBy.FindAllStringSubmatch(front, -1)
 	if served == nil {
-		return "", errors.New("no worker serves it")
+		return 0, errors.New("no worker serves it")
 	}
 	worker := served[len(served)-1][1]
 	workerPid := 0
@@ -241,9 +253,9 @@ func (p *Proc) lsPort(sessionID string) (string, error) {
 		}
 	}
 	if workerPid == 0 {
-		return "", fmt.Errorf("worker %s has no logged pid", worker)
+		return 0, fmt.Errorf("worker %s has no logged pid", worker)
 	}
-	return p.listenPort("acp-worker", workerPid)
+	return workerPid, nil
 }
 
 func (p *Proc) listenPort(kind string, pid int) (string, error) {

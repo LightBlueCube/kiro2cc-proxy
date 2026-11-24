@@ -15,6 +15,10 @@ import (
 	"agyrelay/internal/pool"
 )
 
+func cancelledFailure() *attemptFailure {
+	return &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
+}
+
 // start plans the attempt and returns a running turn:
 //
 // The snapshot comes from the request's anchors, else from the user's own
@@ -30,10 +34,16 @@ import (
 // cancelled turn's input is never sent again on top of itself: the next
 // request plans from an earlier rewindable position.
 func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailure) {
+	if ctx.Err() != nil {
+		return nil, cancelledFailure()
+	}
 	if !r.reuse {
 		return g.startFresh(ctx, r, r.moveReason)
 	}
 	for {
+		if ctx.Err() != nil {
+			return nil, cancelledFailure()
+		}
 		snap, ok := g.anchoredSnapshot(r.t)
 		if !ok {
 			snap, ok = g.snaps.lookup(r.user, r.t)
@@ -47,7 +57,7 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 				g.cancelParked(ctx, snap.Account, snap.SessionID)
 			}
 			if ctx.Err() != nil {
-				return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
+				return nil, cancelledFailure()
 			}
 			return nil, g.accountFailure(snap.Account, acctErr)
 		}
@@ -73,7 +83,7 @@ func (g *Gateway) start(ctx context.Context, r *run) (*activeTurn, *attemptFailu
 			return nil, &attemptFailure{err: limitErr}
 		}
 		if ctx.Err() != nil {
-			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
+			return nil, cancelledFailure()
 		}
 		return nil, g.warmFailure(snap, err)
 	}
@@ -140,6 +150,10 @@ func (g *Gateway) accountFailure(id string, err *accountError) *attemptFailure {
 // to a parked turn whose boundary snapshot is the request's prefix.
 func (g *Gateway) tryContinue(ctx context.Context, snap snapshot, r *run) *activeTurn {
 	g.mu.Lock()
+	if ctx.Err() != nil {
+		g.mu.Unlock()
+		return nil
+	}
 	sess := g.sessions[sessionRef(snap.Account, snap.SessionID)]
 	if sess == nil || sess.turn == nil {
 		g.mu.Unlock()
@@ -182,12 +196,18 @@ func (g *Gateway) tryContinue(ctx context.Context, snap snapshot, r *run) *activ
 			return at
 		}
 	}
+	if ctx.Err() != nil {
+		return at
+	}
 	group.settle(groupResult(group, results, sysNotes), nil)
 	return at
 }
 
 // startWarm prompts the snapshot's session with the transcript delta.
 func (g *Gateway) startWarm(ctx context.Context, snap snapshot, account *pool.Account, slug, tier string, r *run) (*activeTurn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	at, err := g.claimSession(ctx, snap, account, r)
 	if err != nil {
 		return nil, g.claimFailure(ctx, snap, account, r, err)
@@ -219,6 +239,10 @@ func (g *Gateway) startWarm(ctx context.Context, snap snapshot, account *pool.Ac
 	if err := account.Available(r.group); err != nil {
 		g.releaseClaim(at)
 		return nil, unavailableError(account, r, err)
+	}
+	if err := ctx.Err(); err != nil {
+		g.releaseClaim(at)
+		return nil, err
 	}
 	g.launch(at, account, r, slug, tier, deltaPromptBlocks(r.t.body[snap.Count:]), snap.Steps)
 	return at, nil
@@ -277,6 +301,9 @@ func (g *Gateway) claimFailure(ctx context.Context, snap snapshot, account *pool
 func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool.Account, r *run) (*activeTurn, error) {
 	ref := sessionRef(snap.Account, snap.SessionID)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		g.mu.Lock()
 		sess := g.sessions[ref]
 		if sess != nil && sess.turn != nil {
@@ -347,7 +374,7 @@ func (g *Gateway) reopen(ctx context.Context, sess *session, r *run) error {
 		return newAccountError("the conversation's session was lost on its account", true, fmt.Errorf("conversation store: %w", err))
 	}
 	tools := r.req.Tools
-	proc, err := sess.account.Proc(context.WithoutCancel(ctx), profileFor(tools))
+	proc, err := sess.account.Proc(ctx, profileFor(tools))
 	if err != nil {
 		return err
 	}
@@ -379,6 +406,9 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 	}
 	var lacking []string
 	for {
+		if ctx.Err() != nil {
+			return nil, cancelledFailure()
+		}
 		for _, a := range g.pool.Accounts() {
 			if r.exclude[a.ID()] {
 				continue
@@ -445,6 +475,10 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			if newestInput(r.t.body) > 0 {
 				r.mode, r.replayReason = ModeReplay, reason
 			}
+			if ctx.Err() != nil {
+				g.releaseClaim(at)
+				return nil, cancelledFailure()
+			}
 			g.launch(at, account, r, slug, tier, freshPrompt(r.t), 0)
 			return at, nil
 		}
@@ -454,7 +488,7 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 			return nil, &attemptFailure{err: limitErr}
 		}
 		if ctx.Err() != nil {
-			return nil, &attemptFailure{err: &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}}
+			return nil, cancelledFailure()
 		}
 		authFailed := agy.IsAuthError(err)
 		if authFailed {
@@ -554,7 +588,7 @@ func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account
 	g.mu.Unlock()
 	g.closeEvicted(evicted)
 
-	proc, err := account.Proc(context.WithoutCancel(ctx), profileFor(r.req.Tools))
+	proc, err := account.Proc(ctx, profileFor(r.req.Tools))
 	if err != nil {
 		g.releaseBusy(r.user)
 		return nil, err
