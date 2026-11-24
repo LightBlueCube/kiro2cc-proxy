@@ -2098,7 +2098,8 @@ func TestRewindToEndOfToolTurn(t *testing.T) {
 
 // A client resends its tool results while the first attempt still runs.
 // The cancelled attempt's results stay in the session, so the retry must
-// not send them again on top: it rewinds to the last finished turn.
+// not send them again on top: it rewinds to the user input before the
+// tool-call model response and sends the assistant call + result as delta.
 func TestRetriedToolResultsRewindPastCancelledInput(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	ctx := context.Background()
@@ -2133,10 +2134,151 @@ func TestRetriedToolResultsRewindPastCancelledInput(t *testing.T) {
 	if retry.err != nil {
 		t.Fatalf("retry = %+v", retry)
 	}
-	h.assertRewound(h.requests("session/prompt")[0].Params.SessionID, 2)
+	// Turn 1 left 2 steps (USER_INPUT + PLANNER_RESPONSE); turn 2's settled
+	// user input added step 3 (USER_INPUT).
+	h.assertRewound(h.requests("session/prompt")[0].Params.SessionID, 3)
 	records := h.records.all(t, 4)
 	if last := records[len(records)-1]; last.Mode != ModeRewind {
 		t.Fatalf("retry mode = %q, want %q", last.Mode, ModeRewind)
+	}
+}
+
+// When the relay already answered a tool result with the next tool_calls
+// (parking the worker on step N+1) and the client never received that
+// response, resending the same tool result must cancel the parked turn and
+// rewind one step within the same session — never open a second worker to
+// replay the conversation from scratch.
+func TestDroppedToolCallsResponseRewindsSameSessionInsteadOfReplaying(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	req := func(messages []conv.Message) conv.Request {
+		return conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools}
+	}
+
+	// Single long tool-loop turn with no prior finished turn:
+	// U1 -> A1(tool_calls) -> T1 -> A2(tool_calls, lost by client).
+	messages := []conv.Message{user("@toolchain read read read")}
+	first := h.complete(ctx, "alice", req(messages))
+	if first.err != nil || first.finish != conv.FinishToolCalls || first.anchor == "" {
+		t.Fatalf("first = %+v", first)
+	}
+	messages = append(messages,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: first.calls, Anchors: []string{first.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: first.calls[0].ID, ToolName: "read", Text: "res1"},
+	)
+
+	// Worker receives T1, emits A2(tool_calls), and parks waiting for T2.
+	lostA2 := h.complete(ctx, "alice", req(messages))
+	if lostA2.err != nil || lostA2.finish != conv.FinishToolCalls || lostA2.anchor == "" {
+		t.Fatalf("lostA2 = %+v", lostA2)
+	}
+	if !h.turnIs(TurnParked) {
+		t.Fatalf("sessions = %+v, want 1 parked worker", h.gw.Sessions())
+	}
+
+	// Client never got lostA2 and resends the exact same [U1, A1, T1]
+	// request (even under another API key via A1's anchor).
+	retried := h.complete(ctx, "bob", req(messages))
+	if retried.err != nil {
+		t.Fatalf("retried = %+v", retried)
+	}
+	if n := len(h.requests("session/new")); n != 1 {
+		t.Fatalf("session/new count = %d, want 1 (must reuse session, not replay)", n)
+	}
+	sessionID := h.requests("session/prompt")[0].Params.SessionID
+	// Rewound to U1 (1 step) because A2's turn never had an earlier settled T;
+	// now run a deeper step (T2 lost after A3 parked) to verify rewinding to T1 (3 steps).
+	h.assertRewound(sessionID, 1)
+	if sessions := h.gw.Sessions(); len(sessions) != 1 {
+		t.Fatalf("live sessions = %+v, want 1", sessions)
+	}
+	recs := h.records.all(t, 3)
+	if recs[2].Mode != ModeRewind || recs[2].Anchor != AnchorOK || recs[2].SessionID != sessionID {
+		t.Fatalf("retry record = %+v, want ModeRewind AnchorOK on %s", recs[2], sessionID)
+	}
+
+	// Now advance two tool steps in a fresh session and lose the third
+	// tool_calls response: retry of T2 must rewind to T1 (3 steps: U1 + P1 + G1),
+	// preserving the first tool call's native trajectory.
+	m2 := []conv.Message{user("@toolchain read read read")}
+	c1 := h.complete(ctx, "carol", req(m2))
+	m2 = append(m2,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: c1.calls, Anchors: []string{c1.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: c1.calls[0].ID, ToolName: "read", Text: "r1"},
+	)
+	c2 := h.complete(ctx, "carol", req(m2))
+	m2 = append(m2,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: c2.calls, Anchors: []string{c2.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: c2.calls[0].ID, ToolName: "read", Text: "r2"},
+	)
+	lostC3 := h.complete(ctx, "carol", req(m2))
+	if c1.err != nil || c2.err != nil || lostC3.err != nil || lostC3.finish != conv.FinishToolCalls {
+		t.Fatalf("carol setup: %+v %+v %+v", c1, c2, lostC3)
+	}
+	carolPromptsBefore := len(h.requests("session/prompt"))
+	retryT2 := h.complete(ctx, "carol", req(m2))
+	if retryT2.err != nil {
+		t.Fatalf("retryT2 = %+v", retryT2)
+	}
+	if n := len(h.requests("session/new")); n != 2 {
+		t.Fatalf("session/new count = %d, want 2 (no replay worker opened)", n)
+	}
+	carolPrompts := h.requests("session/prompt")
+	carolSession := carolPrompts[carolPromptsBefore].Params.SessionID
+	h.assertRewound(carolSession, 3)
+	delta := carolPrompts[len(carolPrompts)-1].Params.Prompt[0]
+	if delta.Resource == nil || !strings.Contains(delta.Resource.Text, "r2") || strings.Contains(delta.Resource.Text, "r1") {
+		t.Fatalf("delta = %+v, want only [A2, T2(r2)] without resending r1", delta)
+	}
+}
+
+// Serial tool calls from a single model call and client tool calls preceded
+// by native agy tools must not record a bogus mid-step rewind position.
+func TestSerialAndNativeToolStepsDoNotRecordInvalidInputSnapshot(t *testing.T) {
+	h := newHarness(t, 1, nil)
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	req := func(messages []conv.Message) conv.Request {
+		return conv.Request{Model: "gemini-3.8-flash", Messages: messages, Tools: tools}
+	}
+
+	// 1. Serial tool calls: 1 PLANNER_RESPONSE + 2 GENERIC steps.
+	// Step 1 records U1 (steps=1). Step 2 has 0 new model calls -> inputSteps=0,
+	// so retrying after step 2 rewinds cleanly to U1 (steps=1), never to
+	// step 3 (middle of pending serial GENERIC steps).
+	mSerial := []conv.Message{user("@serial read read")}
+	s1 := h.complete(ctx, "alice", req(mSerial))
+	mSerial = append(mSerial,
+		conv.Message{Role: conv.RoleAssistant, ToolCalls: s1.calls, Anchors: []string{s1.anchor}},
+		conv.Message{Role: conv.RoleTool, ToolCallID: s1.calls[0].ID, Text: "sr1"},
+	)
+	s2 := h.complete(ctx, "alice", req(mSerial))
+	if s1.err != nil || s2.err != nil || s2.finish != conv.FinishToolCalls {
+		t.Fatalf("serial: %+v %+v", s1, s2)
+	}
+	retrySerial := h.complete(ctx, "alice", req(mSerial))
+	if retrySerial.err != nil {
+		t.Fatalf("retrySerial = %+v", retrySerial)
+	}
+	h.assertRewound(h.requests("session/prompt")[0].Params.SessionID, 1)
+
+	// 2. Native tool before client tool: 2 PLANNER_RESPONSE calls in one range
+	// -> inputSteps=0, so U1 is not marked rewindable (native tool side effects
+	// already ran on top of U1).
+	mNative := []conv.Message{user("@nativetool read {}")}
+	n1 := h.complete(ctx, "bob", req(mNative))
+	if n1.err != nil || n1.finish != conv.FinishToolCalls {
+		t.Fatalf("native: %+v", n1)
+	}
+	sessionID := h.gw.Sessions()[0].ID
+	for _, s := range h.gw.Sessions() {
+		if s.KeyHash == "hash-bob" {
+			sessionID = s.ID
+		}
+	}
+	if _, ok := h.gw.snaps.position("acct0", sessionID, 1, newTranscript(mNative).hashes[1]); ok {
+		t.Fatal("input before native+client tool calls was marked rewindable")
 	}
 }
 

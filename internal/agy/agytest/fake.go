@@ -6,6 +6,11 @@
 //
 //	@tool NAME JSON      call the client tool NAME, reply "tool said: <result>";
 //	                     a result "@hang" makes it produce nothing until cancelled
+//	@toolchain A B ...   one model call per tool: call A, then call B after A's
+//	                     result, ..., reply "tool said: <last result>"
+//	@nativetool NAME JSON
+//	                     run a native tool step (2 model calls), then call the
+//	                     client tool NAME
 //	@parallel A B ...    call tools A, B, ... through the parallel tool
 //	@serial A B ...      one model call that asks for tools A, B, ... one
 //	                     after the other
@@ -806,26 +811,53 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 		return "retried", nil
 	case "@tool":
 		name, args, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(input, "@tool")), " ")
-		f.addSteps(sessionID, s, stepPlanner)
+		f.addSteps(sessionID, s, stepPlanner, stepGeneric)
 		result, err := callTool(ctx, s, name, json.RawMessage(args))
 		if err != nil {
 			return "", err
 		}
-		f.addSteps(sessionID, s, stepGeneric)
 		if result == "@hang" {
 			<-ctx.Done()
 			return "", nil
 		}
 		return "tool said: " + result, nil
-	case "@serial":
-		f.addSteps(sessionID, s, stepPlanner)
+	case "@toolchain":
 		result := ""
 		for _, name := range fields[1:] {
+			f.addSteps(sessionID, s, stepPlanner, stepGeneric)
 			var err error
 			if result, err = callTool(ctx, s, name, json.RawMessage("{}")); err != nil {
 				return "", err
 			}
-			f.addSteps(sessionID, s, stepGeneric)
+			if result == "@hang" {
+				<-ctx.Done()
+				return "", nil
+			}
+		}
+		return "tool said: " + result, nil
+	case "@nativetool":
+		name, args, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(input, "@nativetool")), " ")
+		f.chunk(sessionID, "tool_call", "")
+		f.addSteps(sessionID, s, stepPlanner, stepGeneric, stepPlanner, stepGeneric)
+		result, err := callTool(ctx, s, name, json.RawMessage(args))
+		if err != nil {
+			return "", err
+		}
+		return "tool said: " + result, nil
+	case "@serial":
+		names := fields[1:]
+		initSteps := make([]string, 0, 1+len(names))
+		initSteps = append(initSteps, stepPlanner)
+		for range names {
+			initSteps = append(initSteps, stepGeneric)
+		}
+		f.addSteps(sessionID, s, initSteps...)
+		result := ""
+		for _, name := range names {
+			var err error
+			if result, err = callTool(ctx, s, name, json.RawMessage("{}")); err != nil {
+				return "", err
+			}
 		}
 		return "tool said: " + result, nil
 	case "@parallel":
@@ -834,12 +866,11 @@ func (f *fake) respond(ctx context.Context, s *fakeSession, sessionID, input str
 			calls = append(calls, map[string]any{"name": name, "arguments": map[string]any{}})
 		}
 		args, _ := json.Marshal(map[string]any{"calls": calls})
-		f.addSteps(sessionID, s, stepPlanner)
+		f.addSteps(sessionID, s, stepPlanner, stepGeneric)
 		result, err := callTool(ctx, s, "parallel", args)
 		if err != nil {
 			return "", err
 		}
-		f.addSteps(sessionID, s, stepGeneric)
 		return "tool said: " + result, nil
 	}
 	f.chunk(sessionID, "agent_thought_chunk", "thinking")

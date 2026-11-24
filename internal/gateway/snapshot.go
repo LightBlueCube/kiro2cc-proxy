@@ -16,12 +16,13 @@ import (
 
 // snapshot records a position of an ACP session: it held the first Count
 // body messages of a client transcript whose prefix hash is Hash. Steps is
-// the session's native step count there when a finished turn left it there;
-// the session can be rewound to such a position. 0 means unknown.
+// the session's native step count there when a finished turn or settled
+// input left it there; the session can be rewound to such a position. 0
+// means unknown.
 //
 // A session keeps its latest position and the rewindable ones before it:
 //
-//	[n=2 steps=2] [n=4 steps=6] [n=5 latest, parked on a tool call]
+//	[n=2 steps=2] [n=3 steps=3] [n=4 latest, parked on a tool call]
 type snapshot struct {
 	User      string    `json:"user"`
 	Account   string    `json:"account"`
@@ -120,6 +121,24 @@ func (s *snapshotStore) positionLocked(ref string, count int, hash string) (snap
 	}
 	for _, snap := range positions {
 		if snap.Count == count && snap.Hash == hash {
+			return snap, true
+		}
+	}
+	return snapshot{}, false
+}
+
+// prefixInSession returns the longest position of the session up to maxCount
+// that matches t's prefix.
+func (s *snapshotStore) prefixInSession(account, sessionID string, t *transcript, maxCount int) (snapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	positions := s.bySession[sessionRef(account, sessionID)]
+	if len(positions) == 0 || s.expired(positions) {
+		return snapshot{}, false
+	}
+	for i := len(positions) - 1; i >= 0; i-- {
+		snap := positions[i]
+		if snap.Count <= maxCount && snap.Count < len(t.body) && t.hashes[snap.Count] == snap.Hash {
 			return snap, true
 		}
 	}

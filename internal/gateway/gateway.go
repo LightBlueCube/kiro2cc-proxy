@@ -623,8 +623,11 @@ func (g *Gateway) consume(ctx context.Context, at *activeTurn, r *run, w *respon
 		case agy.EventExternal:
 			group := ev.Payload.(*callGroup)
 			reply := conv.Message{Role: conv.RoleAssistant, Text: text.String(), ToolCalls: group.toolCalls()}
-			usage := g.partUsage(at)
+			usage, inputSteps := g.partUsage(at)
 			g.park(at, group)
+			if inputSteps > 0 {
+				g.record(at, r, nil, inputSteps)
+			}
 			mark := g.record(at, r, &reply, 0)
 			// The model call that made the tool calls succeeded.
 			if !release() || !w.send(conv.Event{ToolCalls: reply.ToolCalls}) || !w.sendUsage(usage) || !w.send(conv.Event{Anchor: mark}) || !w.send(conv.Event{Finish: conv.FinishToolCalls}) {
@@ -777,23 +780,24 @@ func minusUsage(a, b conv.Usage) conv.Usage {
 
 // partUsage returns the tokens of the turn's model calls since its last
 // response that reported some, for a response that ends on client tool
-// calls. Each response then counts its own calls, as OpenAI's do, and
-// clients see the context size instead of the whole agent loop's sum. It
-// returns nil when the language server cannot tell; the turn's last
-// response, which reports the turn's total less what was reported, then
-// counts these calls.
-func (g *Gateway) partUsage(at *activeTurn) *conv.Usage {
+// calls, along with the session's rewindable step count right before that
+// model call (0 when unknown or when multiple model calls ran). Each
+// response then counts its own calls, as OpenAI's do, and clients see the
+// context size instead of the whole agent loop's sum. It returns nil when
+// the language server cannot tell; the turn's last response, which reports
+// the turn's total less what was reported, then counts these calls.
+func (g *Gateway) partUsage(at *activeTurn) (*conv.Usage, int) {
 	g.mu.Lock()
 	proc := at.sess.proc
 	g.mu.Unlock()
-	sum, steps, err := proc.TurnUsage(context.Background(), at.sess.id, at.usageSteps)
+	sum, inputSteps, steps, err := proc.TurnUsage(context.Background(), at.sess.id, at.usageSteps)
 	if err != nil {
 		g.log.Warn("usage of the turn's model calls unavailable; the turn's last response counts them", "session", at.sess.id, "err", err)
-		return nil
+		return nil, 0
 	}
 	u := usageFrom(&sum)
 	at.usageSteps, at.reported = steps, plusUsage(at.reported, u)
-	return &u
+	return &u, inputSteps
 }
 
 // record stores the session's latest position: the request's transcript

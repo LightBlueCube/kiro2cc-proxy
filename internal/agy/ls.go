@@ -63,8 +63,10 @@ func (p *Proc) StepCount(ctx context.Context, sessionID string, known int) (int,
 
 // TurnUsage sums the model calls of the session's running turn from step
 // from on (a lower bound is fine: earlier turns' steps are skipped), and
-// returns the sum with the session's step count.
-func (p *Proc) TurnUsage(ctx context.Context, sessionID string, from int) (Usage, int, error) {
+// returns the sum, the session's step count before the first model call in
+// that range (0 when there was none or native tools already ran in it), and
+// the session's total step count.
+func (p *Proc) TurnUsage(ctx context.Context, sessionID string, from int) (Usage, int, int, error) {
 	var result struct {
 		Steps []struct {
 			Metadata struct {
@@ -80,27 +82,36 @@ func (p *Proc) TurnUsage(ctx context.Context, sessionID string, from int) (Usage
 	}
 	err := p.lsCall(ctx, sessionID, "GetCascadeTrajectorySteps", map[string]any{"cascadeId": sessionID, "stepOffset": from}, &result)
 	if err != nil {
-		return Usage{}, 0, err
+		return Usage{}, 0, 0, err
 	}
 	steps := result.Steps
 	if len(steps) == 0 {
-		return Usage{}, from, nil
+		return Usage{}, 0, from, nil
 	}
 
 	// The newest step belongs to the running turn.
 	turn := steps[len(steps)-1].Metadata.ExecutionID
 	var sum Usage
-	for _, step := range steps {
+	calls, firstIdx := 0, 0
+	for i, step := range steps {
 		u := step.Metadata.ModelUsage
 		if u == nil || step.Metadata.ExecutionID != turn {
 			continue
 		}
+		if calls == 0 {
+			firstIdx = i
+		}
+		calls++
 		sum.InputTokens += u.InputTokens
 		sum.CachedReadTokens += u.CacheReadTokens
 		sum.OutputTokens += u.OutputTokens
 		sum.ThoughtTokens += u.ThinkingTokens
 	}
-	return sum, from + len(steps), nil
+	inputSteps := 0
+	if calls == 1 {
+		inputSteps = from + firstIdx
+	}
+	return sum, inputSteps, from + len(steps), nil
 }
 
 // Rewind keeps the session's first keep steps (keep ≥ 1) and resumes it, so
