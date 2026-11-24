@@ -125,6 +125,7 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/keys", h.authed(h.listKeys))
 	h.mux.HandleFunc("POST /admin/api/keys", h.authed(h.createKey))
 	h.mux.HandleFunc("PATCH /admin/api/keys/{hash}", h.authed(h.updateKey))
+	h.mux.HandleFunc("POST /admin/api/keys/{hash}/reset-usage", h.authed(h.resetKeyUsage))
 	h.mux.HandleFunc("POST /admin/api/keys/{hash}/revoke", h.authed(h.revokeKey))
 	h.mux.HandleFunc("POST /admin/api/keys/{hash}/restore", h.authed(h.restoreKey))
 	h.mux.HandleFunc("DELETE /admin/api/keys/{hash}", h.authed(h.deleteKey))

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -698,5 +699,174 @@ func TestLegacyArgonPoolMigration(t *testing.T) {
 	}
 	if found, err := st.Setting(ctx, "settings", &saved); err != nil || !found || len(saved.WarmupModels) != 1 || saved.WarmupModels["gemini"] != "gemini-3.8-flash" {
 		t.Fatalf("migrated settings = %+v (found=%v), %v", saved, found, err)
+	}
+}
+
+func TestResetKeyUsage(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := st.AddAccount(ctx, Account{ID: "a1", Name: "main", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddKey(ctx, Key{Hash: "h1", Name: "alice", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddKey(ctx, Key{Hash: "h2", Name: "bob", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.ResetKeyUsage(ctx, "missing", KeyUsageReset{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ResetKeyUsage(missing) = %v, want ErrNotFound", err)
+	}
+
+	costG, costC, costBob := 1.25, 2.50, 0.75
+	for _, r := range []Request{
+		{At: now, KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: StatusOK, Input: 100, Output: 20, CostUSD: &costG},
+		{At: now.Add(time.Second), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: StatusOK, Input: 200, Output: 40, CostUSD: &costC},
+		{At: now.Add(2 * time.Second), KeyHash: "h2", KeyName: "bob", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: StatusOK, Input: 50, Output: 10, CostUSD: &costBob},
+	} {
+		if err := st.AddRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reqs, err := st.Requests(ctx, RequestFilter{}, 0, 10)
+	if err != nil || len(reqs) != 3 {
+		t.Fatalf("requests = %d, %v", len(reqs), err)
+	}
+	// reqs are newest-first: [2]=h1 gemini, [1]=h1 claude-gpt, [0]=h2 gemini
+	if err := st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[2].ID: 0.12, reqs[0].ID: 0.05}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AttributeQuota(ctx, "a1", "3p-weekly", now.Add(time.Minute), map[int64]float64{reqs[1].ID: 0.25}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Per-group spend-only reset clears only h1's gemini spend.
+	if err := st.ResetKeyUsage(ctx, "h1", KeyUsageReset{Group: "gemini"}); err != nil {
+		t.Fatal(err)
+	}
+	if spends, err := st.KeySpends(ctx, "h1"); err != nil || !reflect.DeepEqual(spends, []KeySpend{{KeyHash: "h1", Group: "claude-gpt", CostUSD: 2.50}}) {
+		t.Fatalf("h1 spends after gemini reset = %+v, %v", spends, err)
+	}
+	if spends, err := st.KeySpends(ctx, "h2"); err != nil || len(spends) != 1 || spends[0].CostUSD != 0.75 {
+		t.Fatalf("h2 spends touched = %+v, %v", spends, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h1"); err != nil || len(quotas) != 2 {
+		t.Fatalf("h1 quotas should stay intact: %+v, %v", quotas, err)
+	}
+	if totals, err := st.KeyTotals(ctx, "h1"); err != nil || len(totals) != 2 {
+		t.Fatalf("h1 totals should stay intact: %+v, %v", totals, err)
+	}
+
+	// 2. Add unsettled pre-reset requests in both groups, then reset gemini
+	// with IncludeStats: pre-reset gemini must not re-enter key_quota when
+	// attributed later, while pre-reset claude-gpt and post-reset gemini do.
+	costPending := 0.50
+	if err := st.AddRequest(ctx, Request{At: now.Add(2 * time.Minute), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: StatusOK, Input: 10, Output: 5, CostUSD: &costPending}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddRequest(ctx, Request{At: now.Add(2*time.Minute + time.Second), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: StatusOK, Input: 10, Output: 5, CostUSD: &costPending}); err != nil {
+		t.Fatal(err)
+	}
+	beforeReqs, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10)
+	if err != nil || len(beforeReqs) != 4 {
+		t.Fatalf("beforeReqs = %d, %v", len(beforeReqs), err)
+	}
+	preResetClaudeID, preResetGeminiID := beforeReqs[0].ID, beforeReqs[1].ID
+
+	isGemini := func(model string) bool {
+		return !strings.HasPrefix(model, "claude-") && !strings.HasPrefix(model, "gpt-oss-")
+	}
+	if err := st.ResetKeyUsage(ctx, "h1", KeyUsageReset{Group: "gemini", IncludeStats: true, MatchModel: isGemini}); err != nil {
+		t.Fatal(err)
+	}
+	if totals, err := st.KeyTotals(ctx, "h1"); err != nil || len(totals) != 1 || totals[0].Model != "claude-sonnet-4-6" {
+		t.Fatalf("h1 totals after gemini+stats reset = %+v, %v", totals, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h1"); err != nil || len(quotas) != 1 || quotas[0].Group != "claude-gpt" {
+		t.Fatalf("h1 quotas after gemini+stats reset = %+v, %v", quotas, err)
+	}
+
+	// Post-reset gemini request, then attribute all three unsettled requests.
+	if err := st.AddRequest(ctx, Request{At: now.Add(3 * time.Minute), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: StatusOK, Input: 10, Output: 5, CostUSD: &costPending}); err != nil {
+		t.Fatal(err)
+	}
+	afterReqs, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 1)
+	if err != nil || len(afterReqs) != 1 {
+		t.Fatalf("afterReqs = %d, %v", len(afterReqs), err)
+	}
+	postResetGeminiID := afterReqs[0].ID
+
+	if err := st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(10*time.Minute), map[int64]float64{preResetGeminiID: 0.30, postResetGeminiID: 0.04}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AttributeQuota(ctx, "a1", "3p-weekly", now.Add(10*time.Minute), map[int64]float64{preResetClaudeID: 0.10}); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-reset gemini request still keeps its quota_used on requests table,
+	// while key_quota only counts the post-reset gemini share (0.04) and both
+	// claude-gpt shares (0.25 + 0.10 = 0.35).
+	allH1Reqs, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10)
+	if err != nil || len(allH1Reqs) != 5 {
+		t.Fatalf("h1 request history lost: %d, %v", len(allH1Reqs), err)
+	}
+	for _, r := range allH1Reqs {
+		if r.ID == preResetGeminiID && (r.QuotaUsed == nil || *r.QuotaUsed != 0.30) {
+			t.Fatalf("pre-reset request quota_used = %v, want 0.30", r.QuotaUsed)
+		}
+	}
+	wantQuotas := []KeyQuota{
+		{KeyHash: "h1", Account: "a1", AccountName: "main", Group: "claude-gpt", Used: 0.35},
+		{KeyHash: "h1", Account: "a1", AccountName: "main", Group: "gemini", Used: 0.04},
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h1"); err != nil || !reflect.DeepEqual(quotas, wantQuotas) {
+		t.Fatalf("h1 quotas after attribution = %+v, %v; want %+v", quotas, err, wantQuotas)
+	}
+
+	// 3. Full reset without stats clears all spend but keeps quota & totals.
+	if err := st.ResetKeyUsage(ctx, "h1", KeyUsageReset{}); err != nil {
+		t.Fatal(err)
+	}
+	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 0 {
+		t.Fatalf("h1 spends after full reset = %+v, %v", spends, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h1"); err != nil || len(quotas) != 2 {
+		t.Fatalf("h1 quotas after spend-only full reset = %+v, %v", quotas, err)
+	}
+	if totals, err := st.KeyTotals(ctx, "h1"); err != nil || len(totals) != 2 {
+		t.Fatalf("h1 totals after spend-only full reset = %+v, %v", totals, err)
+	}
+
+	// 4. Full reset with stats clears quota & totals too, leaving h2 and history.
+	if err := st.AddRequest(ctx, Request{At: now.Add(11 * time.Minute), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: StatusOK, Input: 10, Output: 5, CostUSD: &costPending}); err != nil {
+		t.Fatal(err)
+	}
+	pendingAll, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 1)
+	if err != nil || len(pendingAll) != 1 {
+		t.Fatalf("pendingAll = %d, %v", len(pendingAll), err)
+	}
+	if err := st.ResetKeyUsage(ctx, "h1", KeyUsageReset{IncludeStats: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AttributeQuota(ctx, "a1", "3p-weekly", now.Add(20*time.Minute), map[int64]float64{pendingAll[0].ID: 0.20}); err != nil {
+		t.Fatal(err)
+	}
+	if spends, err := st.KeySpends(ctx, "h1"); err != nil || len(spends) != 0 {
+		t.Fatalf("h1 spends after full+stats reset = %+v, %v", spends, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h1"); err != nil || len(quotas) != 0 {
+		t.Fatalf("h1 quotas after full+stats reset = %+v, %v", quotas, err)
+	}
+	if totals, err := st.KeyTotals(ctx, "h1"); err != nil || len(totals) != 0 {
+		t.Fatalf("h1 totals after full+stats reset = %+v, %v", totals, err)
+	}
+	if quotas, err := st.KeyQuotas(ctx, "h2"); err != nil || len(quotas) != 1 || quotas[0].Used != 0.05 {
+		t.Fatalf("h2 quotas touched = %+v, %v", quotas, err)
 	}
 }

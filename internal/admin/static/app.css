@@ -91,6 +91,9 @@ tr.revoked .key-info { text-decoration: line-through; }
 .lines.quota { justify-items: end; font-variant-numeric: tabular-nums; }
 th.fit, td.fit { width: 1%; }
 .actions { display: flex; gap: 8px; }
+.key-reset { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.key-reset h3 { margin-top: 0; }
+.key-reset label.check { display: inline-flex; padding-bottom: 0; color: var(--fg); font-size: 13px; margin-bottom: 8px; }
 .nowrap { white-space: nowrap; }
 details.fold { margin-top: 16px; }
 details.fold > summary { cursor: pointer; font-weight: 600; }

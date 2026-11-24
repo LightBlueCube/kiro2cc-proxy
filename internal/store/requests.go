@@ -422,17 +422,18 @@ func (s *Store) AttributeQuota(ctx context.Context, account, bucket string, thro
 	defer tx.Rollback()
 	for id, share := range shares {
 		var keyHash, reqAccount, reqAccountName, group string
+		var keyQuotaReset int
 		err := tx.QueryRowContext(ctx,
-			`UPDATE requests SET quota_used = ? WHERE id = ? AND quota_used IS NULL RETURNING key_hash, account, `+requestAccountNameExpr+`, quota_group`,
+			`UPDATE requests SET quota_used = ? WHERE id = ? AND quota_used IS NULL RETURNING key_hash, account, `+requestAccountNameExpr+`, quota_group, key_quota_reset`,
 			share, id,
-		).Scan(&keyHash, &reqAccount, &reqAccountName, &group)
+		).Scan(&keyHash, &reqAccount, &reqAccountName, &group, &keyQuotaReset)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("request %d: %w", id, ErrNotFound)
 		}
 		if err != nil {
 			return fmt.Errorf("request %d: %w", id, err)
 		}
-		if share > 0 && !IsSystemKey(keyHash) && reqAccount != "" && group != "" {
+		if share > 0 && keyQuotaReset == 0 && !IsSystemKey(keyHash) && reqAccount != "" && group != "" {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO key_quota (key_hash, account, account_name, grp, used) VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT (key_hash, account, grp) DO UPDATE SET used = used + excluded.used,
 					account_name = CASE WHEN excluded.account_name != '' THEN excluded.account_name ELSE key_quota.account_name END`,

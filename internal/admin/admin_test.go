@@ -431,6 +431,156 @@ func TestKeyLimits(t *testing.T) {
 	}
 }
 
+func TestResetKeyUsage(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if err := SetPassword(ctx, e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+
+	create := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "limit_total": 10}, nil)
+	if create.status != http.StatusOK {
+		t.Fatalf("create = %d %s", create.status, create.raw)
+	}
+	token, _ := create.body["key"].(string)
+	getKey := func() keyView {
+		t.Helper()
+		r := c.do("GET", "/admin/api/keys", nil, nil)
+		if r.status != http.StatusOK {
+			t.Fatalf("list keys = %d %s", r.status, r.raw)
+		}
+		var list keysView
+		if err := json.Unmarshal([]byte(r.raw), &list); err != nil || len(list.Keys) != 1 {
+			t.Fatalf("keys = %s (%v)", r.raw, err)
+		}
+		return list.Keys[0]
+	}
+	hash := getKey().Hash
+
+	for _, bad := range []map[string]any{
+		{"group": "nope"},
+		{"group": "argon"},
+		{"unknown": true},
+	} {
+		if r := c.do("POST", "/admin/api/keys/"+hash+"/reset-usage", bad, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("reset %v = %d %s", bad, r.status, r.raw)
+		}
+	}
+	if r := c.do("POST", "/admin/api/keys/missing/reset-usage", map[string]any{}, nil); r.status != http.StatusNotFound {
+		t.Fatalf("reset missing = %d %s", r.status, r.raw)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	costG, costC := 4.0, 6.0
+	for _, row := range []store.Request{
+		{At: now, KeyHash: hash, KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 100, Output: 20, CostUSD: &costG},
+		{At: now.Add(time.Second), KeyHash: hash, KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "claude-gpt", Model: "claude-sonnet-4-6", Status: store.StatusOK, Input: 200, Output: 40, CostUSD: &costC},
+	} {
+		if err := e.st.AddRequest(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reqs, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: hash}, 0, 10)
+	if err != nil || len(reqs) != 2 {
+		t.Fatalf("requests = %d, %v", len(reqs), err)
+	}
+	if err := e.st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[1].ID: 0.15}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.AttributeQuota(ctx, "a1", "3p-weekly", now.Add(time.Minute), map[int64]float64{reqs[0].ID: 0.20}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Reset gemini spend only; claude-gpt spend, all quota, and totals stay.
+	if r := c.do("POST", "/admin/api/keys/"+hash+"/reset-usage", map[string]any{"group": "gemini", "include_stats": false}, nil); r.status != http.StatusOK {
+		t.Fatalf("reset gemini = %d %s", r.status, r.raw)
+	}
+	kv := getKey()
+	if !reflect.DeepEqual(kv.Spent, map[string]float64{"claude-gpt": 6.0}) {
+		t.Fatalf("spent after gemini reset = %+v", kv.Spent)
+	}
+	if len(kv.Quota) != 2 || kv.Totals.Requests != 2 {
+		t.Fatalf("quota/totals should remain intact: quota=%+v totals=%+v", kv.Quota, kv.Totals)
+	}
+	// /user/api/key sees the reset immediately too.
+	userRes := c.do("GET", "/user/api/key", nil, map[string]string{"Authorization": "Bearer " + token})
+	if userRes.status != http.StatusOK {
+		t.Fatalf("/user/api/key = %d %s", userRes.status, userRes.raw)
+	}
+	var uk userKeyView
+	if err := json.Unmarshal([]byte(userRes.raw), &uk); err != nil || !reflect.DeepEqual(uk.Key.Spent, map[string]float64{"claude-gpt": 6.0}) {
+		t.Fatalf("user key spent = %+v (%v)", uk.Key.Spent, err)
+	}
+
+	// 2. Reset gemini with stats (including an unsettled gemini request).
+	if err := e.st.AddRequest(ctx, store.Request{At: now.Add(2 * time.Minute), KeyHash: hash, KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK, Input: 50, Output: 10, CostUSD: &costG}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: hash}, 0, 1)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending = %d, %v", len(pending), err)
+	}
+	if r := c.do("POST", "/admin/api/keys/"+hash+"/reset-usage", map[string]any{"group": "gemini", "include_stats": true}, nil); r.status != http.StatusOK {
+		t.Fatalf("reset gemini+stats = %d %s", r.status, r.raw)
+	}
+	if err := e.st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(10*time.Minute), map[int64]float64{pending[0].ID: 0.11}); err != nil {
+		t.Fatal(err)
+	}
+	kv = getKey()
+	if !reflect.DeepEqual(kv.Spent, map[string]float64{"claude-gpt": 6.0}) {
+		t.Fatalf("spent after gemini+stats = %+v", kv.Spent)
+	}
+	if _, hasGemini := kv.Quota["gemini"]; hasGemini || kv.Quota["claude-gpt"].Used != 0.20 {
+		t.Fatalf("quota after gemini+stats = %+v", kv.Quota)
+	}
+	if kv.Totals.Requests != 1 || len(kv.Totals.Models) != 1 || kv.Totals.Models[0].Model != "claude-sonnet-4-6" {
+		t.Fatalf("totals after gemini+stats = %+v", kv.Totals)
+	}
+
+	// 3. Reset all spend only; remaining claude-gpt quota & totals stay.
+	if r := c.do("POST", "/admin/api/keys/"+hash+"/reset-usage", map[string]any{"group": "", "include_stats": false}, nil); r.status != http.StatusOK {
+		t.Fatalf("reset all = %d %s", r.status, r.raw)
+	}
+	kv = getKey()
+	if len(kv.Spent) != 0 || kv.Quota["claude-gpt"].Used != 0.20 || kv.Totals.Requests != 1 {
+		t.Fatalf("after reset all spend = %+v", kv)
+	}
+
+	// 4. Reset all with stats clears remaining quota & totals, preserving history.
+	if r := c.do("POST", "/admin/api/keys/"+hash+"/reset-usage", map[string]any{"group": "", "include_stats": true}, nil); r.status != http.StatusOK {
+		t.Fatalf("reset all+stats = %d %s", r.status, r.raw)
+	}
+	kv = getKey()
+	if len(kv.Spent) != 0 || len(kv.Quota) != 0 || kv.Totals.Requests != 0 {
+		t.Fatalf("after reset all+stats = %+v", kv)
+	}
+	if allReqs, err := e.st.Requests(ctx, store.RequestFilter{KeyHash: hash}, 0, 10); err != nil || len(allReqs) != 3 {
+		t.Fatalf("request history after resets = %d, %v", len(allReqs), err)
+	}
+
+	entries, err := e.st.AuditLog(ctx, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotDetails []string
+	for _, a := range entries {
+		if a.Action == "key_usage_reset" {
+			gotDetails = append(gotDetails, a.Detail)
+		}
+	}
+	wantDetails := []string{
+		hash + " all +stats",
+		hash + " all",
+		hash + " gemini +stats",
+		hash + " gemini",
+	}
+	if !reflect.DeepEqual(gotDetails, wantDetails) {
+		t.Fatalf("audit key_usage_reset = %v, want %v", gotDetails, wantDetails)
+	}
+}
+
 func TestAccountProxy(t *testing.T) {
 	e := newEnv(t)
 	if err := SetPassword(context.Background(), e.st, testPassword); err != nil {

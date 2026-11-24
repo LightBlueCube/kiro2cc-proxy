@@ -267,6 +267,30 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
+type resetKeyUsageRequest struct {
+	Group        string `json:"group"`
+	IncludeStats bool   `json:"include_stats"`
+}
+
+func (h *Handler) resetKeyUsage(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	var req resetKeyUsageRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := h.control.ResetKeyUsage(r.Context(), hash, req.Group, req.IncludeStats); err != nil {
+		h.fail(w, "reset key usage", err)
+		return
+	}
+	scope := cmp.Or(req.Group, "all")
+	detail := hash + " " + scope
+	if req.IncludeStats {
+		detail += " +stats"
+	}
+	h.audit(r, "key_usage_reset", detail)
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
 func (h *Handler) revokeKey(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
 	if err := h.control.RevokeKey(r.Context(), hash); err != nil {

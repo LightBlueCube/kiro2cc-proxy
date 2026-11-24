@@ -129,11 +129,12 @@ var migrations = []string{
 		output        INTEGER NOT NULL DEFAULT 0,
 		reasoning     INTEGER NOT NULL DEFAULT 0,
 		cost_usd      REAL,
-		quota_group   TEXT NOT NULL DEFAULT '',
-		quota_used    REAL,
-		quota_skip    TEXT NOT NULL DEFAULT '',
-		call_token    TEXT NOT NULL DEFAULT '',
-		session       TEXT NOT NULL DEFAULT ''
+		quota_group     TEXT NOT NULL DEFAULT '',
+		quota_used      REAL,
+		quota_skip      TEXT NOT NULL DEFAULT '',
+		key_quota_reset INTEGER NOT NULL DEFAULT 0,
+		call_token      TEXT NOT NULL DEFAULT '',
+		session         TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX requests_at ON requests (at);
 	CREATE INDEX requests_key_at ON requests (key_hash, at);

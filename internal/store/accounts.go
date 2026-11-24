@@ -228,6 +228,108 @@ func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
 		u.Note, string(models), u.MaxWorkers, u.LimitTotal, string(limits), hash))
 }
 
+// KeyUsageReset selects which cumulative counters ResetKeyUsage clears for a
+// key. An empty Group clears every quota group; a non-empty Group clears only
+// that group. When IncludeStats is true, key_quota and key_totals are cleared
+// too; for a single group, MatchModel selects the key_totals models belonging
+// to that group.
+type KeyUsageReset struct {
+	Group        string
+	IncludeStats bool
+	MatchModel   func(model string) bool
+}
+
+// ResetKeyUsage clears a key's cumulative spend in key_usage and, when
+// requested, its key_quota and key_totals counters without deleting request
+// history. Unsettled requests in the cleared quota scope are marked so later
+// attribution still populates requests.quota_used without re-adding them to
+// key_quota.
+func (s *Store) ResetKeyUsage(ctx context.Context, hash string, r KeyUsageReset) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var exists int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM api_keys WHERE hash = ?`, hash).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	if r.Group == "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM key_usage WHERE key_hash = ?`, hash); err != nil {
+			return err
+		}
+		if r.IncludeStats {
+			if err := clearAllKeyStats(ctx, tx, hash); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM key_usage WHERE key_hash = ? AND grp = ?`, hash, r.Group); err != nil {
+		return err
+	}
+	if r.IncludeStats {
+		if err := clearGroupKeyStats(ctx, tx, hash, r.Group, r.MatchModel); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func clearAllKeyStats(ctx context.Context, tx *sql.Tx, hash string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM key_quota WHERE key_hash = ?`, hash); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET key_quota_reset = 1 WHERE key_hash = ? AND quota_used IS NULL AND quota_skip = ''`, hash); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM key_totals WHERE key_hash = ?`, hash)
+	return err
+}
+
+func clearGroupKeyStats(ctx context.Context, tx *sql.Tx, hash, group string, matchModel func(string) bool) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM key_quota WHERE key_hash = ? AND grp = ?`, hash, group); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET key_quota_reset = 1 WHERE key_hash = ? AND quota_group = ? AND quota_used IS NULL AND quota_skip = ''`, hash, group); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT model FROM key_totals WHERE key_hash = ?`, hash)
+	if err != nil {
+		return err
+	}
+	var models []string
+	for rows.Next() {
+		var model string
+		if err := rows.Scan(&model); err != nil {
+			rows.Close()
+			return err
+		}
+		if matchModel(model) {
+			models = append(models, model)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, model := range models {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM key_totals WHERE key_hash = ? AND model = ?`, hash, model); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) RevokeKey(ctx context.Context, hash string, at time.Time) error {
 	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = ? WHERE hash = ? AND revoked_at IS NULL`, at.Unix(), hash))
 }

@@ -240,6 +240,7 @@ function polling(container, interval, render) {
 // groupName labels an account's quota pool (weekly bucket).
 const groupName = g => lookup("group", g) || g;
 const QUOTA_GROUPS = ["gemini", "claude-gpt"];
+const modelQuotaGroup = id => id.startsWith("claude-") || id.startsWith("gpt-oss-") ? "claude-gpt" : "gemini";
 
 // quotaText lists shares by group: "Gemini 0.05% · Claude + GPT 0.11%".
 const quotaText = (byGroup, digits) => joined(...Object.entries(byGroup)
@@ -485,9 +486,11 @@ views.keys = container => {
             h("button", { onclick: () => editKey(k) }, t("keys.edit")),
             h("button", { class: "danger", onclick: e => revoke(k, e.target) }, t("keys.revoke"))) },
     ], data.keys, k => k.revoked_at ? "revoked" : ""));
+    return data.keys;
   }
 
   function editKey(k) {
+    let current = k;
     const noteInput = h("input", { value: k.note });
     const models = modelPicker(offered, k.models);
     const limits = limitEditor(groups, k);
@@ -500,6 +503,60 @@ views.keys = container => {
         await load();
       }, event.submitter);
     };
+
+    const includeStats = h("input", { type: "checkbox" });
+    const hasResettable = group => {
+      const hasSpend = group
+        ? (current.spent[group] || 0) > 0
+        : Object.values(current.spent).some(v => v > 0);
+      if (hasSpend || !includeStats.checked) return hasSpend;
+      const hasQuota = group
+        ? (current.quota[group]?.used || 0) > 0
+        : Object.values(current.quota).some(q => (q?.used || 0) > 0);
+      const hasTotals = group
+        ? current.totals.models.some(m => modelQuotaGroup(m.model) === group)
+        : current.totals.requests > 0;
+      return hasQuota || hasTotals;
+    };
+    const confirmReset = (group, withStats) => {
+      if (!group) {
+        return withStats
+          ? t("keys.reset.confirm_all_stats", { name: current.name })
+          : t("keys.reset.confirm_all", { name: current.name });
+      }
+      const label = groupName(group);
+      return withStats
+        ? t("keys.reset.confirm_group_stats", { name: current.name, group: label })
+        : t("keys.reset.confirm_group", { name: current.name, group: label });
+    };
+    const resetButtons = [];
+    const syncResetButtons = () => {
+      for (const { group, button } of resetButtons) {
+        button.disabled = !hasResettable(group);
+      }
+    };
+    const resetUsage = (group, button) => {
+      const withStats = includeStats.checked;
+      if (!confirm(confirmReset(group, withStats))) return;
+      for (const { button: b } of resetButtons) b.disabled = true;
+      guarded(async () => {
+        await api("POST", `keys/${k.hash}/reset-usage`, { group, include_stats: withStats });
+        toast(t("keys.reset.done"));
+        const keys = await load();
+        const refreshed = keys.find(x => x.hash === k.hash);
+        if (refreshed) current = refreshed;
+      }, button).finally(syncResetButtons);
+    };
+    const makeResetButton = (group, label) => {
+      const button = h("button", { type: "button", class: "danger", onclick: () => resetUsage(group, button) }, label);
+      resetButtons.push({ group, button });
+      return button;
+    };
+    includeStats.addEventListener("change", syncResetButtons);
+    const resetAllBtn = makeResetButton("", t("keys.reset.all"));
+    const groupResetBtns = groups.map(g => makeResetButton(g, t("keys.reset.group", { group: groupName(g) })));
+    syncResetButtons();
+
     editor.replaceChildren(h("div", { class: "card" },
       h("h2", {}, t("keys.edit.title", { name: k.name })),
       h("form", { onsubmit: save },
@@ -509,7 +566,11 @@ views.keys = container => {
         h("div", { class: "row" }, limits.nodes),
         h("div", { class: "row", style: "margin-top:8px" },
           h("button", { type: "submit", class: "primary" }, t("common.save")),
-          h("button", { type: "button", onclick: () => editor.replaceChildren() }, t("common.cancel"))))));
+          h("button", { type: "button", onclick: () => editor.replaceChildren() }, t("common.cancel")))),
+      h("div", { class: "key-reset" },
+        h("h3", {}, t("keys.reset.title")),
+        h("label", { class: "check" }, includeStats, t("keys.reset.stats")),
+        h("div", { class: "row" }, resetAllBtn, ...groupResetBtns))));
   }
 
   function revoke(k, button) {
@@ -1094,7 +1155,6 @@ views.accounts = container => {
     return h("div", { class: "card" }, h("p", { class: "bad" }, t("accounts.verify")), h("p", {}, link));
   }
 
-  const modelQuotaGroup = id => id.startsWith("claude-") || id.startsWith("gpt-oss-") ? "claude-gpt" : "gemini";
   const bucketQuotaGroup = id => id.startsWith("3p-") ? "claude-gpt"
     : id.startsWith("gemini-") ? "gemini" : "";
 

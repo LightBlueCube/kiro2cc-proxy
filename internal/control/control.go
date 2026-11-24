@@ -991,6 +991,24 @@ func (c *Control) UpdateKey(ctx context.Context, hash string, u store.KeyUpdate)
 	return nil
 }
 
+// ResetKeyUsage clears a key's cumulative spend (key_usage), across every
+// quota group when group is empty or for one group. With includeStats, it also
+// clears key_quota and key_totals for the same scope.
+func (c *Control) ResetKeyUsage(ctx context.Context, hash, group string, includeStats bool) error {
+	if group != "" && !slices.Contains(usage.Groups, group) {
+		return &InputError{fmt.Sprintf("unknown quota group %q (known: %s)", group, strings.Join(usage.Groups, ", "))}
+	}
+	var match func(string) bool
+	if group != "" && includeStats {
+		match = func(model string) bool { return pool.QuotaGroup(model) == group }
+	}
+	return c.cfg.Store.ResetKeyUsage(ctx, hash, store.KeyUsageReset{
+		Group:        group,
+		IncludeStats: includeStats,
+		MatchModel:   match,
+	})
+}
+
 // Sessions lists the gateway's ACP sessions.
 func (c *Control) Sessions() []gateway.SessionInfo { return c.cfg.Gateway.Sessions() }
 
