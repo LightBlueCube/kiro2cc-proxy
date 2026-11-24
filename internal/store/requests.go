@@ -94,9 +94,11 @@ func IsSystemKey(keyHash string) bool {
 	return keyHash == "" || strings.HasPrefix(keyHash, "system:")
 }
 
+const requestKeyNameExpr = `COALESCE((SELECT name FROM api_keys WHERE hash = requests.key_hash), requests.key_name)`
+const requestKeyNameAggExpr = `COALESCE((SELECT name FROM api_keys WHERE hash = requests.key_hash), MAX(requests.key_name))`
 const requestAccountNameExpr = `COALESCE((SELECT name FROM accounts WHERE id = requests.account), NULLIF(requests.account_name, ''), requests.account)`
 
-const requestColumns = `id, at, key_hash, key_name, account, ` + requestAccountNameExpr + `, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
+const requestColumns = `id, at, key_hash, ` + requestKeyNameExpr + `, account, ` + requestAccountNameExpr + `, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
 	duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, quota_used, quota_skip, call_token, session`
 
 // AddRequest stores the request, adds its cost to the key's spend, and
@@ -112,8 +114,8 @@ func (s *Store) AddRequest(ctx context.Context, r Request) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests (at, key_hash, key_name, account, account_name, model, slug, effort, api, stream, anchor, mode, replay_reason, status, error, finish,
-		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, call_token, session) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.At.UnixMilli(), r.KeyHash, r.KeyName, r.Account, r.AccountName, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Anchor, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
+		duration_ms, ttft_ms, input, cached, output, reasoning, cost_usd, quota_group, call_token, session) VALUES (?, ?, COALESCE((SELECT name FROM api_keys WHERE hash = ?), ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.At.UnixMilli(), r.KeyHash, r.KeyHash, r.KeyName, r.Account, r.AccountName, r.Model, r.Slug, r.Effort, r.API, r.Stream, r.Anchor, r.Mode, r.ReplayReason, r.Status, r.Error, r.Finish,
 		r.Duration.Milliseconds(), ttft, r.Input, r.Cached, r.Output, r.Reasoning, r.CostUSD, r.QuotaGroup, r.CallToken, r.Session)
 	if err != nil {
 		return err
@@ -249,8 +251,7 @@ const (
 // Summarize totals matching requests by key hash, model, account, or day.
 // Days start at local midnight for a zone tzOffset east of UTC.
 func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tzOffset time.Duration) ([]Summary, error) {
-	// A key's name never changes, so any of its requests carries it.
-	group, keyName, accountName := "", "MIN(key_name)", "''"
+	group, keyName, accountName := "", requestKeyNameAggExpr, "''"
 	switch by {
 	case ByKey:
 		group = "key_hash"
@@ -294,7 +295,7 @@ type RequestKey struct {
 // RequestKeys lists the keys of requests since the given time by name,
 // for filter menus.
 func (s *Store) RequestKeys(ctx context.Context, since time.Time) ([]RequestKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, MIN(key_name) FROM requests WHERE at >= ? GROUP BY 1 ORDER BY 2, 1`, since.UnixMilli())
+	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, `+requestKeyNameAggExpr+` FROM requests WHERE at >= ? GROUP BY 1 ORDER BY 2, 1`, since.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +602,7 @@ func (s *Store) QuotaUses(ctx context.Context, f RequestFilter) ([]QuotaUse, err
 		where += " AND quota_used IS NOT NULL"
 	}
 	nameExpr := `COALESCE((SELECT name FROM accounts WHERE id = requests.account), NULLIF(MAX(requests.account_name), ''), requests.account)`
-	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, MIN(key_name), account, `+nameExpr+`, quota_group, SUM(quota_used) FROM requests`+where+`
+	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, `+requestKeyNameAggExpr+`, account, `+nameExpr+`, quota_group, SUM(quota_used) FROM requests`+where+`
 		GROUP BY 1, 3, 5 ORDER BY 4, 3, 5, 2`, args...)
 	if err != nil {
 		return nil, err

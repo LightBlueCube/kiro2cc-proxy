@@ -47,29 +47,30 @@ func (s *Store) FlagPrompt(ctx context.Context, p FlaggedPrompt) error {
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO flagged_prompts
 		(fingerprint, text, first_at, last_at, flagged_until, hits, key_hash, key_name, account, account_name, session, model, request, response)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, 1, ?, COALESCE((SELECT name FROM api_keys WHERE hash = ?), ?), ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (fingerprint) DO UPDATE SET
 			last_at = excluded.last_at, flagged_until = excluded.flagged_until, hits = hits + 1,
 			key_hash = excluded.key_hash, key_name = excluded.key_name, account = excluded.account, account_name = excluded.account_name,
 			session = excluded.session, model = excluded.model, request = excluded.request, response = excluded.response`,
 		p.Fingerprint, p.Text, p.LastAt.UnixMilli(), p.LastAt.UnixMilli(), p.Until.UnixMilli(),
-		p.KeyHash, p.KeyName, p.Account, p.AccountName, p.Session, p.Model, request, response)
+		p.KeyHash, p.KeyHash, p.KeyName, p.Account, p.AccountName, p.Session, p.Model, request, response)
 	return err
 }
 
+const flaggedKeyNameExpr = `COALESCE((SELECT name FROM api_keys WHERE hash = flagged_prompts.key_hash), key_name)`
 const flaggedAccountNameExpr = `COALESCE((SELECT name FROM accounts WHERE id = flagged_prompts.account), NULLIF(account_name, ''), account)`
 
 // FlaggedPrompts lists every flagged prompt without its bodies, the latest
 // refused first.
 func (s *Store) FlaggedPrompts(ctx context.Context) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, session, model
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, `+flaggedKeyNameExpr+`, account, `+flaggedAccountNameExpr+`, session, model
 		FROM flagged_prompts ORDER BY last_at DESC, fingerprint`)
 }
 
 // ActiveFlaggedPrompts lists the prompts that are pinned or whose flag has
 // not ended at now, without their bodies.
 func (s *Store) ActiveFlaggedPrompts(ctx context.Context, now time.Time) ([]FlaggedPrompt, error) {
-	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, key_name, account, `+flaggedAccountNameExpr+`, session, model
+	return s.queryFlagged(ctx, `SELECT fingerprint, first_at, last_at, flagged_until, pinned, hits, key_hash, `+flaggedKeyNameExpr+`, account, `+flaggedAccountNameExpr+`, session, model
 		FROM flagged_prompts WHERE pinned = 1 OR flagged_until > ? ORDER BY last_at DESC, fingerprint`, now.UnixMilli())
 }
 
@@ -99,7 +100,7 @@ func (s *Store) FlaggedPrompt(ctx context.Context, fingerprint string) (FlaggedP
 	var first, last, until int64
 	var request, response []byte
 	err := s.db.QueryRowContext(ctx, `SELECT fingerprint, text, first_at, last_at, flagged_until, pinned, hits,
-		key_hash, key_name, account, `+flaggedAccountNameExpr+`, session, model, request, response
+		key_hash, `+flaggedKeyNameExpr+`, account, `+flaggedAccountNameExpr+`, session, model, request, response
 		FROM flagged_prompts WHERE fingerprint = ?`, fingerprint).
 		Scan(&p.Fingerprint, &p.Text, &first, &last, &until, &p.Pinned, &p.Hits,
 			&p.KeyHash, &p.KeyName, &p.Account, &p.AccountName, &p.Session, &p.Model, &request, &response)

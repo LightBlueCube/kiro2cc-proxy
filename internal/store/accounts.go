@@ -206,8 +206,9 @@ func (s *Store) AddKey(ctx context.Context, k Key) error {
 	return uniqueErr(err)
 }
 
-// KeyUpdate is what the admin can change on a key.
+// KeyUpdate is what the admin sets when creating or editing a key.
 type KeyUpdate struct {
+	Name       string
 	Note       string
 	Models     []string
 	MaxWorkers *int
@@ -215,17 +216,46 @@ type KeyUpdate struct {
 	Limits     map[string]float64
 }
 
-func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) error {
+// UpdateKey updates a key's editable fields and, when its name changes,
+// propagates the new display name to historical requests and flagged prompts.
+// It returns the key's previous name.
+func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) (oldName string, err error) {
 	models, err := json.Marshal(nonNil(u.Models))
 	if err != nil {
-		return err
+		return "", err
 	}
 	limits, err := json.Marshal(nonNilMap(u.Limits))
 	if err != nil {
-		return err
+		return "", err
 	}
-	return affected(s.db.ExecContext(ctx, `UPDATE api_keys SET note = ?, models = ?, max_workers = ?, limit_total = ?, limits = ? WHERE hash = ?`,
-		u.Note, string(models), u.MaxWorkers, u.LimitTotal, string(limits), hash))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	err = tx.QueryRowContext(ctx, `SELECT name FROM api_keys WHERE hash = ?`, hash).Scan(&oldName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET name = ?, note = ?, models = ?, max_workers = ?, limit_total = ?, limits = ? WHERE hash = ?`,
+		u.Name, u.Note, string(models), u.MaxWorkers, u.LimitTotal, string(limits), hash); err != nil {
+		return "", uniqueErr(err)
+	}
+	if u.Name != oldName {
+		for _, table := range []string{"requests", "flagged_prompts"} {
+			if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET key_name = ? WHERE key_hash = ?`, u.Name, hash); err != nil {
+				return "", err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return oldName, nil
 }
 
 // KeyUsageReset selects which cumulative counters ResetKeyUsage clears for a

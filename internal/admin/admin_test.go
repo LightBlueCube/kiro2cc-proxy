@@ -417,13 +417,13 @@ func TestKeyLimits(t *testing.T) {
 
 	// Switching to a total limit drops the group limits.
 	hash := list.Keys[0].Hash
-	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"note": "n", "max_workers": 4, "limit_total": 20, "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"name": "alice", "note": "n", "max_workers": 4, "limit_total": 20, "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
 		t.Fatalf("update = %d %s", r.status, r.raw)
 	}
 	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers == nil || *caller.MaxWorkers != 4 || caller.LimitTotal == nil || *caller.LimitTotal != 20 {
 		t.Fatalf("after switching to a total = %+v", caller)
 	}
-	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"note": "n"}, nil); r.status != http.StatusOK {
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"name": "alice", "note": "n"}, nil); r.status != http.StatusOK {
 		t.Fatalf("clear = %d %s", r.status, r.raw)
 	}
 	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers != nil || caller.LimitTotal != nil {
@@ -578,6 +578,124 @@ func TestResetKeyUsage(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotDetails, wantDetails) {
 		t.Fatalf("audit key_usage_reset = %v, want %v", gotDetails, wantDetails)
+	}
+}
+
+func TestRenameKey(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if err := SetPassword(ctx, e.st, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	c := e.client("203.0.113.1")
+	c.login(testPassword)
+
+	r1 := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "note": "orig"}, nil)
+	r2 := c.do("POST", "/admin/api/keys", map[string]any{"name": "bob"}, nil)
+	if r1.status != http.StatusOK || r2.status != http.StatusOK {
+		t.Fatalf("create = %d / %d", r1.status, r2.status)
+	}
+	aliceToken, _ := r1.body["key"].(string)
+	aliceCaller, ok := e.ctl.Lookup(aliceToken)
+	if !ok {
+		t.Fatal("alice lookup failed")
+	}
+	aliceHash := aliceCaller.KeyHash
+
+	now := time.Now().Truncate(time.Millisecond)
+	cost := 1.5
+	if err := e.st.AddRequest(ctx, store.Request{
+		At: now, KeyHash: aliceHash, KeyName: "alice", Account: "a1", AccountName: "main",
+		QuotaGroup: "gemini", Model: "gemini-3.8-flash", Status: store.StatusOK,
+		Input: 100, Output: 20, CostUSD: &cost,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.FlagPrompt(ctx, store.FlaggedPrompt{
+		Fingerprint: "fp-rename", Text: "sys", LastAt: now, Until: now.Add(time.Hour),
+		KeyHash: aliceHash, KeyName: "alice", Account: "a1", AccountName: "main", Model: "gemini-3.8-flash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalid names -> 400; duplicate -> 400; missing hash -> 404.
+	for _, bad := range []string{"", "   ", "a/b", "a\nb", strings.Repeat("x", 65), "bob"} {
+		if r := c.do("PATCH", "/admin/api/keys/"+aliceHash, map[string]any{"name": bad}, nil); r.status != http.StatusBadRequest {
+			t.Fatalf("rename %q = %d %s, want 400", bad, r.status, r.raw)
+		}
+	}
+	if r := c.do("PATCH", "/admin/api/keys/missing", map[string]any{"name": "next"}, nil); r.status != http.StatusNotFound {
+		t.Fatalf("missing rename = %d %s, want 404", r.status, r.raw)
+	}
+
+	// Rename alice (with surrounding whitespace) and verify every surface reflects it.
+	newName := "Alice (主力)"
+	if r := c.do("PATCH", "/admin/api/keys/"+aliceHash, map[string]any{"name": "  " + newName + "  ", "note": "updated"}, nil); r.status != http.StatusOK {
+		t.Fatalf("rename = %d %s", r.status, r.raw)
+	}
+	if caller, ok := e.ctl.Lookup(aliceToken); !ok || caller.KeyHash != aliceHash || caller.Name != newName {
+		t.Fatalf("Lookup after rename = %+v %v", caller, ok)
+	}
+	var list keysView
+	if err := json.Unmarshal([]byte(c.do("GET", "/admin/api/keys", nil, nil).raw), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Keys) != 2 || list.Keys[0].Hash != aliceHash || list.Keys[0].Name != newName || list.Keys[0].Note != "updated" || list.Keys[0].Spent["gemini"] != 1.5 {
+		t.Fatalf("keys after rename = %+v", list.Keys)
+	}
+
+	// User portal immediately serves the renamed key.
+	user := e.client("203.0.113.2")
+	auth := map[string]string{"Authorization": "Bearer " + aliceToken}
+	var kv userKeyView
+	if r := user.do("GET", "/user/api/key", nil, auth); r.status != http.StatusOK || json.Unmarshal([]byte(r.raw), &kv) != nil || kv.Key.Name != newName || kv.Key.Hash != aliceHash {
+		t.Fatalf("user key = %d %s", r.status, r.raw)
+	}
+
+	// Historical requests, usage summary, filter menu, and flagged prompts reflect the new name.
+	for _, path := range []string{
+		"/admin/api/requests?key=" + aliceHash,
+		"/admin/api/usage?by=key",
+		"/admin/api/usage/filters?since=0",
+		"/admin/api/flagged-prompts",
+	} {
+		r := c.do("GET", path, nil, nil)
+		if r.status != http.StatusOK || !strings.Contains(r.raw, newName) || strings.Contains(r.raw, `"alice"`) {
+			t.Fatalf("%s = %d %s", path, r.status, r.raw)
+		}
+	}
+
+	// Saving again with the same name succeeds without self-conflict, and the old
+	// name "alice" is free for a new key.
+	if r := c.do("PATCH", "/admin/api/keys/"+aliceHash, map[string]any{"name": newName, "note": "again"}, nil); r.status != http.StatusOK {
+		t.Fatalf("same-name update = %d %s", r.status, r.raw)
+	}
+	recreated := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice"}, nil)
+	if recreated.status != http.StatusOK {
+		t.Fatalf("reuse old name = %d %s", recreated.status, recreated.raw)
+	}
+	newToken, _ := recreated.body["key"].(string)
+	if caller, ok := e.ctl.Lookup(newToken); !ok || caller.Name != "alice" || caller.KeyHash == aliceHash {
+		t.Fatalf("recreated caller = %+v %v", caller, ok)
+	}
+
+	// Audit log records the rename arrow when renamed, and plain hash otherwise.
+	entries, err := e.st.AuditLog(ctx, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var details []string
+	for _, a := range entries {
+		if a.Action == "key_updated" {
+			details = append(details, a.Detail)
+		}
+	}
+	wantDetails := []string{
+		aliceHash,
+		"alice → " + newName + " " + aliceHash,
+	}
+	if !reflect.DeepEqual(details, wantDetails) {
+		t.Fatalf("audit key_updated = %v, want %v", details, wantDetails)
 	}
 }
 
@@ -1585,7 +1703,7 @@ func TestWarmupSettingsAndCallsView(t *testing.T) {
 	}
 
 	// Warmup calls show in admin Calls APIs and never leak to /user/api/requests.
-	keyToken, _, err := e.ctl.CreateKey(ctx, "alice", store.KeyUpdate{})
+	keyToken, _, err := e.ctl.CreateKey(ctx, store.KeyUpdate{Name: "alice"})
 	if err != nil {
 		t.Fatal(err)
 	}

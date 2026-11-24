@@ -147,7 +147,7 @@ func TestDeleteKey(t *testing.T) {
 	if keys, err := st.Keys(ctx); err != nil || len(keys) != 1 || keys[0].MaxWorkers == nil || *keys[0].MaxWorkers != 3 {
 		t.Fatalf("keys = %+v, %v", keys, err)
 	}
-	if err := st.UpdateKey(ctx, "h1", KeyUpdate{Note: "n"}); err != nil {
+	if _, err := st.UpdateKey(ctx, "h1", KeyUpdate{Name: "alice", Note: "n"}); err != nil {
 		t.Fatal(err)
 	}
 	if keys, err := st.Keys(ctx); err != nil || keys[0].MaxWorkers != nil {
@@ -868,5 +868,105 @@ func TestResetKeyUsage(t *testing.T) {
 	}
 	if quotas, err := st.KeyQuotas(ctx, "h2"); err != nil || len(quotas) != 1 || quotas[0].Used != 0.05 {
 		t.Fatalf("h2 quotas touched = %+v, %v", quotas, err)
+	}
+}
+
+func TestRenameKey(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := st.AddKey(ctx, Key{Hash: "h1", Name: "alice", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddKey(ctx, Key{Hash: "h2", Name: "bob", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddRequest(ctx, Request{At: now, KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 10, Output: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddRequest(ctx, Request{At: now.Add(time.Second), KeyHash: SystemKeyWarmup, KeyName: "warmup", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 5, Output: 2}); err != nil {
+		t.Fatal(err)
+	}
+	reqs, err := st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10)
+	if err != nil || len(reqs) != 1 {
+		t.Fatalf("requests = %+v, %v", reqs, err)
+	}
+	if err := st.AttributeQuota(ctx, "a1", "gemini-weekly", now.Add(time.Minute), map[int64]float64{reqs[0].ID: 0.2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "fp1", Text: "p", LastAt: now, Until: now.Add(time.Hour), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.UpdateKey(ctx, "h1", KeyUpdate{Name: "bob"}); !errors.Is(err, ErrExists) {
+		t.Fatalf("duplicate name = %v, want ErrExists", err)
+	}
+	if _, err := st.UpdateKey(ctx, "missing", KeyUpdate{Name: "next"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing hash = %v, want ErrNotFound", err)
+	}
+
+	oldName, err := st.UpdateKey(ctx, "h1", KeyUpdate{Name: "Alice Dev", Note: "renamed"})
+	if err != nil || oldName != "alice" {
+		t.Fatalf("rename = %q, %v; want alice, nil", oldName, err)
+	}
+
+	// An in-flight request or risk flag finishing after the rename with the old
+	// name must store the live name from api_keys.
+	if err := st.AddRequest(ctx, Request{At: now.Add(2 * time.Second), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", QuotaGroup: "gemini", Model: "m", Status: StatusOK, Input: 20, Output: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FlagPrompt(ctx, FlaggedPrompt{Fingerprint: "fp2", Text: "p2", LastAt: now.Add(2 * time.Second), Until: now.Add(time.Hour), KeyHash: "h1", KeyName: "alice", Account: "a1", AccountName: "main", Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Revoking and deleting the key afterwards must keep the renamed display
+	// name on every historical table and aggregation, leaving system keys alone.
+	if err := st.RevokeKey(ctx, "h1", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	deletedName, err := st.DeleteKey(ctx, "h1")
+	if err != nil || deletedName != "Alice Dev" {
+		t.Fatalf("DeleteKey = %q, %v; want Alice Dev, nil", deletedName, err)
+	}
+
+	reqs, err = st.Requests(ctx, RequestFilter{KeyHash: "h1"}, 0, 10)
+	if err != nil || len(reqs) != 2 || reqs[0].KeyName != "Alice Dev" || reqs[1].KeyName != "Alice Dev" {
+		t.Fatalf("requests after rename+delete = %+v, %v", reqs, err)
+	}
+	byKey, err := st.Summarize(ctx, RequestFilter{}, ByKey, 0)
+	if err != nil || len(byKey) != 2 {
+		t.Fatalf("Summarize ByKey = %+v, %v", byKey, err)
+	}
+	namesByKey := map[string]string{}
+	for _, s := range byKey {
+		namesByKey[s.Group] = s.KeyName
+	}
+	if namesByKey["h1"] != "Alice Dev" || namesByKey[SystemKeyWarmup] != "warmup" {
+		t.Fatalf("Summarize ByKey names = %+v", namesByKey)
+	}
+	byDayKey, err := st.Summarize(ctx, RequestFilter{KeyHash: "h1"}, ByDayKey, 0)
+	if err != nil || len(byDayKey) != 1 || byDayKey[0].KeyName != "Alice Dev" {
+		t.Fatalf("Summarize ByDayKey = %+v, %v", byDayKey, err)
+	}
+	filterKeys, err := st.RequestKeys(ctx, now.Add(-time.Minute))
+	if err != nil || !reflect.DeepEqual(filterKeys, []RequestKey{{Hash: "h1", Name: "Alice Dev"}, {Hash: SystemKeyWarmup, Name: "warmup"}}) {
+		t.Fatalf("RequestKeys = %+v, %v", filterKeys, err)
+	}
+	quotaUses, err := st.QuotaUses(ctx, RequestFilter{KeyHash: "h1"})
+	if err != nil || len(quotaUses) != 1 || quotaUses[0].KeyName != "Alice Dev" {
+		t.Fatalf("QuotaUses = %+v, %v", quotaUses, err)
+	}
+	flagged, err := st.FlaggedPrompts(ctx)
+	if err != nil || len(flagged) != 2 || flagged[0].KeyName != "Alice Dev" || flagged[1].KeyName != "Alice Dev" {
+		t.Fatalf("FlaggedPrompts after rename+delete = %+v, %v", flagged, err)
+	}
+	gotFP, err := st.FlaggedPrompt(ctx, "fp1")
+	if err != nil || gotFP.KeyName != "Alice Dev" {
+		t.Fatalf("FlaggedPrompt = %+v, %v", gotFP, err)
 	}
 }

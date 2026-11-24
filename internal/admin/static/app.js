@@ -491,13 +491,14 @@ views.keys = container => {
 
   function editKey(k) {
     let current = k;
+    const nameInput = h("input", { required: true, maxlength: 64, value: k.name, placeholder: t("keys.name.placeholder") });
     const noteInput = h("input", { value: k.note });
     const models = modelPicker(offered, k.models);
     const limits = limitEditor(groups, k);
     const save = event => {
       event.preventDefault();
       guarded(async () => {
-        await api("PATCH", `keys/${k.hash}`, { note: noteInput.value, models: models.read(), ...limits.read() });
+        await api("PATCH", `keys/${k.hash}`, { name: nameInput.value, note: noteInput.value, models: models.read(), ...limits.read() });
         editor.replaceChildren();
         toast(t("common.saved"));
         await load();
@@ -561,6 +562,7 @@ views.keys = container => {
       h("h2", {}, t("keys.edit.title", { name: k.name })),
       h("form", { onsubmit: save },
         h("div", { class: "row" },
+          h("label", {}, t("common.name"), nameInput),
           h("label", { class: "grow" }, t("common.note"), noteInput)),
         h("div", { class: "field" }, t("keys.models.label"), models.node),
         h("div", { class: "row" }, limits.nodes),

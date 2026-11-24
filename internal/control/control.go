@@ -954,8 +954,8 @@ const keyPrefix = "sk-agyrelay-"
 
 // CreateKey stores a new key and returns its plaintext, which is not kept,
 // and its hash.
-func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate) (token, hash string, err error) {
-	name = strings.TrimSpace(name)
+func (c *Control) CreateKey(ctx context.Context, u store.KeyUpdate) (token, hash string, err error) {
+	name := strings.TrimSpace(u.Name)
 	if err := validateKeyName(name); err != nil {
 		return "", "", err
 	}
@@ -976,19 +976,27 @@ func (c *Control) CreateKey(ctx context.Context, name string, u store.KeyUpdate)
 	return token, hash, c.reloadKeys(ctx)
 }
 
-func (c *Control) UpdateKey(ctx context.Context, hash string, u store.KeyUpdate) error {
+func (c *Control) UpdateKey(ctx context.Context, hash string, u store.KeyUpdate) (oldName string, err error) {
+	u.Name = strings.TrimSpace(u.Name)
+	if err := validateKeyName(u.Name); err != nil {
+		return "", err
+	}
 	if err := validateLimits(u); err != nil {
-		return err
+		return "", err
 	}
 	u.Models = cleanModels(u.Models)
-	if err := c.cfg.Store.UpdateKey(ctx, hash, u); err != nil {
-		return err
+	oldName, err = c.cfg.Store.UpdateKey(ctx, hash, u)
+	if errors.Is(err, store.ErrExists) {
+		return "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", u.Name)}
+	}
+	if err != nil {
+		return "", err
 	}
 	if err := c.reloadKeys(ctx); err != nil {
-		return err
+		return "", err
 	}
 	c.cfg.Gateway.TrimKeyIdle(hash, u.MaxWorkers)
-	return nil
+	return oldName, nil
 }
 
 // ResetKeyUsage clears a key's cumulative spend (key_usage), across every

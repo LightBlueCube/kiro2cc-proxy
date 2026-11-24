@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"agyrelay/internal/control"
@@ -233,7 +234,7 @@ type keyRequest struct {
 
 func (k keyRequest) update() store.KeyUpdate {
 	return store.KeyUpdate{
-		Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits,
+		Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits,
 	}
 }
 
@@ -242,12 +243,13 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	token, hash, err := h.control.CreateKey(r.Context(), req.Name, req.update())
+	name := strings.TrimSpace(req.Name)
+	token, hash, err := h.control.CreateKey(r.Context(), req.update())
 	if err != nil {
 		h.fail(w, "create key", err)
 		return
 	}
-	h.audit(r, "key_created", req.Name+" "+hash)
+	h.audit(r, "key_created", name+" "+hash)
 	writeJSON(w, http.StatusOK, map[string]string{"key": token})
 }
 
@@ -259,11 +261,17 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := h.control.UpdateKey(r.Context(), hash, req.update()); err != nil {
+	next := strings.TrimSpace(req.Name)
+	oldName, err := h.control.UpdateKey(r.Context(), hash, req.update())
+	if err != nil {
 		h.fail(w, "update key", err)
 		return
 	}
-	h.audit(r, "key_updated", hash)
+	detail := hash
+	if oldName != next {
+		detail = oldName + " → " + next + " " + hash
+	}
+	h.audit(r, "key_updated", detail)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
