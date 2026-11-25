@@ -124,8 +124,8 @@ func (h *Handler) listRequests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// summarize serves totals grouped by ?by=key|model|account|day|day_key;
-// days use the browser's zone, ?tz = minutes east of UTC.
+// summarize serves totals grouped by ?by=key|model|account|day|day_key|hour|hour_key;
+// days and hours use the browser's zone, ?tz = minutes east of UTC.
 func (h *Handler) summarize(w http.ResponseWriter, r *http.Request) {
 	f, ok := queryFilter(r)
 	if !ok {
@@ -143,9 +143,9 @@ func (h *Handler) summarize(w http.ResponseWriter, r *http.Request) {
 	}
 	by := store.SummaryBy(q.Get("by"))
 	switch by {
-	case store.ByKey, store.ByModel, store.ByAccount, store.ByDay, store.ByDayKey:
+	case store.ByKey, store.ByModel, store.ByAccount, store.ByDay, store.ByDayKey, store.ByHour, store.ByHourKey:
 	default:
-		writeError(w, http.StatusBadRequest, "by must be key, model, account, day, or day_key")
+		writeError(w, http.StatusBadRequest, "by must be key, model, account, day, day_key, hour, or hour_key")
 		return
 	}
 	sums, err := h.store.Summarize(r.Context(), f, by, time.Duration(tz)*time.Minute)
@@ -214,5 +214,15 @@ func (h *Handler) filterValues(w http.ResponseWriter, r *http.Request) {
 		accounts = []store.RequestAccount{}
 	}
 	out["account"] = accounts
+	earliest, err := h.store.EarliestRequest(r.Context(), store.RequestFilter{KeyHash: f.KeyHash})
+	if err != nil {
+		h.internalError(w, "list filter values", err)
+		return
+	}
+	var earliestMS int64
+	if !earliest.IsZero() {
+		earliestMS = earliest.UnixMilli()
+	}
+	out["earliest_at"] = earliestMS
 	writeJSON(w, http.StatusOK, out)
 }

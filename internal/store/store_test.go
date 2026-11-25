@@ -970,3 +970,80 @@ func TestRenameKey(t *testing.T) {
 		t.Fatalf("FlaggedPrompt = %+v, %v", gotFP, err)
 	}
 }
+
+func TestSummarizeByHour(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	cost1, cost2, cost3 := 1.0, 2.5, 0.75
+	base := time.Date(2026, 11, 25, 22, 15, 0, 0, time.UTC)
+	for _, r := range []Request{
+		{At: base, KeyHash: "h1", KeyName: "alice", Status: StatusOK, Input: 100, Output: 20, CostUSD: &cost1},
+		{At: base.Add(30 * time.Minute), KeyHash: "h1", KeyName: "alice", Status: StatusOK, Input: 50, Output: 10, CostUSD: &cost2},
+		{At: base.Add(40 * time.Minute), KeyHash: "h2", KeyName: "bob", Status: StatusOK, Input: 10, Output: 5, CostUSD: &cost3},
+		{At: base.Add(2 * time.Hour), KeyHash: "h1", KeyName: "alice", Status: StatusOK, Input: 30, Output: 6, CostUSD: &cost1},
+	} {
+		if err := st.AddRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// UTC: 22:15, 22:45, 22:55 land in 2026-11-25 22:00; 00:15 next day lands in 2026-11-26 00:00.
+	byHourUTC, err := st.Summarize(ctx, RequestFilter{}, ByHour, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHourUTC := []Summary{
+		{Group: "2026-11-25 22:00", Requests: 3, Input: 160, Output: 35, CostUSD: 4.25},
+		{Group: "2026-11-26 00:00", Requests: 1, Input: 30, Output: 6, CostUSD: 1.0},
+	}
+	if !reflect.DeepEqual(byHourUTC, wantHourUTC) {
+		t.Fatalf("Summarize(ByHour, UTC) = %+v, want %+v", byHourUTC, wantHourUTC)
+	}
+
+	// Negative offset (-5h): 22:15 UTC = 17:15, 00:15 UTC = 19:15 (same local day).
+	byHourKeyEST, err := st.Summarize(ctx, RequestFilter{}, ByHourKey, -5*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHourKeyEST := []Summary{
+		{Group: "2026-11-25 17:00\x1fh1", KeyName: "alice", Requests: 2, Input: 150, Output: 30, CostUSD: 3.5},
+		{Group: "2026-11-25 17:00\x1fh2", KeyName: "bob", Requests: 1, Input: 10, Output: 5, CostUSD: 0.75},
+		{Group: "2026-11-25 19:00\x1fh1", KeyName: "alice", Requests: 1, Input: 30, Output: 6, CostUSD: 1.0},
+	}
+	if !reflect.DeepEqual(byHourKeyEST, wantHourKeyEST) {
+		t.Fatalf("Summarize(ByHourKey, -5h) = %+v, want %+v", byHourKeyEST, wantHourKeyEST)
+	}
+
+	// Fractional-hour offset (+5h30m): 22:15 UTC -> 03:45 next day (03:00 bucket),
+	// while 22:45 UTC -> 04:15 next day (04:00 bucket).
+	byHourIST, err := st.Summarize(ctx, RequestFilter{}, ByHour, 5*time.Hour+30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHourIST := []Summary{
+		{Group: "2026-11-26 03:00", Requests: 1, Input: 100, Output: 20, CostUSD: 1.0},
+		{Group: "2026-11-26 04:00", Requests: 2, Input: 60, Output: 15, CostUSD: 3.25},
+		{Group: "2026-11-26 05:00", Requests: 1, Input: 30, Output: 6, CostUSD: 1.0},
+	}
+	if !reflect.DeepEqual(byHourIST, wantHourIST) {
+		t.Fatalf("Summarize(ByHour, +5h30m) = %+v, want %+v", byHourIST, wantHourIST)
+	}
+
+	earliestAll, err := st.EarliestRequest(ctx, RequestFilter{})
+	if err != nil || !earliestAll.Equal(base) {
+		t.Fatalf("EarliestRequest(all) = %v, %v; want %v", earliestAll, err, base)
+	}
+	earliestBob, err := st.EarliestRequest(ctx, RequestFilter{KeyHash: "h2"})
+	if err != nil || !earliestBob.Equal(base.Add(40*time.Minute)) {
+		t.Fatalf("EarliestRequest(h2) = %v, %v; want %v", earliestBob, err, base.Add(40*time.Minute))
+	}
+	earliestNone, err := st.EarliestRequest(ctx, RequestFilter{KeyHash: "missing"})
+	if err != nil || !earliestNone.IsZero() {
+		t.Fatalf("EarliestRequest(missing) = %v, %v; want zero", earliestNone, err)
+	}
+}

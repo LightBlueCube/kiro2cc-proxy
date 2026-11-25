@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light dark;
   --bg: #f6f7f9; --card: #fff; --fg: #1d2330; --muted: #6b7280; --line: #e3e6eb;
   --accent: #2563eb; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --cancelled: #3d638a;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -126,8 +127,29 @@ details.fold > summary { cursor: pointer; font-weight: 600; }
 .blk-call, .blk-result { border-left-color: var(--bad); }
 .logs .DEBUG { color: var(--muted); } .logs .WARN { color: var(--warn); } .logs .ERROR { color: var(--bad); }
 
-svg.chart { width: 100%; height: 180px; display: block; }
-svg.chart text { fill: var(--muted); font-size: 10px; }
+.chart-head { margin-bottom: 10px; }
+.chart-title { display: inline-flex; align-items: center; gap: 8px; margin: 0; }
+.gran-toggle { display: inline-flex; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+.gran-toggle button { border: 0; border-radius: 5px; background: transparent; color: var(--muted); padding: 2px 9px; font-size: 13px; font-weight: 500; line-height: 1.35; }
+.gran-toggle button:hover:not(.active):not(:disabled) { color: var(--fg); }
+.gran-toggle button.active { background: var(--card); color: var(--accent); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
+.chart-box { position: relative; display: flex; align-items: flex-start; }
+.chart-scroll { flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.chart-scroll::-webkit-scrollbar { display: none; }
+.chart-scroll.pannable { cursor: grab; user-select: none; }
+.chart-scroll.pannable.dragging { cursor: grabbing; }
+svg.chart-y { width: 54px; height: 188px; flex: none; display: block; }
+svg.chart { height: 188px; display: block; }
+svg.chart-y text, svg.chart text { fill: var(--muted); font-size: 10px; }
+svg.chart text.tick-date { fill: var(--fg); opacity: .7; }
 svg.chart .axis { stroke: var(--line); }
-.legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+svg.chart .range-bound { stroke: var(--muted); stroke-dasharray: 3 3; opacity: .45; }
+svg.chart .chart-hover { fill: var(--fg); opacity: .07; pointer-events: none; }
+.chart-tip { position: absolute; top: 6px; z-index: 3; pointer-events: none; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; line-height: 1.45; box-shadow: 0 4px 12px rgba(0, 0, 0, .14); white-space: nowrap; }
+.chart-tip-time { font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart-tip-row { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.chart-tip-row i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.chart-tip-val { margin-left: auto; padding-left: 10px; font-variant-numeric: tabular-nums; }
+.chart-tip-total { margin-top: 4px; padding-top: 3px; border-top: 1px solid var(--line); font-weight: 600; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; margin-top: 6px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }

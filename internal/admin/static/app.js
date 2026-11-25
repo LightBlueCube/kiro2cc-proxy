@@ -1781,49 +1781,237 @@ function tokensCell(row) {
       row.reasoning ? t("calls.tokens.reasoning", { n: fmt.compact(row.reasoning) }) : ""));
 }
 
-// stackedBars draws one bar per day, stacked by series, as SVG.
-function stackedBars(days, series, seriesName, valueOf, label) {
+const MS_HOUR = 3600e3;
+const MS_DAY = 86400e3;
+const CHART_HEIGHT = 188;
+const CHART_Y_WIDTH = 54;
+const CHART_BASE_PLOT = 860;
+const CHART_BOTTOM = 28;
+const CHART_TOP_PAD = 12;
+const CHART_MIN_SLOT = 5;
+const CHART_MAX_BAR = 40;
+const CHART_MAX_PAN_DAY_SLOT = 160;
+const CHART_HOUR_LABEL_GAP = 38;
+const CHART_DATE_LABEL_GAP = 42;
+const CHART_DAY_LABEL_GAP = 46;
+const CHART_LOAD_MARGIN = 240;
+const CHART_HOUR_STEPS = [1, 2, 3, 4, 6, 12, 24];
+
+const bucketStep = granularity => granularity === "hour" ? MS_HOUR : MS_DAY;
+
+// alignBucketMs floors a UTC Unix ms timestamp to the start of its local
+// fixed-offset hour or day bucket (returned as UTC Unix ms).
+function alignBucketMs(ms, tzMin, granularity) {
+  const step = bucketStep(granularity);
+  const tzMs = tzMin * 60e3;
+  return Math.floor((ms + tzMs) / step) * step - tzMs;
+}
+
+// formatBucket turns a tz-shifted epoch ms into "YYYY-MM-DD" or "YYYY-MM-DD HH:00",
+// matching SQLite's date/strftime(..., at / 1000 + tzSec, 'unixepoch').
+function formatBucket(shiftedMs, granularity) {
+  const d = new Date(shiftedMs);
+  const date = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  if (granularity === "day") return date;
+  return `${date} ${String(d.getUTCHours()).padStart(2, "0")}:00`;
+}
+
+function parseBucketShiftedMs(bucket, granularity) {
+  const iso = granularity === "hour"
+    ? bucket.replace(" ", "T") + ":00Z"
+    : bucket + "T00:00:00Z";
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+// buildBuckets returns every day or hour bucket covering [fromMs, toMs] in the
+// fixed tzMin offset, extending end if any server row lands past toMs (clock skew).
+function buildBuckets(fromMs, toMs, tzMin, granularity, sums) {
+  const step = bucketStep(granularity);
+  const tzMs = tzMin * 60e3;
+  const start = Math.floor((fromMs + tzMs) / step) * step;
+  let end = Math.floor((toMs + tzMs) / step) * step;
+  for (const s of sums) {
+    const parsed = parseBucketShiftedMs(s.group.split("\x1f")[0], granularity);
+    if (parsed !== null && parsed > end) end = parsed;
+  }
+  const buckets = [];
+  for (let t = start; t <= end; t += step) buckets.push(formatBucket(t, granularity));
+  return buckets;
+}
+
+// mergeSummaries combines two disjoint time-range summary lists by group key.
+function mergeSummaries(older, newer) {
+  const merged = new Map();
+  for (const s of [...older, ...newer]) {
+    const prev = merged.get(s.group);
+    if (!prev) {
+      merged.set(s.group, { ...s });
+      continue;
+    }
+    for (const f of ["requests", "errors", "input", "cached", "output", "reasoning", "cost_usd", "unpriced"]) {
+      prev[f] = (prev[f] || 0) + (s[f] || 0);
+    }
+    if (!prev.key_name && s.key_name) prev.key_name = s.key_name;
+  }
+  return [...merged.values()];
+}
+
+// computeSlot picks the CSS-pixel width per bucket so the selected range fills
+// one viewport (down to CHART_MIN_SLOT) while prepended history keeps the same scale.
+function computeSlot(viewWidth, totalBuckets, rangeBuckets, granularity) {
+  let slot = viewWidth / Math.max(rangeBuckets, 1);
+  if (granularity === "day" && totalBuckets > rangeBuckets) {
+    slot = Math.min(slot, CHART_MAX_PAN_DAY_SLOT);
+  }
+  slot = Math.max(slot, CHART_MIN_SLOT);
+  if (totalBuckets * slot < viewWidth) {
+    slot = viewWidth / Math.max(totalBuckets, 1);
+  }
+  return slot;
+}
+
+// bucketTicks picks X-axis labels from the actual 1:1 CSS-pixel slot width so
+// timestamps fill available space without colliding and stay anchored when panning.
+function bucketTicks(buckets, granularity, slot) {
+  const out = [];
+  if (granularity === "day") {
+    const step = Math.max(1, Math.ceil(CHART_DAY_LABEL_GAP / slot));
+    const last = buckets.length - 1;
+    buckets.forEach((b, i) => {
+      if ((last - i) % step === 0) out.push({ index: i, text: b.slice(5), date: "", major: true });
+    });
+    return out;
+  }
+  const step = CHART_HOUR_STEPS.find(s => s * slot >= CHART_HOUR_LABEL_GAP) || 24;
+  let firstMidnightX = Infinity;
+  buckets.forEach((b, i) => {
+    const hour = Number(b.slice(11, 13));
+    if (hour % step !== 0) return;
+    const isMidnight = hour === 0;
+    if (isMidnight && firstMidnightX === Infinity) firstMidnightX = i * slot + slot / 2;
+    out.push({
+      index: i,
+      text: step === 24 ? b.slice(5, 10) : b.slice(11),
+      date: step < 24 && isMidnight ? b.slice(5, 10) : "",
+      major: isMidnight,
+    });
+  });
+  if (step < 24 && out.length > 0 && !out[0].date) {
+    const firstX = out[0].index * slot + slot / 2;
+    if (firstMidnightX - firstX >= CHART_DATE_LABEL_GAP) {
+      out[0].date = buckets[out[0].index].slice(5, 10);
+    }
+  }
+  return out;
+}
+
+// stackedBars builds a 1:1 CSS-pixel SVG bar chart and fixed Y-axis with O(1)
+// visible-range Y rescaling and an instant column hover highlight.
+function stackedBars({ buckets, series, valueOf, label, granularity, viewWidth, rangeBuckets, rangeStartIndex }) {
   const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("class", "chart");
-  const width = 900, height = 180, left = 50, bottom = 20;
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  const totals = days.map(d => series.reduce((sum, s) => sum + valueOf(d, s), 0));
-  const top = Math.max(...totals, 0) || 1;
-  const make = (tag, attrs, text) => {
+  const svgEl = (tag, attrs, text) => {
     const node = document.createElementNS(ns, tag);
     for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
     if (text !== undefined) node.textContent = text;
-    svg.append(node);
     return node;
   };
-  make("line", { x1: left, y1: height - bottom, x2: width, y2: height - bottom, class: "axis" });
-  make("text", { x: 2, y: 10 }, label(top));
-  make("text", { x: 2, y: height - bottom }, label(0));
-  const slot = (width - left) / Math.max(days.length, 1);
-  const barWidth = Math.max(Math.min(slot * 0.7, 40), 1);
-  days.forEach((day, i) => {
-    let y = height - bottom;
-    const x = left + i * slot + (slot - barWidth) / 2;
-    series.forEach((s, j) => {
-      const v = valueOf(day, s);
-      if (v <= 0) return;
-      const barHeight = (v / top) * (height - bottom - 12);
-      y -= barHeight;
-      make("rect", { x, y, width: barWidth, height: barHeight, fill: PALETTE[j % PALETTE.length] })
-        .append(Object.assign(document.createElementNS(ns, "title"), { textContent: `${day} · ${seriesName(s)}: ${label(v)}` }));
-    });
-    const labelEvery = Math.ceil(days.length / 15);
-    if (i % labelEvery === 0) make("text", { x: x, y: height - 6 }, day.slice(5));
+
+  const totals = buckets.map(b => series.reduce((sum, s) => sum + valueOf(b, s), 0));
+  const baseTop = Math.max(...totals, 0) || 1;
+  const axisY = CHART_HEIGHT - CHART_BOTTOM;
+  const barAreaH = axisY - CHART_TOP_PAD;
+
+  const topText = svgEl("text", { x: 2, y: 10 }, label(baseTop));
+  const yAxis = svgEl("svg", { class: "chart-y", viewBox: `0 0 ${CHART_Y_WIDTH} ${CHART_HEIGHT}` });
+  yAxis.append(topText, svgEl("text", { x: 2, y: axisY }, label(0)));
+
+  const slot = computeSlot(viewWidth, buckets.length, rangeBuckets, granularity);
+  const plotWidth = Math.max(Math.ceil(buckets.length * slot), viewWidth);
+  const scrollable = plotWidth > viewWidth + 1;
+  const svg = svgEl("svg", { class: "chart", viewBox: `0 0 ${plotWidth} ${CHART_HEIGHT}` });
+  svg.style.width = `${plotWidth}px`;
+
+  const hoverRect = svgEl("rect", {
+    class: "chart-hover", x: 0, y: 0, width: Math.max(slot, 2), height: axisY, hidden: "",
   });
-  return svg;
+  svg.append(hoverRect);
+
+  if (rangeStartIndex > 0 && rangeStartIndex < buckets.length) {
+    const bx = rangeStartIndex * slot;
+    svg.append(svgEl("line", { x1: bx, y1: 0, x2: bx, y2: axisY, class: "range-bound" }));
+  }
+
+  const barsGroup = svgEl("g", { transform: `translate(0, ${axisY}) scale(1, 1)` });
+  const barWidth = Math.max(Math.min(slot * 0.7, CHART_MAX_BAR), 1);
+
+  buckets.forEach((bucket, i) => {
+    let cumH = 0;
+    const x = i * slot + (slot - barWidth) / 2;
+    series.forEach((s, j) => {
+      const v = valueOf(bucket, s);
+      if (v <= 0) return;
+      const hNorm = (v / baseTop) * barAreaH;
+      cumH += hNorm;
+      barsGroup.append(svgEl("rect", { x, y: -cumH, width: barWidth, height: hNorm, fill: PALETTE[j % PALETTE.length] }));
+    });
+  });
+  svg.append(barsGroup);
+  svg.append(svgEl("line", { x1: 0, y1: axisY, x2: plotWidth, y2: axisY, class: "axis" }));
+
+  const placeText = (cx, y, text, cls) => {
+    const half = text.length * 3.1;
+    let anchor = "middle";
+    let tx = cx;
+    if (cx < half) {
+      anchor = "start";
+      tx = Math.max(0, cx - 2);
+    } else if (cx + half > plotWidth) {
+      anchor = "end";
+      tx = Math.min(plotWidth, cx + 2);
+    }
+    const attrs = { x: tx, y, "text-anchor": anchor };
+    if (cls) attrs.class = cls;
+    svg.append(svgEl("text", attrs, text));
+  };
+
+  for (const tick of bucketTicks(buckets, granularity, slot)) {
+    const cx = tick.index * slot + slot / 2;
+    svg.append(svgEl("line", { x1: cx, y1: axisY, x2: cx, y2: axisY + (tick.major ? 4 : 2), class: "axis" }));
+    placeText(cx, axisY + 13, tick.text, "");
+    if (tick.date) placeText(cx, axisY + 25, tick.date, "tick-date");
+  }
+
+  function updateScale(scrollLeft, clientWidth) {
+    const first = Math.max(0, Math.floor(scrollLeft / slot));
+    const last = Math.min(buckets.length - 1, Math.ceil((scrollLeft + clientWidth) / slot) - 1);
+    let visMax = 0;
+    for (let i = first; i <= last; i++) {
+      if (totals[i] > visMax) visMax = totals[i];
+    }
+    const target = visMax > 0 ? visMax : baseTop;
+    barsGroup.setAttribute("transform", `translate(0, ${axisY}) scale(1, ${baseTop / target})`);
+    topText.textContent = label(target);
+  }
+
+  function setHover(index) {
+    if (index === null || index < 0 || index >= buckets.length) {
+      hoverRect.setAttribute("hidden", "");
+      return;
+    }
+    hoverRect.removeAttribute("hidden");
+    hoverRect.setAttribute("x", index * slot);
+    hoverRect.setAttribute("width", Math.max(slot, 2));
+  }
+
+  return { yAxis, svg, slot, plotWidth, scrollable, updateScale, setHover };
 }
 
-// usagePanel renders the usage filters, totals, per-day chart, per-key
-// breakdown, and request history. On /user, userMode hides the key selector.
+// usagePanel renders the usage filters, totals, per-day/per-hour chart,
+// per-key breakdown, and request history. On /user, userMode hides the key selector.
 function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
-  const state = { range: "7d", key: "", model: "", account: "", metric: "cost" };
+  const defaultGranularity = range => range === "24h" ? "hour" : "day";
+  const state = { range: "7d", key: "", model: "", account: "", metric: "cost", granularity: "day" };
   const filters = h("div", { class: "row" });
   const totals = h("div", { class: "card" });
   const chart = h("div", { class: "card" });
@@ -1831,28 +2019,52 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
   const list = h("div", { class: "card" });
   container.append(h("div", { class: "card" }, filters), totals, chart, byKey, list);
 
+  const chartHeader = h("div", { class: "row chart-head" });
+  const chartYWrap = h("div", { style: "flex:none" });
+  const chartScroll = h("div", { class: "chart-scroll" });
+  const chartTip = h("div", { class: "chart-tip", hidden: true });
+  const chartBox = h("div", { class: "chart-box", hidden: true }, chartYWrap, chartScroll, chartTip);
+  const chartEmpty = h("p", { class: "muted", hidden: true }, t("calls.no_calls"));
+  const chartLegend = h("div", { class: "legend" });
+  chart.append(chartHeader, chartBox, chartEmpty, chartLegend);
+
   const ranges = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 };
-  const since = () => Date.now() - ranges[state.range] * 86400e3;
-  const query = extra => {
-    const q = new URLSearchParams({ since: String(Math.floor(since())), ...extra });
+  const preloadDays = {
+    hour: { "24h": 1, "7d": 7, "30d": 0, "90d": 0 },
+    day: { "24h": 7, "7d": 7, "30d": 30, "90d": 90 },
+  };
+  const chunkDays = {
+    hour: { "24h": 2, "7d": 7, "30d": 14, "90d": 30 },
+    day: { "24h": 14, "7d": 14, "30d": 30, "90d": 90 },
+  };
+  const since = () => Date.now() - ranges[state.range] * MS_DAY;
+  const query = (extra, sinceMs = Math.floor(since())) => {
+    const q = new URLSearchParams({ since: String(sinceMs), ...extra });
     for (const f of ["key", "model", "account"]) if (state[f]) q.set(f, state[f]);
     return q.toString();
   };
 
+  let earliestAt = 0;
   async function renderFilters() {
     const values = await api("GET", "usage/filters?" + new URLSearchParams({ since: String(Math.floor(since())) }));
+    earliestAt = values.earliest_at || 0;
     // options are [value, label] pairs.
     const select = (field, options, all) => h("select", { onchange: e => { state[field] = e.target.value; reload(); } },
       h("option", { value: "" }, all), options.map(([v, label]) => h("option", { value: v, selected: v === state[field] }, label)));
     const plain = values => values.map(v => [v, v]);
     const metrics = [["cost", t("calls.metric.cost")], ["tokens", t("calls.metric.tokens")]];
     filters.replaceChildren(
-      h("label", {}, t("calls.range"), h("select", { onchange: e => { state.range = e.target.value; reload(); } },
-        Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
+      h("label", {}, t("calls.range"), h("select", {
+        onchange: e => {
+          state.range = e.target.value;
+          state.granularity = defaultGranularity(state.range);
+          guarded(reload);
+        },
+      }, Object.keys(ranges).map(r => h("option", { value: r, selected: r === state.range }, t("calls.range.last", { range: r }))))),
       ...(userMode ? [] : [h("label", {}, t("common.key"), select("key", values.key.map(k => [k.hash, keyText(k.name, k.hash)]), t("calls.all_keys")))]),
       h("label", {}, t("common.model"), select("model", plain(values.model), t("calls.all_models"))),
       h("label", {}, t("common.account"), select("account", values.account.map(a => [a.id, a.name]), t("calls.all_accounts"))),
-      h("label", {}, t("calls.chart"), h("select", { onchange: e => { state.metric = e.target.value; renderChart(); } },
+      h("label", {}, t("calls.chart"), h("select", { onchange: e => { state.metric = e.target.value; renderChart({ preserveScroll: true }); } },
         metrics.map(([v, label]) => h("option", { value: v, selected: v === state.metric }, label)))),
       h("span", { class: "grow" }),
       h("button", { onclick: e => guarded(async () => { if (onRefresh) await onRefresh(); await reload(); }, e.target) }, t("common.refresh")));
@@ -1918,31 +2130,274 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
       h("div", { title: t("calls.total.quota.hint") }, h("div", { class: "muted" }, t("calls.total.quota")), accountQuota())));
   }
 
-  let dayKey = [];
-  // localDay formats a time as the browser's YYYY-MM-DD, like the server's
-  // tz-shifted grouping.
-  const localDay = ms => {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  };
+  // chartWindow records the latest reload's range start, end, tz offset, and
+  // filters; seriesCache holds each granularity's loaded range and rows so
+  // Day/Hour toggles reuse data and panning left extends history seamlessly.
+  let chartWindow = { rangeFrom: 0, to: 0, tzMin: 0, filters: { key: "", model: "", account: "" } };
+  let seriesCache = { day: null, hour: null };
+  let keyOrder = [];
+  let activeChart = null;
+  let reloadSeq = 0;
+  let granularitySeq = 0;
+  let drag = null;
+  let hoveredIndex = -1;
+  let lastPointerX = null;
+  let suppressScroll = false;
 
-  function renderChart() {
-    const days = [];
-    for (let at = since(); localDay(at) <= localDay(Date.now()); at += 86400e3) {
-      if (days[days.length - 1] !== localDay(at)) days.push(localDay(at));
+  const earliestBound = (tzMin, granularity) => (earliestAt > 0 ? alignBucketMs(earliestAt, tzMin, granularity) : 0);
+
+  function initialChartFrom(rangeFrom, tzMin, granularity) {
+    const bound = earliestBound(tzMin, granularity);
+    const extra = preloadDays[granularity][state.range] * MS_DAY;
+    if (!bound || bound >= rangeFrom || extra === 0) return rangeFrom;
+    return Math.max(bound, alignBucketMs(rangeFrom - extra, tzMin, granularity));
+  }
+
+  function chartQuery(granularity, fromMs, untilMs = 0) {
+    const by = granularity === "hour" ? "hour_key" : "day_key";
+    const q = new URLSearchParams({ since: String(fromMs), by, tz: String(chartWindow.tzMin) });
+    if (untilMs > 0) q.set("until", String(untilMs));
+    for (const f of ["key", "model", "account"]) if (chartWindow.filters[f]) q.set(f, chartWindow.filters[f]);
+    return q.toString();
+  }
+
+  function hideHover() {
+    hoveredIndex = -1;
+    chartTip.hidden = true;
+    if (activeChart) activeChart.setHover(null);
+  }
+
+  function renderTooltip(idx) {
+    const { buckets, keys, names, valueOf, label } = activeChart;
+    const bucket = buckets[idx];
+    const rows = [];
+    let total = 0;
+    keys.forEach((k, j) => {
+      const v = valueOf(bucket, k);
+      if (v <= 0) return;
+      total += v;
+      rows.push({ color: PALETTE[j % PALETTE.length], name: keyText(names.get(k), k), val: label(v) });
+    });
+    const parts = [h("div", { class: "chart-tip-time" }, bucket)];
+    for (const r of rows) {
+      parts.push(h("div", { class: "chart-tip-row" },
+        h("i", { style: `background:${r.color}` }),
+        h("span", {}, r.name),
+        h("span", { class: "chart-tip-val" }, r.val)));
     }
-    const names = new Map(dayKey.map(s => [s.group.split("\x1f")[1], s.key_name]));
-    const keys = [...names.keys()].sort((a, b) => names.get(a).localeCompare(names.get(b)) || a.localeCompare(b));
-    const cell = new Map(dayKey.map(s => [s.group, s]));
-    const valueOf = (day, key) => {
-      const s = cell.get(day + "\x1f" + key);
+    if (rows.length > 1) {
+      parts.push(h("div", { class: "chart-tip-row chart-tip-total" },
+        h("span", {}, t("calls.chart.total")),
+        h("span", { class: "chart-tip-val" }, label(total))));
+    }
+    chartTip.replaceChildren(...parts);
+    chartTip.hidden = false;
+  }
+
+  function positionTooltip(clientX) {
+    const boxRect = chartBox.getBoundingClientRect();
+    const tipWidth = chartTip.offsetWidth || 160;
+    const cursorX = clientX - boxRect.left;
+    const gap = 14;
+    let left = cursorX + gap;
+    if (left + tipWidth > boxRect.width - 4) {
+      left = Math.max(CHART_Y_WIDTH + 4, cursorX - tipWidth - gap);
+    }
+    chartTip.style.left = `${Math.round(left)}px`;
+  }
+
+  function showHover(clientX) {
+    if (!activeChart || drag) return;
+    const scrollRect = chartScroll.getBoundingClientRect();
+    const relX = clientX - scrollRect.left;
+    if (relX < 0 || relX > scrollRect.width) {
+      hideHover();
+      return;
+    }
+    lastPointerX = clientX;
+    const plotX = relX + chartScroll.scrollLeft;
+    const idx = Math.max(0, Math.min(activeChart.buckets.length - 1, Math.floor(plotX / activeChart.slot)));
+    if (idx !== hoveredIndex) {
+      hoveredIndex = idx;
+      activeChart.setHover(idx);
+      renderTooltip(idx);
+    }
+    positionTooltip(clientX);
+  }
+
+  async function loadEarlier() {
+    const gran = state.granularity;
+    const entry = seriesCache[gran];
+    if (!entry || entry.loading) return;
+    const bound = earliestBound(chartWindow.tzMin, gran);
+    if (!bound || entry.from <= bound) return;
+    const stepMs = chunkDays[gran][state.range] * MS_DAY;
+    const nextFrom = Math.max(bound, alignBucketMs(entry.from - stepMs, chartWindow.tzMin, gran));
+    if (nextFrom >= entry.from) return;
+
+    const seq = reloadSeq;
+    entry.loading = true;
+    try {
+      const older = await api("GET", "usage?" + chartQuery(gran, nextFrom, entry.from));
+      if (seq !== reloadSeq) return;
+      const prevBucketsLen = activeChart ? activeChart.buckets.length : 0;
+      const prevScrollLeft = chartScroll.scrollLeft;
+      entry.rows = mergeSummaries(older, entry.rows);
+      entry.from = nextFrom;
+      if (state.granularity === gran) renderChart({ prependFromCount: prevBucketsLen, prevScrollLeft });
+    } finally {
+      entry.loading = false;
+    }
+  }
+
+  chartScroll.addEventListener("pointerdown", e => {
+    if (e.pointerType === "touch" || e.button !== 0 || !chartScroll.classList.contains("pannable")) return;
+    hideHover();
+    drag = { id: e.pointerId, startX: e.clientX, startScroll: chartScroll.scrollLeft };
+    if (chartScroll.setPointerCapture) chartScroll.setPointerCapture(e.pointerId);
+    chartScroll.classList.add("dragging");
+  });
+  chartScroll.addEventListener("pointermove", e => {
+    if (drag && e.pointerId === drag.id) {
+      chartScroll.scrollLeft = drag.startScroll - (e.clientX - drag.startX);
+      return;
+    }
+    showHover(e.clientX);
+  });
+  const endDrag = (e, resumeHover) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag = null;
+    chartScroll.classList.remove("dragging");
+    if (resumeHover) showHover(e.clientX);
+  };
+  chartScroll.addEventListener("pointerup", e => endDrag(e, true));
+  chartScroll.addEventListener("pointercancel", e => endDrag(e, false));
+  chartScroll.addEventListener("pointerleave", () => {
+    lastPointerX = null;
+    if (!drag) hideHover();
+  });
+  chartScroll.addEventListener("scroll", () => {
+    if (suppressScroll || !activeChart) return;
+    activeChart.updateScale(chartScroll.scrollLeft, chartScroll.clientWidth || CHART_BASE_PLOT);
+    if (!drag && hoveredIndex >= 0 && lastPointerX !== null) {
+      hoveredIndex = -1;
+      showHover(lastPointerX);
+    }
+    if (chartScroll.scrollLeft < CHART_LOAD_MARGIN) guarded(loadEarlier);
+  });
+
+  let lastObservedWidth = 0;
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => {
+      const w = Math.floor(chartScroll.clientWidth);
+      if (!w || w === lastObservedWidth || !activeChart) return;
+      lastObservedWidth = w;
+      renderChart({ preserveScroll: true });
+    }).observe(chartScroll);
+  }
+
+  async function setGranularity(next) {
+    if (state.granularity === next) return;
+    const reqSeq = ++granularitySeq;
+    if (seriesCache[next] !== null) {
+      state.granularity = next;
+      renderChart();
+      return;
+    }
+    const seq = reloadSeq;
+    const chartFrom = initialChartFrom(chartWindow.rangeFrom, chartWindow.tzMin, next);
+    const data = await api("GET", "usage?" + chartQuery(next, chartFrom));
+    if (seq !== reloadSeq) return;
+    seriesCache[next] = { from: chartFrom, rows: data, loading: false };
+    if (reqSeq !== granularitySeq) return;
+    state.granularity = next;
+    renderChart();
+  }
+
+  function renderChart({ prependFromCount = 0, prevScrollLeft = 0, preserveScroll = false } = {}) {
+    const entry = seriesCache[state.granularity];
+    if (entry === null) return;
+    hideHover();
+
+    const granBtn = (g, text) => h("button", {
+      type: "button",
+      class: state.granularity === g ? "active" : "",
+      "aria-pressed": String(state.granularity === g),
+      onclick: e => guarded(() => setGranularity(g), e.target),
+    }, text);
+    chartHeader.replaceChildren(h("h2", { class: "chart-title" },
+      t("calls.per"),
+      h("span", { class: "gran-toggle", role: "group" },
+        granBtn("day", t("calls.granularity.day")),
+        granBtn("hour", t("calls.granularity.hour")))));
+
+    const names = new Map();
+    for (const s of entry.rows) {
+      const k = s.group.split("\x1f")[1];
+      if (!names.has(k) || (!names.get(k) && s.key_name)) names.set(k, s.key_name);
+    }
+    const seen = new Set(keyOrder);
+    const addedKeys = [...names.keys()].filter(k => !seen.has(k))
+      .sort((a, b) => (names.get(a) || "").localeCompare(names.get(b) || "") || a.localeCompare(b));
+    keyOrder = keyOrder.concat(addedKeys);
+    const keys = keyOrder.filter(k => names.has(k));
+
+    const hasHistory = keys.length > 0 || (earliestAt > 0 && earliestAt < chartWindow.rangeFrom);
+    if (!hasHistory) {
+      activeChart = null;
+      chartBox.hidden = true;
+      chartEmpty.hidden = false;
+      chartLegend.replaceChildren();
+      return;
+    }
+
+    const oldViewWidth = chartScroll.clientWidth || CHART_BASE_PLOT;
+    const oldScrollLeft = chartScroll.scrollLeft;
+    const oldWasAtRight = oldScrollLeft + oldViewWidth >= chartScroll.scrollWidth - 2;
+
+    chartBox.hidden = false;
+    chartEmpty.hidden = true;
+    const viewWidth = Math.max(Math.floor(chartScroll.clientWidth) || CHART_BASE_PLOT, 320);
+    lastObservedWidth = Math.floor(chartScroll.clientWidth);
+
+    const buckets = buildBuckets(entry.from, chartWindow.to, chartWindow.tzMin, state.granularity, entry.rows);
+    const rangeStartBucket = formatBucket(chartWindow.rangeFrom + chartWindow.tzMin * 60e3, state.granularity);
+    const rangeStartIndex = buckets.indexOf(rangeStartBucket);
+    const rangeBuckets = rangeStartIndex >= 0 ? buckets.length - rangeStartIndex : buckets.length;
+
+    const cell = new Map(entry.rows.map(s => [s.group, s]));
+    const valueOf = (bucket, key) => {
+      const s = cell.get(bucket + "\x1f" + key);
       if (!s) return 0;
       return state.metric === "cost" ? s.cost_usd : s.input + s.output;
     };
     const label = state.metric === "cost" ? fmt.usd : fmt.compact;
-    chart.replaceChildren(h("h2", {}, t("calls.per_day")),
-      keys.length ? stackedBars(days, keys, k => keyText(names.get(k), k), valueOf, label) : h("p", { class: "muted" }, t("calls.no_calls")),
-      h("div", { class: "legend" }, keys.map((k, i) => h("span", {}, h("i", { style: `background:${PALETTE[i % PALETTE.length]}` }), keyName(names.get(k), k)))));
+    const bars = stackedBars({
+      buckets, series: keys, valueOf, label, granularity: state.granularity,
+      viewWidth, rangeBuckets, rangeStartIndex,
+    });
+
+    activeChart = { ...bars, buckets, keys, names, valueOf, label };
+    chartYWrap.replaceChildren(bars.yAxis);
+    chartScroll.replaceChildren(bars.svg);
+    chartScroll.classList.toggle("pannable", bars.scrollable);
+    chartLegend.replaceChildren(...keys.map((k, i) =>
+      h("span", {}, h("i", { style: `background:${PALETTE[i % PALETTE.length]}` }), keyName(names.get(k), k))));
+
+    suppressScroll = true;
+    if (prependFromCount > 0) {
+      const addedPx = (buckets.length - prependFromCount) * bars.slot;
+      chartScroll.scrollLeft = prevScrollLeft + addedPx;
+      if (drag) drag.startScroll += addedPx;
+    } else if (preserveScroll && !oldWasAtRight) {
+      chartScroll.scrollLeft = oldScrollLeft;
+    } else if (bars.scrollable) {
+      chartScroll.scrollLeft = chartScroll.scrollWidth;
+    } else {
+      chartScroll.scrollLeft = 0;
+    }
+    suppressScroll = false;
+    bars.updateScale(chartScroll.scrollLeft, viewWidth);
   }
 
   function renderByKey(sums) {
@@ -2005,10 +2460,24 @@ function usagePanel(container, { userMode = false, onRefresh = null } = {}) {
   }
 
   async function reload() {
-    const tz = String(-new Date().getTimezoneOffset());
-    const [keySums, dayKeySums, quotaReport] = await Promise.all([
-      api("GET", "usage?" + query({ by: "key", tz })), api("GET", "usage?" + query({ by: "day_key", tz })), api("GET", "usage/quota?" + query({}))]);
-    dayKey = dayKeySums;
+    const seq = ++reloadSeq;
+    granularitySeq++;
+    const rangeFrom = Math.floor(since());
+    const tzMin = -new Date().getTimezoneOffset();
+    const tz = String(tzMin);
+    const granularity = state.granularity;
+    const by = granularity === "hour" ? "hour_key" : "day_key";
+    const chartFrom = initialChartFrom(rangeFrom, tzMin, granularity);
+    const snapshotFilters = { key: state.key, model: state.model, account: state.account };
+    const [keySums, bucketSums, quotaReport] = await Promise.all([
+      api("GET", "usage?" + query({ by: "key", tz }, rangeFrom)),
+      api("GET", "usage?" + query({ by, tz }, chartFrom)),
+      api("GET", "usage/quota?" + query({}, rangeFrom)),
+    ]);
+    if (seq !== reloadSeq) return;
+    chartWindow = { rangeFrom, to: Date.now(), tzMin, filters: snapshotFilters };
+    keyOrder = [];
+    seriesCache = { day: null, hour: null, [granularity]: { from: chartFrom, rows: bucketSums, loading: false } };
     quota = quotaReport;
     renderTotals(keySums);
     renderChart();

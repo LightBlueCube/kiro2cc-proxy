@@ -1287,12 +1287,22 @@ func TestLogsAndUsageNeedSession(t *testing.T) {
 
 	ctx := context.Background()
 	cost := 0.5
-	if err := e.st.AddRequest(ctx, store.Request{At: time.Now(), KeyHash: "hash-alice", KeyName: "alice", Account: "main", Model: "m", Stream: true, Anchor: "ok", Status: "ok", Input: 100, Cached: 40, Output: 10, CostUSD: &cost}); err != nil {
+	at := time.Now().Truncate(time.Millisecond)
+	if err := e.st.AddRequest(ctx, store.Request{At: at, KeyHash: "hash-alice", KeyName: "alice", Account: "main", Model: "m", Stream: true, Anchor: "ok", Status: "ok", Input: 100, Cached: 40, Output: 10, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 	r = c.do("GET", "/admin/api/usage?by=day_key&tz=480", nil, nil)
 	if r.status != http.StatusOK || !strings.Contains(r.raw, `hash-alice","key_name":"alice","requests":1`) || !strings.Contains(r.raw, `"cost_usd":0.5`) {
 		t.Fatalf("usage = %d %s", r.status, r.raw)
+	}
+	wantHour := at.UTC().Add(480 * time.Minute).Format("2006-01-02 15:00")
+	r = c.do("GET", "/admin/api/usage?by=hour&tz=480", nil, nil)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `"group":"`+wantHour+`"`) {
+		t.Fatalf("usage by hour = %d %s (want %s)", r.status, r.raw, wantHour)
+	}
+	r = c.do("GET", "/admin/api/usage?by=hour_key&tz=480", nil, nil)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `"group":"`+wantHour+`\u001fhash-alice","key_name":"alice","requests":1`) {
+		t.Fatalf("usage by hour_key = %d %s (want %s)", r.status, r.raw, wantHour)
 	}
 	if r := c.do("GET", "/admin/api/requests?key=hash-alice&limit=10", nil, nil); r.status != http.StatusOK || !strings.Contains(r.raw, `"key":"alice","key_hash":"hash-alice"`) || !strings.Contains(r.raw, `"cached":40`) || !strings.Contains(r.raw, `"anchor":"ok"`) {
 		t.Fatalf("requests = %d %s", r.status, r.raw)
@@ -1300,7 +1310,7 @@ func TestLogsAndUsageNeedSession(t *testing.T) {
 	if r := c.do("GET", "/admin/api/requests?key=alice&limit=10", nil, nil); r.raw != "[]\n" {
 		t.Fatalf("requests filtered by name = %s, want none (the filter takes a hash)", r.raw)
 	}
-	if r := c.do("GET", "/admin/api/usage/filters?since=0", nil, nil); !strings.Contains(r.raw, `"key":[{"hash":"hash-alice","name":"alice"}]`) {
+	if r := c.do("GET", "/admin/api/usage/filters?since=0", nil, nil); !strings.Contains(r.raw, `"key":[{"hash":"hash-alice","name":"alice"}]`) || !strings.Contains(r.raw, fmt.Sprintf(`"earliest_at":%d`, at.UnixMilli())) {
 		t.Fatalf("filters = %s", r.raw)
 	}
 	if r := c.do("GET", "/admin/api/usage?by=nothing", nil, nil); r.status != http.StatusBadRequest {
@@ -1389,8 +1399,17 @@ func TestUserKeyUsageAndMetadata(t *testing.T) {
 	if r.status != http.StatusOK || !strings.Contains(r.raw, aliceHash) || strings.Contains(r.raw, bobHash) {
 		t.Fatalf("user usage = %d %s", r.status, r.raw)
 	}
+	wantUserHour := now.UTC().Format("2006-01-02 15:00")
+	r = user.do("GET", "/user/api/usage?by=hour_key&tz=0&key="+bobHash, nil, auth)
+	if r.status != http.StatusOK || !strings.Contains(r.raw, wantUserHour+`\u001f`+aliceHash) || strings.Contains(r.raw, bobHash) {
+		t.Fatalf("user usage by hour_key = %d %s", r.status, r.raw)
+	}
+	// An older request from bob must not leak into alice's earliest_at bound.
+	if err := e.st.AddRequest(ctx, store.Request{At: now.Add(-2 * time.Hour), KeyHash: bobHash, KeyName: "bob", Account: "other", Model: "claude-opus-5-5", Status: store.StatusOK}); err != nil {
+		t.Fatal(err)
+	}
 	r = user.do("GET", "/user/api/usage/filters?since=0", nil, auth)
-	if r.status != http.StatusOK || !strings.Contains(r.raw, `"key":[]`) || !strings.Contains(r.raw, `"gemini-3.8-flash"`) || strings.Contains(r.raw, `"claude-opus-5-5"`) || strings.Contains(r.raw, `"other"`) {
+	if r.status != http.StatusOK || !strings.Contains(r.raw, `"key":[]`) || !strings.Contains(r.raw, `"gemini-3.8-flash"`) || strings.Contains(r.raw, `"claude-opus-5-5"`) || strings.Contains(r.raw, `"other"`) || !strings.Contains(r.raw, fmt.Sprintf(`"earliest_at":%d`, now.UnixMilli())) {
 		t.Fatalf("user filters = %d %s", r.status, r.raw)
 	}
 

@@ -246,10 +246,13 @@ const (
 	ByDay     SummaryBy = "day"
 	// ByDayKey groups by "day\x1fkey hash".
 	ByDayKey SummaryBy = "day_key"
+	ByHour   SummaryBy = "hour"
+	// ByHourKey groups by "hour\x1fkey hash" ("YYYY-MM-DD HH:00\x1f<hash>").
+	ByHourKey SummaryBy = "hour_key"
 )
 
-// Summarize totals matching requests by key hash, model, account, or day.
-// Days start at local midnight for a zone tzOffset east of UTC.
+// Summarize totals matching requests by key hash, model, account, day, or hour.
+// Days and hours use the local clock for a zone tzOffset east of UTC.
 func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tzOffset time.Duration) ([]Summary, error) {
 	group, keyName, accountName := "", requestKeyNameAggExpr, "''"
 	switch by {
@@ -264,6 +267,10 @@ func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tz
 		group, keyName = fmt.Sprintf("date(at / 1000 + %d, 'unixepoch')", int64(tzOffset.Seconds())), "''"
 	case ByDayKey:
 		group = fmt.Sprintf("date(at / 1000 + %d, 'unixepoch') || char(31) || key_hash", int64(tzOffset.Seconds()))
+	case ByHour:
+		group, keyName = fmt.Sprintf("strftime('%%Y-%%m-%%d %%H:00', at / 1000 + %d, 'unixepoch')", int64(tzOffset.Seconds())), "''"
+	case ByHourKey:
+		group = fmt.Sprintf("strftime('%%Y-%%m-%%d %%H:00', at / 1000 + %d, 'unixepoch') || char(31) || key_hash", int64(tzOffset.Seconds()))
 	default:
 		return nil, fmt.Errorf("unknown grouping %q", by)
 	}
@@ -284,6 +291,20 @@ func (s *Store) Summarize(ctx context.Context, f RequestFilter, by SummaryBy, tz
 		out = append(out, sum)
 	}
 	return out, rows.Err()
+}
+
+// EarliestRequest returns the oldest timestamp among matching requests, or the
+// zero time if none match.
+func (s *Store) EarliestRequest(ctx context.Context, f RequestFilter) (time.Time, error) {
+	where, args := f.where()
+	var ms sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MIN(at) FROM requests`+where, args...).Scan(&ms); err != nil {
+		return time.Time{}, err
+	}
+	if !ms.Valid {
+		return time.Time{}, nil
+	}
+	return time.UnixMilli(ms.Int64), nil
 }
 
 // RequestKey is an API key seen in requests.
