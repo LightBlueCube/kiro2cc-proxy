@@ -52,6 +52,7 @@
   "keys.models.other": "Other model id",
   "keys.models.add": "Add",
   "keys.models.all": "all models",
+  "keys.models.count": { "one": "{count} model", "other": "{count} models" },
   "keys.workers.max": { "one": "at most {count} worker", "other": "at most {count} workers" },
   "keys.workers.unlimited": "no worker limit",
   "keys.usage.none": "unlimited · unused",

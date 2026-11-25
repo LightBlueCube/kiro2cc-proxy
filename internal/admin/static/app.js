@@ -296,12 +296,12 @@ function keyCell(k) {
     h("div", { class: "sub" }, h("span", { class: "bad nowrap", title: fmt.time(k.revoked_at) }, revoked)));
 }
 
-// accessCell shows the models a key may use over its worker limit. Lines
-// break only between model ids.
+// accessCell shows how many models a key may use over its worker limit;
+// hovering the model count lists the allowed model ids.
 function accessCell(k) {
   const models = k.models.length
-    ? k.models.map((m, i) => [i ? ", " : "", h("span", { class: "nowrap" }, m)])
-    : h("span", { class: "muted" }, t("keys.models.all"));
+    ? h("span", { class: "nowrap", title: k.models.join("\n") }, t("keys.models.count", { count: k.models.length }))
+    : h("span", { class: "muted nowrap" }, t("keys.models.all"));
   return stack(models, h("span", { class: "nowrap" },
     k.max_workers !== null ? t("keys.workers.max", { count: k.max_workers }) : t("keys.workers.unlimited")));
 }
@@ -389,7 +389,7 @@ function totalsCell(totals) {
 function keyColumns(groups) {
   return [
     { title: t("keys.col.key"), cell: keyCell },
-    { title: t("keys.col.access"), cell: accessCell },
+    { title: t("keys.col.access"), fit: true, cell: accessCell },
     { title: t("keys.col.usage"), cell: k => spendCell(k, usageGroups(k, groups)) },
     { title: t("keys.col.quota"), hint: t("keys.col.quota.hint"), num: true, fit: true, cell: k => quotaCell(k, usageGroups(k, groups)) },
     { title: t("keys.col.totals"), hint: t("keys.col.totals.hint"), cell: k => totalsCell(k.totals) },
