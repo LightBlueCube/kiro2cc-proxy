@@ -329,14 +329,32 @@ func (g *Gateway) claimSession(ctx context.Context, snap snapshot, account *pool
 				return nil, ctx.Err()
 			}
 		}
-		if err := g.tryAcquireBusyLocked(r); err != nil {
+		parked, limitErr := g.tryAcquireBusyOrEvictLocked(r)
+		if limitErr != nil {
 			g.mu.Unlock()
-			return nil, err
+			return nil, limitErr
+		}
+		if parked != nil {
+			g.mu.Unlock()
+			if !g.cancelEvictedParked(ctx, parked) {
+				return nil, ctx.Err()
+			}
+			continue
 		}
 		if err := account.TryAcquire(r.group); err != nil {
 			g.releaseBusyLocked(r.user)
+			var evicted *activeTurn
+			if r.evictWaiting && errors.Is(err, pool.ErrSlotBusy) {
+				evicted = g.evictParkedLocked(r.user, account)
+			}
 			g.mu.Unlock()
-			return nil, err
+			if evicted == nil {
+				return nil, err
+			}
+			if !g.cancelEvictedParked(ctx, evicted) {
+				return nil, ctx.Err()
+			}
+			continue
 		}
 		live := sess != nil && sess.proc.Alive() && sess.proc.HasSession(snap.SessionID)
 		if sess == nil {
@@ -418,7 +436,13 @@ func (g *Gateway) startFresh(ctx context.Context, r *run, reason ReplayReason) (
 				lacking = append(lacking, a.Name())
 			}
 		}
-		account, err := g.pickAccount(r)
+		account, err := g.pickAccount(ctx, r)
+		if ctx.Err() != nil {
+			if account != nil {
+				account.Release()
+			}
+			return nil, cancelledFailure()
+		}
 		if err != nil && r.pin != "" {
 			if failure := g.pinnedFailure(r); failure != nil {
 				return nil, failure
@@ -537,7 +561,26 @@ func unavailableError(account *pool.Account, r *run, cause error) *accountError 
 	return newAccountError("the account holding this conversation is unavailable", true, cause)
 }
 
-func (g *Gateway) pickAccount(r *run) (*pool.Account, error) {
+func (g *Gateway) pickAccount(ctx context.Context, r *run) (*pool.Account, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		account, err := g.tryPickAccount(r)
+		if err == nil {
+			return account, nil
+		}
+		evict := g.pickParkedForAccount(r)
+		if evict == nil {
+			return nil, err
+		}
+		if !g.cancelEvictedParked(ctx, evict) {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (g *Gateway) tryPickAccount(r *run) (*pool.Account, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	idle := make(map[string]pool.IdleSessions, len(g.sessions))
@@ -579,13 +622,28 @@ func sessionAffinity(user string, t *transcript) string {
 
 // openSession creates a session on account and claims it.
 func (g *Gateway) openSession(ctx context.Context, r *run, account *pool.Account) (*activeTurn, error) {
-	g.mu.Lock()
-	if err := g.tryAcquireBusyLocked(r); err != nil {
+	var evicted []*activeTurn
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		g.mu.Lock()
+		parked, err := g.tryAcquireBusyOrEvictLocked(r)
+		if err != nil {
+			g.mu.Unlock()
+			return nil, err
+		}
+		if parked != nil {
+			g.mu.Unlock()
+			if !g.cancelEvictedParked(ctx, parked) {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		evicted = g.evictIdleLocked(r.user, r.maxWorkers, account)
 		g.mu.Unlock()
-		return nil, err
+		break
 	}
-	evicted := g.evictIdleLocked(r.user, r.maxWorkers, account)
-	g.mu.Unlock()
 	g.closeEvicted(evicted)
 
 	proc, err := account.Proc(ctx, profileFor(r.req.Tools))
@@ -644,25 +702,126 @@ func (g *Gateway) releaseClaim(at *activeTurn) {
 	close(at.closed)
 }
 
-// tryAcquireBusyLocked reserves one active-turn slot for r's key and the
-// global pool, or returns the limit error when busy turns already fill
-// either cap. It needs g.mu.
-func (g *Gateway) tryAcquireBusyLocked(r *run) *conv.Error {
+// tryAcquireBusyOrEvictLocked reserves one active-turn slot for r's key and
+// the global pool. When busy turns fill either cap and r.evictWaiting is set,
+// it unparks r's key's oldest parked turn for the caller to cancel; otherwise
+// it returns the limit error. It needs g.mu.
+func (g *Gateway) tryAcquireBusyOrEvictLocked(r *run) (*activeTurn, *conv.Error) {
 	if r.maxWorkers != nil && g.busyByKey[r.user] >= *r.maxWorkers {
-		return &conv.Error{
+		if r.evictWaiting {
+			if old := g.evictParkedLocked(r.user, nil); old != nil {
+				return old, nil
+			}
+		}
+		return nil, &conv.Error{
 			Kind:    conv.ErrKeyBusy,
 			Message: fmt.Sprintf("this API key reached its limit of %d concurrent requests", *r.maxWorkers),
 		}
 	}
 	if max := int(g.maxWorkers.Load()); max > 0 && g.busyTotal >= max {
-		return &conv.Error{
+		if r.evictWaiting {
+			if old := g.evictParkedLocked(r.user, nil); old != nil {
+				return old, nil
+			}
+		}
+		return nil, &conv.Error{
 			Kind:    conv.ErrUnavailable,
 			Message: "service is busy, please try again later",
 		}
 	}
 	g.busyTotal++
 	g.busyByKey[r.user]++
-	return nil
+	return nil, nil
+}
+
+func olderParked(a, b *activeTurn) bool {
+	if b == nil {
+		return true
+	}
+	return a.parkedAt.Before(b.parkedAt) || (a.parkedAt.Equal(b.parkedAt) && a.sess.ref < b.sess.ref)
+}
+
+func unparkForEvictionLocked(at *activeTurn) *activeTurn {
+	if at == nil {
+		return nil
+	}
+	at.parked = nil
+	if at.parkTimer != nil {
+		at.parkTimer.Stop()
+	}
+	return at
+}
+
+// evictParkedLocked selects and unparks user's oldest parked turn (restricted
+// to account when non-nil) so the caller can cancel it outside g.mu. It needs
+// g.mu.
+func (g *Gateway) evictParkedLocked(user string, account *pool.Account) *activeTurn {
+	var victim *activeTurn
+	for _, sess := range g.sessions {
+		at := sess.turn
+		if at == nil || at.parked == nil || at.turn == nil || at.finished || sess.user != user {
+			continue
+		}
+		if account != nil && sess.account != account {
+			continue
+		}
+		if olderParked(at, victim) {
+			victim = at
+		}
+	}
+	return unparkForEvictionLocked(victim)
+}
+
+// pickParkedForAccount selects and unparks r's key's oldest parked turn on the
+// highest-priority eligible account when r.evictWaiting is enabled.
+func (g *Gateway) pickParkedForAccount(r *run) *activeTurn {
+	if !r.evictWaiting {
+		return nil
+	}
+	eligible := map[string]int{} // accountID → priority
+	for _, a := range g.pool.Accounts() {
+		if r.exclude[a.ID()] || (r.pin != "" && a.ID() != r.pin) {
+			continue
+		}
+		if a.Available(r.group) == nil {
+			eligible[a.ID()] = a.Priority()
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var victim *activeTurn
+	victimPrio := 0
+	for _, sess := range g.sessions {
+		at := sess.turn
+		if at == nil || at.parked == nil || at.turn == nil || at.finished || sess.user != r.user {
+			continue
+		}
+		prio, ok := eligible[sess.account.ID()]
+		if !ok {
+			continue
+		}
+		if victim == nil || prio > victimPrio || (prio == victimPrio && olderParked(at, victim)) {
+			victim, victimPrio = at, prio
+		}
+	}
+	return unparkForEvictionLocked(victim)
+}
+
+// cancelEvictedParked cancels an evicted parked turn, drops its unrewindable
+// tool-call snapshot, and waits for its worker slot to be freed.
+func (g *Gateway) cancelEvictedParked(ctx context.Context, old *activeTurn) bool {
+	g.movedPast(old.account.ID(), old.sess.id)
+	g.log.Info("evicting parked turn for worker limit", "account", old.account.Name(), "session", old.sess.id)
+	old.turn.Cancel()
+	select {
+	case <-old.closed:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (g *Gateway) releaseTurnLocked(at *activeTurn) {

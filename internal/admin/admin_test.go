@@ -402,31 +402,36 @@ func TestKeyLimits(t *testing.T) {
 			t.Fatalf("limits %v = %d %s", bad, r.status, r.raw)
 		}
 	}
-	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "max_workers": 2, "limits": map[string]float64{"claude-gpt": 30}}, nil)
+	r := c.do("POST", "/admin/api/keys", map[string]any{"name": "alice", "max_workers": 2, "evict_waiting": true, "limits": map[string]float64{"claude-gpt": 30}}, nil)
 	token, _ := r.body["key"].(string)
-	if caller, ok := e.ctl.Lookup(token); !ok || caller.MaxWorkers == nil || *caller.MaxWorkers != 2 || caller.Limits["claude-gpt"] != 30 || len(caller.Limits) != 1 || caller.LimitTotal != nil {
+	if caller, ok := e.ctl.Lookup(token); !ok || caller.MaxWorkers == nil || *caller.MaxWorkers != 2 || !caller.EvictWaiting || caller.Limits["claude-gpt"] != 30 || len(caller.Limits) != 1 || caller.LimitTotal != nil {
 		t.Fatalf("lookup = %+v %v (%s)", caller, ok, r.raw)
 	}
 
 	r = c.do("GET", "/admin/api/keys", nil, nil)
 	var list keysView
 	json.Unmarshal([]byte(r.raw), &list)
-	if len(list.Keys) != 1 || list.Keys[0].MaxWorkers == nil || *list.Keys[0].MaxWorkers != 2 || list.Keys[0].Limits["claude-gpt"] != 30 || list.Keys[0].LimitTotal != nil || len(list.Groups) != 2 {
+	if len(list.Keys) != 1 || list.Keys[0].MaxWorkers == nil || *list.Keys[0].MaxWorkers != 2 || !list.Keys[0].EvictWaiting || list.Keys[0].Limits["claude-gpt"] != 30 || list.Keys[0].LimitTotal != nil || len(list.Groups) != 2 {
 		t.Fatalf("keys = %s", r.raw)
+	}
+	userRes := c.do("GET", "/user/api/key", nil, map[string]string{"Authorization": "Bearer " + token})
+	var uv userKeyView
+	if userRes.status != http.StatusOK || json.Unmarshal([]byte(userRes.raw), &uv) != nil || !uv.Key.EvictWaiting {
+		t.Fatalf("/user/api/key = %d %s", userRes.status, userRes.raw)
 	}
 
 	// Switching to a total limit drops the group limits.
 	hash := list.Keys[0].Hash
-	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"name": "alice", "note": "n", "max_workers": 4, "limit_total": 20, "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
+	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"name": "alice", "note": "n", "max_workers": 4, "evict_waiting": true, "limit_total": 20, "limits": map[string]float64{}}, nil); r.status != http.StatusOK {
 		t.Fatalf("update = %d %s", r.status, r.raw)
 	}
-	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers == nil || *caller.MaxWorkers != 4 || caller.LimitTotal == nil || *caller.LimitTotal != 20 {
+	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers == nil || *caller.MaxWorkers != 4 || !caller.EvictWaiting || caller.LimitTotal == nil || *caller.LimitTotal != 20 {
 		t.Fatalf("after switching to a total = %+v", caller)
 	}
 	if r := c.do("PATCH", "/admin/api/keys/"+hash, map[string]any{"name": "alice", "note": "n"}, nil); r.status != http.StatusOK {
 		t.Fatalf("clear = %d %s", r.status, r.raw)
 	}
-	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers != nil || caller.LimitTotal != nil {
+	if caller, _ := e.ctl.Lookup(token); len(caller.Limits) != 0 || caller.MaxWorkers != nil || caller.EvictWaiting || caller.LimitTotal != nil {
 		t.Fatalf("limits after clearing = %+v", caller)
 	}
 }

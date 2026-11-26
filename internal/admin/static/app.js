@@ -283,6 +283,19 @@ function limitEditor(groups, k) {
   };
 }
 
+// advancedKeyEditor holds rare per-key options inside a collapsible fold.
+function advancedKeyEditor(k) {
+  const evictWaiting = h("input", { type: "checkbox", checked: Boolean(k.evict_waiting) });
+  const node = h("details", { class: "fold key-advanced", open: Boolean(k.evict_waiting) },
+    h("summary", {}, t("keys.advanced")),
+    h("label", { class: "check" }, evictWaiting, t("keys.evict_waiting")),
+    h("p", { class: "sub" }, t("keys.evict_waiting.hint")));
+  return {
+    node,
+    read: () => ({ evict_waiting: evictWaiting.checked }),
+  };
+}
+
 // keyCell shows a key's name over its short hash, note, and dates; hovering
 // a date shows its time.
 function keyCell(k) {
@@ -302,8 +315,12 @@ function accessCell(k) {
   const models = k.models.length
     ? h("span", { class: "nowrap", title: k.models.join("\n") }, t("keys.models.count", { count: k.models.length }))
     : h("span", { class: "muted nowrap" }, t("keys.models.all"));
-  return stack(models, h("span", { class: "nowrap" },
-    k.max_workers !== null ? t("keys.workers.max", { count: k.max_workers }) : t("keys.workers.unlimited")));
+  const workers = h("span", { class: "nowrap" },
+    k.max_workers !== null ? t("keys.workers.max", { count: k.max_workers }) : t("keys.workers.unlimited"));
+  const evict = k.evict_waiting
+    ? h("span", { class: "muted nowrap", title: t("keys.evict_waiting.hint") }, t("keys.evict_waiting.badge"))
+    : null;
+  return stack(models, workers, evict);
 }
 
 function spendBar(spent, limit) {
@@ -438,21 +455,23 @@ views.keys = container => {
   let offered = [];
   let newLimits = null;
   let newModels = null;
+  let newAdvanced = null;
 
   const name = h("input", { required: true, maxlength: 64, placeholder: t("keys.name.placeholder") });
   const note = h("input", { placeholder: t("common.optional") });
   const modelsBox = h("div");
   const limitsRow = h("div", { class: "row" });
+  const advancedBox = h("div");
   const form = h("form", { onsubmit: event => {
     event.preventDefault();
     guarded(async () => {
-      const data = await api("POST", "keys", { name: name.value, note: note.value, models: newModels.read(), ...newLimits.read() });
+      const data = await api("POST", "keys", { name: name.value, note: note.value, models: newModels.read(), ...newLimits.read(), ...newAdvanced.read() });
       created.replaceChildren(h("div", { class: "card" },
         h("h2", {}, t("keys.created.title", { name: name.value })),
         h("p", { class: "muted" }, t("keys.created.note")),
         h("div", { class: "secret" }, data.key)));
       name.value = note.value = "";
-      newLimits = newModels = null;
+      newLimits = newModels = newAdvanced = null;
       await load();
     }, event.submitter);
   } },
@@ -462,6 +481,7 @@ views.keys = container => {
     h("div", { class: "field" }, t("keys.models.label"), modelsBox),
     limitsRow,
     h("p", { class: "muted" }, t("keys.limit.hint")),
+    advancedBox,
     h("button", { type: "submit" }, t("keys.create")));
 
   async function load() {
@@ -475,6 +495,10 @@ views.keys = container => {
     if (!newModels) {
       newModels = modelPicker(offered, []);
       modelsBox.replaceChildren(newModels.node);
+    }
+    if (!newAdvanced) {
+      newAdvanced = advancedKeyEditor({ evict_waiting: false });
+      advancedBox.replaceChildren(newAdvanced.node);
     }
     list.replaceChildren(table([
       ...keyColumns(groups),
@@ -495,10 +519,11 @@ views.keys = container => {
     const noteInput = h("input", { value: k.note });
     const models = modelPicker(offered, k.models);
     const limits = limitEditor(groups, k);
+    const advanced = advancedKeyEditor(k);
     const save = event => {
       event.preventDefault();
       guarded(async () => {
-        await api("PATCH", `keys/${k.hash}`, { name: nameInput.value, note: noteInput.value, models: models.read(), ...limits.read() });
+        await api("PATCH", `keys/${k.hash}`, { name: nameInput.value, note: noteInput.value, models: models.read(), ...limits.read(), ...advanced.read() });
         editor.replaceChildren();
         toast(t("common.saved"));
         await load();
@@ -566,6 +591,7 @@ views.keys = container => {
           h("label", { class: "grow" }, t("common.note"), noteInput)),
         h("div", { class: "field" }, t("keys.models.label"), models.node),
         h("div", { class: "row" }, limits.nodes),
+        advanced.node,
         h("div", { class: "row", style: "margin-top:8px" },
           h("button", { type: "submit", class: "primary" }, t("common.save")),
           h("button", { type: "button", onclick: () => editor.replaceChildren() }, t("common.cancel")))),

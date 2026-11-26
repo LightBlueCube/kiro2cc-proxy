@@ -148,6 +148,9 @@ type Caller struct {
 	// MaxWorkers caps the key's concurrent workers (open sessions; excess
 	// idle ones are closed first); nil is unlimited.
 	MaxWorkers *int
+	// EvictWaiting lets this key's requests evict its own oldest worker
+	// waiting for tool results when worker caps are full.
+	EvictWaiting bool
 	// LimitTotal caps the key's whole list-price spend in USD (it never
 	// resets); nil is no total limit.
 	LimitTotal *float64

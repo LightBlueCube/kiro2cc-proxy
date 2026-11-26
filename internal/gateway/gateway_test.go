@@ -3361,6 +3361,236 @@ func TestWorkerLimitsAndIdleEviction(t *testing.T) {
 	}
 }
 
+func TestEvictOldestWaitingWorkerWhenFull(t *testing.T) {
+	ctx := context.Background()
+	tools := []conv.ToolSpec{readTool}
+	parkMsg := func(tag string) conv.Message { return user(`@tool read {"tag":"` + tag + `"}`) }
+
+	t.Run("key_cap_oldest_first_and_running_protected", func(t *testing.T) {
+		h := newHarness(t, 2, nil)
+		two := 2
+		bot := testCaller("bot")
+		bot.MaxWorkers = &two
+		bot.EvictWaiting = true
+
+		// Park two conversations in order: p1 (oldest) then p2 (newer).
+		p1Req := conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{parkMsg("p1")}}
+		p2Req := conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{parkMsg("p2")}}
+		p1 := h.completeAs(ctx, bot, p1Req)
+		time.Sleep(2 * time.Millisecond)
+		p2 := h.completeAs(ctx, bot, p2Req)
+		if p1.err != nil || p1.finish != conv.FinishToolCalls || p2.err != nil || p2.finish != conv.FinishToolCalls {
+			t.Fatalf("park p1=%+v p2=%+v", p1, p2)
+		}
+		recsBefore := h.records.all(t, 2)
+		p1Sess, p2Sess := recsBefore[0].SessionID, recsBefore[1].SessionID
+
+		// Opening p3 hits MaxWorkers=2 and must evict p1 (oldest parked),
+		// leaving p2 parked and total sessions capped at 2.
+		p3 := h.completeAs(ctx, bot, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("p3")}})
+		if p3.err != nil || p3.finish != conv.FinishStop {
+			t.Fatalf("p3 = %+v", p3)
+		}
+		sessions := h.gw.Sessions()
+		if len(sessions) != 2 {
+			t.Fatalf("sessions after p3 = %+v, want 2", sessions)
+		}
+		sawP1, sawP2Parked := false, false
+		for _, s := range sessions {
+			if s.ID == p1Sess {
+				sawP1 = true
+			}
+			if s.ID == p2Sess && s.Turn != nil && s.Turn.State == TurnParked {
+				sawP2Parked = true
+			}
+		}
+		if sawP1 || !sawP2Parked {
+			t.Fatalf("sessions = %+v; want p1 (%s) evicted and p2 (%s) still parked", sessions, p1Sess, p2Sess)
+		}
+
+		// p2 still continues in place (ModeContinue).
+		p2Cont := h.completeAs(ctx, bot, conv.Request{
+			Model: "gemini-3.8-flash", Tools: tools,
+			Messages: []conv.Message{
+				parkMsg("p2"),
+				{Role: conv.RoleAssistant, ToolCalls: p2.calls, Anchors: []string{p2.anchor}},
+				{Role: conv.RoleTool, ToolCallID: p2.calls[0].ID, ToolName: "read", Text: "res2"},
+			},
+		})
+		if p2Cont.err != nil || p2Cont.finish != conv.FinishStop {
+			t.Fatalf("p2Cont = %+v", p2Cont)
+		}
+		if rec := h.records.all(t, 4)[3]; rec.Mode != ModeContinue || rec.SessionID != p2Sess {
+			t.Fatalf("p2Cont rec = %+v, want ModeContinue on %s", rec, p2Sess)
+		}
+
+		// Follow-up on the evicted p1 reopens it from disk and rewinds past the
+		// cancelled dangling tool call (movedPast dropped the Steps=0 position).
+		p1Follow := h.completeAs(ctx, bot, conv.Request{
+			Model: "gemini-3.8-flash", Tools: tools,
+			Messages: []conv.Message{
+				parkMsg("p1"),
+				{Role: conv.RoleAssistant, ToolCalls: p1.calls, Anchors: []string{p1.anchor}},
+				{Role: conv.RoleTool, ToolCallID: p1.calls[0].ID, ToolName: "read", Text: "res1"},
+			},
+		})
+		if p1Follow.err != nil || p1Follow.finish != conv.FinishStop {
+			t.Fatalf("p1Follow = %+v", p1Follow)
+		}
+		if rec := h.records.all(t, 5)[4]; rec.Mode != ModeRewind || rec.SessionID != p1Sess {
+			t.Fatalf("p1Follow rec = %+v, want ModeRewind on %s", rec, p1Sess)
+		}
+
+		// Running turns are never evicted even when EvictWaiting is enabled.
+		one := 1
+		bot.MaxWorkers = &one
+		h.gw.TrimKeyIdle(bot.KeyHash, bot.MaxWorkers)
+		hangCtx, cancelHang := context.WithCancel(ctx)
+		hangDone := make(chan result, 1)
+		go func() {
+			hangDone <- h.completeAs(hangCtx, bot, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("@hang")}})
+		}()
+		for !h.turnIs(TurnRunning) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		blocked := h.completeAs(ctx, bot, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("blocked")}})
+		if blocked.err == nil || blocked.err.Kind != conv.ErrKeyBusy {
+			t.Fatalf("while running = %+v, want ErrKeyBusy", blocked)
+		}
+		cancelHang()
+		<-hangDone
+	})
+
+	t.Run("warm_resume_and_toggle", func(t *testing.T) {
+		h := newHarness(t, 1, nil)
+		one := 1
+		caller := testCaller("toggle")
+		caller.MaxWorkers = &one
+
+		// Seed an idle conversation w1, then park w2 (which evicts idle w1 to disk).
+		w1 := h.completeAs(ctx, caller, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("w1")}})
+		if w1.err != nil {
+			t.Fatal(w1.err)
+		}
+		w2 := h.completeAs(ctx, caller, conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{parkMsg("w2")}})
+		if w2.err != nil || w2.finish != conv.FinishToolCalls {
+			t.Fatalf("w2 = %+v", w2)
+		}
+
+		// With EvictWaiting off, warm-resuming w1 fails with ErrKeyBusy.
+		w1FollowReq := conv.Request{
+			Model:    "gemini-3.8-flash",
+			Messages: []conv.Message{user("w1"), {Role: conv.RoleAssistant, Text: w1.text}, user("w1-2")},
+		}
+		if blocked := h.completeAs(ctx, caller, w1FollowReq); blocked.err == nil || blocked.err.Kind != conv.ErrKeyBusy {
+			t.Fatalf("before toggle = %+v, want ErrKeyBusy", blocked)
+		}
+
+		// Enabling EvictWaiting lets this key's next request evict its own
+		// already-parked w2 so warm-resuming w1 (claimSession) succeeds.
+		caller.EvictWaiting = true
+		resumed := h.completeAs(ctx, caller, w1FollowReq)
+		if resumed.err != nil || resumed.finish != conv.FinishStop {
+			t.Fatalf("after toggle = %+v", resumed)
+		}
+		recs := h.records.all(t, 4)
+		if recs[3].Mode != ModeWarm || recs[3].SessionID != recs[0].SessionID {
+			t.Fatalf("resumed rec = %+v, want ModeWarm on %s", recs[3], recs[0].SessionID)
+		}
+		if got := h.gw.Sessions(); len(got) != 1 || got[0].ID != recs[0].SessionID {
+			t.Fatalf("sessions after warm evict = %+v, want only %s", got, recs[0].SessionID)
+		}
+	})
+
+	t.Run("account_switch_idle_first_and_strict_key_isolation", func(t *testing.T) {
+		h := newHarness(t, 2, nil)
+		h.p.SetTurnsPerAccount(1)
+
+		bot := testCaller("bot")
+		bot.EvictWaiting = true
+		bot2 := testCaller("bot2")
+		bot2.EvictWaiting = true
+		normal := testCaller("normal")
+
+		// Park a1 on one account; the other account still has a free slot.
+		a1 := h.completeAs(ctx, bot, conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{parkMsg("a1")}})
+		if a1.err != nil || a1.finish != conv.FinishToolCalls {
+			t.Fatalf("a1 = %+v", a1)
+		}
+		a1Rec := h.records.all(t, 1)[0]
+		a1Acct, a1Sess := a1Rec.Account, a1Rec.SessionID
+
+		// Next request finishes as idle on the OTHER account (free slot first),
+		// leaving a1 parked untouched.
+		idle1 := h.completeAs(ctx, bot, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("idle-1")}})
+		if idle1.err != nil {
+			t.Fatalf("idle1 = %+v", idle1.err)
+		}
+		otherAcct := h.records.all(t, 2)[1].Account
+		if otherAcct == a1Acct {
+			t.Fatalf("idle1 picked %s instead of free other account", otherAcct)
+		}
+
+		// Now otherAcct has an idle worker and a1Acct has a parked turn: next
+		// request must evict otherAcct's idle worker before touching a1.
+		a2 := h.completeAs(ctx, bot, conv.Request{Model: "gemini-3.8-flash", Tools: tools, Messages: []conv.Message{parkMsg("a2")}})
+		if a2.err != nil || a2.finish != conv.FinishToolCalls {
+			t.Fatalf("a2 = %+v", a2)
+		}
+		if rec := h.records.all(t, 3)[2]; rec.Account != otherAcct {
+			t.Fatalf("a2 picked %s instead of evicting idle on %s", rec.Account, otherAcct)
+		}
+		a1StillParked := false
+		for _, s := range h.gw.Sessions() {
+			if s.ID == a1Sess && s.Turn != nil && s.Turn.State == TurnParked {
+				a1StillParked = true
+			}
+		}
+		if !a1StillParked {
+			t.Fatalf("a1 (%s) was evicted before idle worker: %+v", a1Sess, h.gw.Sessions())
+		}
+
+		// Both accounts are now full with bot's parked turns (a1 oldest, a2 newer).
+		// Neither a normal key nor another EvictWaiting key may evict bot's turns.
+		for _, other := range []conv.Caller{normal, bot2} {
+			blocked := h.completeAs(ctx, other, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("other-" + other.Name)}})
+			if blocked.err == nil || blocked.err.Kind != conv.ErrUnavailable {
+				t.Fatalf("%s against bot's parked turns = %+v, want ErrUnavailable", other.Name, blocked)
+			}
+		}
+
+		// Pause a1Acct (holding bot's oldest parked turn): bot's own request
+		// must skip the paused account and evict bot's a2 on otherAcct.
+		h.p.Account(a1Acct).SetPaused(true)
+		a3 := h.completeAs(ctx, bot, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("a3")}})
+		if a3.err != nil || a3.finish != conv.FinishStop {
+			t.Fatalf("a3 = %+v", a3)
+		}
+		if rec := h.records.all(t, 6)[5]; rec.Account != otherAcct {
+			t.Fatalf("a3 account = %s, want %s (skipped paused %s)", rec.Account, otherAcct, a1Acct)
+		}
+
+		// Unpause a1Acct and cap global workers to 1 while bot holds the single
+		// busy slot (a1 parked on a1Acct): other keys still get ErrUnavailable,
+		// while bot itself evicts its own parked turn and succeeds.
+		h.p.Account(a1Acct).SetPaused(false)
+		h.gw.SetMaxWorkers(1)
+		for _, other := range []conv.Caller{normal, bot2} {
+			blocked := h.completeAs(ctx, other, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("global-" + other.Name)}})
+			if blocked.err == nil || blocked.err.Kind != conv.ErrUnavailable {
+				t.Fatalf("%s on global cap = %+v, want ErrUnavailable", other.Name, blocked)
+			}
+		}
+		botGlobal := h.completeAs(ctx, bot, conv.Request{Model: "gemini-3.8-flash", Messages: []conv.Message{user("global-bot")}})
+		if botGlobal.err != nil || botGlobal.finish != conv.FinishStop {
+			t.Fatalf("botGlobal = %+v", botGlobal)
+		}
+		if got := h.gw.Sessions(); len(got) != 1 {
+			t.Fatalf("sessions after botGlobal = %+v, want 1", got)
+		}
+	})
+}
+
 func TestDownstreamErrorsHideInternalInfo(t *testing.T) {
 	forbidden := []string{"acct0", "acct1", "antigravity", "Antigravity", "agy", "agyrelay", "cooling down", "paused", "worker", "verify", "no route"}
 	assertClean := func(t *testing.T, msg string) {

@@ -355,7 +355,7 @@ func (g *Gateway) serve(ctx context.Context, caller conv.Caller, req conv.Reques
 		return err
 	}
 
-	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
+	r := &run{user: caller.KeyHash, keyName: caller.Name, maxWorkers: caller.MaxWorkers, evictWaiting: caller.EvictWaiting, req: req, t: t, model: model, offered: offered, group: rec.QuotaGroup, exclude: map[string]bool{}, reuse: true}
 	keys := g.conversationKeys(caller.KeyHash, r.choice(), t)
 	g.applyConversation(r, keys)
 
@@ -490,12 +490,13 @@ func validate(req conv.Request, t *transcript) *conv.Error {
 
 // run is one request's planning state across attempts.
 type run struct {
-	user       string
-	keyName    string
-	maxWorkers *int
-	req        conv.Request
-	t          *transcript
-	model      modelChoice
+	user         string
+	keyName      string
+	maxWorkers   *int
+	evictWaiting bool
+	req          conv.Request
+	t            *transcript
+	model        modelChoice
 	// offered is the merged catalog the model was found in.
 	offered []modelEntry
 	group   string

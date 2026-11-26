@@ -53,11 +53,12 @@ func (h *Handler) listModels(w http.ResponseWriter, r *http.Request) {
 }
 
 type keyView struct {
-	Hash       string   `json:"hash"`
-	Name       string   `json:"name"`
-	Note       string   `json:"note"`
-	Models     []string `json:"models"`
-	MaxWorkers *int     `json:"max_workers"`
+	Hash         string   `json:"hash"`
+	Name         string   `json:"name"`
+	Note         string   `json:"note"`
+	Models       []string `json:"models"`
+	MaxWorkers   *int     `json:"max_workers"`
+	EvictWaiting bool     `json:"evict_waiting"`
 	// LimitTotal, Limits, and Spent are list-price USD; Limits and Spent
 	// are by quota group.
 	LimitTotal *float64                `json:"limit_total"`
@@ -137,7 +138,7 @@ type keysView struct {
 
 func buildKeyView(k store.Key, spent map[string]float64, totals keyTotalsView, quota map[string]keyQuotaView) keyView {
 	v := keyView{
-		Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers,
+		Hash: k.Hash, Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, EvictWaiting: k.EvictWaiting,
 		LimitTotal: k.LimitTotal, Limits: k.Limits, Spent: spent, Quota: quota, Totals: totals, CreatedAt: k.CreatedAt,
 	}
 	if v.Models == nil {
@@ -224,17 +225,18 @@ func (h *Handler) userKey(w http.ResponseWriter, r *http.Request) {
 }
 
 type keyRequest struct {
-	Name       string             `json:"name"`
-	Note       string             `json:"note"`
-	Models     []string           `json:"models"`
-	MaxWorkers *int               `json:"max_workers"`
-	LimitTotal *float64           `json:"limit_total"`
-	Limits     map[string]float64 `json:"limits"`
+	Name         string             `json:"name"`
+	Note         string             `json:"note"`
+	Models       []string           `json:"models"`
+	MaxWorkers   *int               `json:"max_workers"`
+	EvictWaiting bool               `json:"evict_waiting"`
+	LimitTotal   *float64           `json:"limit_total"`
+	Limits       map[string]float64 `json:"limits"`
 }
 
 func (k keyRequest) update() store.KeyUpdate {
 	return store.KeyUpdate{
-		Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, LimitTotal: k.LimitTotal, Limits: k.Limits,
+		Name: k.Name, Note: k.Note, Models: k.Models, MaxWorkers: k.MaxWorkers, EvictWaiting: k.EvictWaiting, LimitTotal: k.LimitTotal, Limits: k.Limits,
 	}
 }
 

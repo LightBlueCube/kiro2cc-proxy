@@ -60,15 +60,16 @@ var migrations = []string{
 		created_at   INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE TABLE api_keys (
-		hash        TEXT PRIMARY KEY,
-		name        TEXT NOT NULL UNIQUE,
-		note        TEXT NOT NULL DEFAULT '',
-		models      TEXT NOT NULL DEFAULT '[]',
-		max_workers INTEGER,
-		limit_total REAL,
-		limits      TEXT NOT NULL DEFAULT '{}',
-		created_at  INTEGER NOT NULL DEFAULT 0,
-		revoked_at  INTEGER
+		hash          TEXT PRIMARY KEY,
+		name          TEXT NOT NULL UNIQUE,
+		note          TEXT NOT NULL DEFAULT '',
+		models        TEXT NOT NULL DEFAULT '[]',
+		max_workers   INTEGER,
+		evict_waiting INTEGER NOT NULL DEFAULT 0,
+		limit_total   REAL,
+		limits        TEXT NOT NULL DEFAULT '{}',
+		created_at    INTEGER NOT NULL DEFAULT 0,
+		revoked_at    INTEGER
 	);
 	CREATE TABLE admin_sessions (
 		token_hash BLOB PRIMARY KEY,
