@@ -242,10 +242,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		r = tagged
-		if c := callOf(r); c.session != "" && ap.isStopped(c.session) {
-			s.log.Warn("generation call refused: its session was stopped", "account", name, "session", c.session)
-			http.Error(w, "this session was stopped by risk control", http.StatusForbidden)
-			return
+		if c := callOf(r); c.session != "" {
+			if ap.isStopped(c.session) {
+				s.log.Warn("generation call refused: its session was stopped", "account", name, "session", c.session)
+				http.Error(w, "this session was stopped by risk control", http.StatusForbidden)
+				return
+			}
+			if len(c.nativeTools) > 0 {
+				s.log.Error("generation call refused: agy fell back to default agent", "account", name, "session", c.session, "tools", c.nativeTools)
+				ap.report(c, &CallError{Code: http.StatusBadGateway, Message: "upstream request failed", Request: c.request})
+				if c.capture != nil {
+					c.capture.finish(http.StatusBadGateway, nil, false)
+				}
+				http.Error(w, "upstream request failed", http.StatusBadGateway)
+				return
+			}
 		}
 	}
 	ap.proxy.ServeHTTP(w, r)

@@ -22,31 +22,35 @@ const (
 	oneHarnessStepUserInput  int8 = 0x0e
 	oneHarnessStepCheckpoint int8 = 0x17
 
-	overrideScanWindow   = 96
-	epilogueScanWindow   = 64
-	truncRetScanWindow   = 32
-	selectPreScanWindow  = 32
-	maxStepLoadSlotBytes = 32
-	zeroReturnPatchSize  = 7 // xor eax, eax (2) + jmp rel32 (5)
+	overrideScanWindow     = 96
+	epilogueScanWindow     = 64
+	truncRetScanWindow     = 32
+	selectPreScanWindow    = 32
+	gateKindsPreScanWindow = 48
+	maxStepLoadSlotBytes   = 32
+	zeroReturnPatchSize    = 7 // xor eax, eax (2) + jmp rel32 (5)
 )
 
 // Trailing package-qualified Go symbol names resolved uniquely via pclntab.
 const (
-	fnCallToolRaw            = "mcpcore.(*McpClientSessionInstance).callToolRaw"
-	fnCallToolTimeoutError   = "mcpcore.(*McpClientSessionInstance).formatCallToolTimeoutError"
-	fnOutputTruncation       = "tooldecorators.newOutputTruncationDecorator.func1"
-	fnOffersContextWindow    = "model.SelectorModel.offersContextWindow"
-	fnStoreContextWindow     = "store.(*Store).ContextWindow"
-	fnStoreWindowChoice      = "store.(*Store).ContextWindowChoice"
-	fnCheckpointConfig       = "utils.GetCheckpointConfig"
-	fnCheckpointOverride     = "config.applyFeatureProviderCheckpointOverrideConfig"
-	fnSelectCheckpointExpKey = "config.selectCheckpointExperimentKey"
-	fnMaxTokensForStep       = "chatconverters.(*TrajectoryChatConverter).getMaxTokensForStep"
-	fnStepToMessage          = "serializers.DefaultSerializer.stepToMessage"
-	fnFileWatcherListen      = "file_watcher.(*FileWatcherDefault).listenAndForwardEvents"
-	fnRuntimeSelectgo        = "runtime.selectgo"
-	fnACPImageMimeType       = "acp.isImageMimeType"
-	fnACPServerImageMimeType = "server.isImageMimeType"
+	fnCallToolRaw                     = "mcpcore.(*McpClientSessionInstance).callToolRaw"
+	fnCallToolTimeoutError            = "mcpcore.(*McpClientSessionInstance).formatCallToolTimeoutError"
+	fnOutputTruncation                = "tooldecorators.newOutputTruncationDecorator.func1"
+	fnOffersContextWindow             = "model.SelectorModel.offersContextWindow"
+	fnStoreContextWindow              = "store.(*Store).ContextWindow"
+	fnStoreWindowChoice               = "store.(*Store).ContextWindowChoice"
+	fnCheckpointConfig                = "utils.GetCheckpointConfig"
+	fnCheckpointOverride              = "config.applyFeatureProviderCheckpointOverrideConfig"
+	fnSelectCheckpointExpKey          = "config.selectCheckpointExperimentKey"
+	fnMaxTokensForStep                = "chatconverters.(*TrajectoryChatConverter).getMaxTokensForStep"
+	fnStepToMessage                   = "serializers.DefaultSerializer.stepToMessage"
+	fnFileWatcherListen               = "file_watcher.(*FileWatcherDefault).listenAndForwardEvents"
+	fnRuntimeSelectgo                 = "runtime.selectgo"
+	fnRuntimeConcatstring2            = "runtime.concatstring2"
+	fnACPImageMimeType                = "acp.isImageMimeType"
+	fnACPServerImageMimeType          = "server.isImageMimeType"
+	fnGateKinds                       = "customizations.gateKinds"
+	fnCustomizationDiscoveryOverrides = "config.applyCustomizationDiscoveryOverrides"
 )
 
 var (
@@ -173,6 +177,19 @@ var patches = []patch{
 				aliases:  []string{fnACPServerImageMimeType},
 				locate:   locateReturnTrue,
 			},
+		},
+	},
+	{
+		// Never let Mendel experiment flags disable customization kinds
+		// (agent, mcp, ...). When ListExperiments fails on worker startup,
+		// agy still opens experimentsGate with an empty cache, so gateKinds
+		// disables agent & mcp and silently falls back to its default agent.
+		// applyCustomizationDiscoveryOverrides also copies explicit false
+		// flags into CascadeConfig overrides checked before gateKinds' checker.
+		name: "customization-kind-gate",
+		sites: []site{
+			{function: fnGateKinds, locate: locateCustomizationGateKinds},
+			{function: fnCustomizationDiscoveryOverrides, locate: locateCustomizationDiscoveryOverrides},
 		},
 	},
 }
@@ -589,4 +606,72 @@ func locateFileWatcherSelect(im *image, fn function) ([]func() error, error) {
 		})
 	}
 	return hits, nil
+}
+
+func locateCustomizationGateKinds(im *image, fn function) ([]func() error, error) {
+	concatCalls, err := im.callsTo(fn, fnRuntimeConcatstring2)
+	if err != nil {
+		return nil, err
+	}
+	var hits []func() error
+	for _, callAt := range concatCalls {
+		hits = append(hits, matchGateKindsAroundConcat(fn.body, callAt)...)
+	}
+	return hits, nil
+}
+
+// matchGateKindsAroundConcat matches the `test checker, checker; je skip` guard
+// before `concatstring2("enable-customization-kind-", kind)` whose target skips
+// the indirect `checker.IsEnabled` call and lands on `test al, al`.
+func matchGateKindsAroundConcat(body []byte, concatCallAt int) []func() error {
+	lo := max(0, concatCallAt-gateKindsPreScanWindow)
+	var hits []func() error
+	for at := lo; at < concatCallAt; at++ {
+		_, testSize, ok := decodeTestRR64(body, at)
+		if !ok {
+			continue
+		}
+		je, ok := decodeJcc(body, at+testSize, ccE)
+		if !ok || je.target <= concatCallAt+5 || je.target+len(testALAL) > len(body) {
+			continue
+		}
+		if !bytes.Equal(body[je.target:je.target+len(testALAL)], testALAL) {
+			continue
+		}
+		if !endsWithIndirectCall(body, concatCallAt+5, je.target) {
+			continue
+		}
+		b := je
+		hits = append(hits, func() error {
+			return rewriteJccToJmp(body, b)
+		})
+	}
+	return hits
+}
+
+func endsWithIndirectCall(body []byte, minStart, end int) bool {
+	for _, size := range []int{2, 3} {
+		at := end - size
+		if at < minStart {
+			continue
+		}
+		if got, ok := decodeIndirectCall(body, at); ok && got == size {
+			return true
+		}
+	}
+	return false
+}
+
+func locateCustomizationDiscoveryOverrides(im *image, fn function) ([]func() error, error) {
+	concatCalls, err := im.callsTo(fn, fnRuntimeConcatstring2)
+	if err != nil {
+		return nil, err
+	}
+	if len(concatCalls) != 1 || len(fn.body) < 1 || bytes.IndexByte(fn.body, opRet) < 0 {
+		return nil, nil
+	}
+	return []func() error{func() error {
+		fn.body[0] = opRet
+		return nil
+	}}, nil
 }

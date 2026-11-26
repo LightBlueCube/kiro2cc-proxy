@@ -219,3 +219,51 @@ func TestStoppedSessionIsRefusedUpstream(t *testing.T) {
 		t.Fatal("session still stopped after its time")
 	}
 }
+
+func TestDefaultAgentFallbackCallIsRefusedBeforeUpstream(t *testing.T) {
+	sent := 0
+	var reports []reportedCall
+	ap := newAccountProxy(func(session, model string, err *CallError) bool {
+		reports = append(reports, reportedCall{session, err})
+		return false
+	})
+	ap.proxy = &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) { r.SetURL(&url.URL{Scheme: "https", Host: "upstream.test"}) },
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sent++
+			resp := response("", http.StatusOK, []byte(stopStream), "")
+			resp.Request = r
+			return resp, nil
+		}),
+		ModifyResponse: func(resp *http.Response) error { ap.watchModelCall(resp); return nil },
+	}
+	s := &Server{log: slog.New(slog.DiscardHandler), accounts: map[string]*accountProxy{"main": ap}}
+
+	post := func(body string) int {
+		r := httptest.NewRequest(http.MethodPost, "/main/v1internal:streamGenerateContent?alt=sse", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	// Custom agent profile: only mcp_client_* and the 3 non-excluded built-ins.
+	okBody := `{"requestId":"agent/S1/1/x/1","model":"m","request":{"tools":[{"functionDeclarations":[{"name":"mcp_client_run_command"},{"name":"list_resources"},{"name":"read_resource"},{"name":"manage_task"}]}]}}`
+	if code := post(okBody); code != http.StatusOK || sent != 1 {
+		t.Fatalf("custom profile call = %d after %d upstream calls, want 200 and 1", code, sent)
+	}
+
+	// Default agent fallback: carries agy's excluded native tools (read_file, run_command, ...).
+	leakedBody := `{"requestId":"agent/S2/1/x/1","model":"m","request":{"tools":[{"functionDeclarations":[{"name":"read_file"},{"name":"run_command"},{"name":"manage_task"}]}]}}`
+	if code := post(leakedBody); code != http.StatusBadGateway || sent != 1 {
+		t.Fatalf("default-agent call = %d after %d upstream calls, want 502 and 1", code, sent)
+	}
+	if len(reports) != 2 || reports[1].session != "S2" || reports[1].err == nil || reports[1].err.Code != http.StatusBadGateway {
+		t.Fatalf("reports = %+v, want S2 502 CallError", reports)
+	}
+
+	// Non-agent (checkpoint) calls are not rejected even if tools were present.
+	checkpointBody := `{"requestId":"checkpoint/1","model":"m","request":{"tools":[{"functionDeclarations":[{"name":"read_file"}]}]}}`
+	if code := post(checkpointBody); code != http.StatusOK || sent != 2 {
+		t.Fatalf("checkpoint call = %d after %d upstream calls, want 200 and 2", code, sent)
+	}
+}

@@ -134,6 +134,40 @@ func TestOriginalSnippetsMatch(t *testing.T) {
 	}
 }
 
+func TestMatchGateKindsAroundConcat(t *testing.T) {
+	// Exact snippet from agy 1.5.3 customizations.gateKinds:
+	// test rcx,rcx; je +0x39; xor eax,eax; lea rbx,[rip+...]; mov ecx,0x1a;
+	// mov rdi,[rsp+0x50]; mov rsi,[rsp+0x30]; call concatstring2 (at offset 0x1d);
+	// ...; call rdx; test al,al.
+	body := hexBytes(t,
+		"48 85 c9 74 39 "+
+			"31 c0 "+
+			"48 8d 1d 00 00 00 00 "+
+			"b9 1a 00 00 00 "+
+			"48 8b 7c 24 50 "+
+			"48 8b 74 24 30 "+
+			"e8 00 00 00 00 "+
+			"48 8b 94 24 00 01 00 00 "+
+			"48 8b 52 20 "+
+			"48 89 d9 "+
+			"48 89 c3 "+
+			"48 8b 84 24 08 01 00 00 "+
+			"ff d2 "+
+			"84 c0",
+	)
+	const concatCallAt = 0x1d
+	hits := matchGateKindsAroundConcat(body, concatCallAt)
+	if len(hits) != 1 {
+		t.Fatalf("got %d matches, want 1", len(hits))
+	}
+	if err := hits[0](); err != nil {
+		t.Fatalf("rewrite error: %v", err)
+	}
+	if body[3] != opJmpRel8 || body[4] != 0x39 {
+		t.Fatalf("rewritten branch = %x %x, want eb 39", body[3], body[4])
+	}
+}
+
 // TestPinnedBuild runs against a real agy: AGYBIN_TEST_BIN=/path/antigravity.
 func TestPinnedBuild(t *testing.T) {
 	src := os.Getenv("AGYBIN_TEST_BIN")

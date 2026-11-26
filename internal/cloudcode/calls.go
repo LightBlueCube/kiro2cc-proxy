@@ -21,6 +21,22 @@ const (
 	retryInfoType      = "type.googleapis.com/google.rpc.RetryInfo"
 )
 
+// defaultAgentTools are built-in tools removed by the relay's custom agent
+// profile (excludeDefaultComponents: true). Client tools always arrive prefixed
+// with "mcp_client_", so seeing any of these on an agent generation call means
+// agy silently fell back to its default agent.
+var defaultAgentTools = map[string]bool{
+	"read_file":      true,
+	"run_command":    true,
+	"write_file":     true,
+	"edit_file":      true,
+	"send_message":   true,
+	"schedule":       true,
+	"search_web":     true,
+	"ask_question":   true,
+	"generate_image": true,
+}
+
 // CallError is a generation call that failed: Google refused it, or it
 // never reached Google.
 type CallError struct {
@@ -58,12 +74,31 @@ type callKey struct{}
 type call struct {
 	session, model string
 	request        []byte
+	nativeTools    []string
 	// capture is set while the call is being recorded.
 	capture *pendingCapture
 }
 
+type generationToolSet struct {
+	FunctionDeclarations []struct {
+		Name string `json:"name"`
+	} `json:"functionDeclarations"`
+}
+
 func isGeneration(r *http.Request) bool {
 	return r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, generationSuffix)
+}
+
+func leakedDefaultAgentTools(toolSets []generationToolSet) []string {
+	var leaked []string
+	for _, ts := range toolSets {
+		for _, fd := range ts.FunctionDeclarations {
+			if defaultAgentTools[fd.Name] {
+				leaked = append(leaked, fd.Name)
+			}
+		}
+	}
+	return leaked
 }
 
 // withSession tags a generation call with the session it serves, leaving
@@ -79,6 +114,9 @@ func (s *Server) withSession(account string, r *http.Request) (*http.Request, er
 	var body struct {
 		RequestID string `json:"requestId"`
 		Model     string `json:"model"`
+		Request   struct {
+			Tools []generationToolSet `json:"tools"`
+		} `json:"request"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		s.log.Warn("generation call not watched: body is not JSON", "account", account, "err", err)
@@ -89,7 +127,13 @@ func (s *Server) withSession(account string, r *http.Request) (*http.Request, er
 		return r, nil
 	}
 	session, _, _ := strings.Cut(rest, "/")
-	c := call{session: session, model: body.Model, request: raw, capture: s.beginCapture(account, session, body.RequestID, body.Model, raw)}
+	c := call{
+		session:     session,
+		model:       body.Model,
+		request:     raw,
+		nativeTools: leakedDefaultAgentTools(body.Request.Tools),
+		capture:     s.beginCapture(account, session, body.RequestID, body.Model, raw),
+	}
 	return r.WithContext(context.WithValue(r.Context(), callKey{}, c)), nil
 }
 
