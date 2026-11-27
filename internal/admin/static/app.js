@@ -312,21 +312,21 @@ function keyCell(k) {
     h("div", { class: "sub" }, h("span", { class: "bad nowrap", title: fmt.time(k.revoked_at) }, revoked)));
 }
 
-// accessCell shows how many models a key may use over its worker limit;
-// hovering the model count lists the allowed model ids.
+// accessCell shows how many models a key may use over its worker limit and
+// enabled advanced options; hovering counts lists the underlying items.
 function accessCell(k) {
   const models = k.models.length
     ? h("span", { class: "nowrap", title: k.models.join("\n") }, t("keys.models.count", { count: k.models.length }))
     : h("span", { class: "muted nowrap" }, t("keys.models.all"));
   const workers = h("span", { class: "nowrap" },
     k.max_workers !== null ? t("keys.workers.max", { count: k.max_workers }) : t("keys.workers.unlimited"));
-  const evict = k.evict_waiting
-    ? h("span", { class: "muted nowrap", title: t("keys.evict_waiting.hint") }, t("keys.evict_waiting.badge"))
+  const options = [];
+  if (k.evict_waiting) options.push(t("keys.evict_waiting"));
+  if (k.auto_retry) options.push(t("keys.auto_retry"));
+  const advanced = options.length
+    ? h("span", { class: "muted nowrap", title: options.join("\n") }, t("keys.advanced.count", { count: options.length }))
     : null;
-  const retry = k.auto_retry
-    ? h("span", { class: "muted nowrap", title: t("keys.auto_retry.hint") }, t("keys.auto_retry.badge"))
-    : null;
-  return stack(models, workers, evict, retry);
+  return stack(models, workers, advanced);
 }
 
 function spendBar(spent, limit) {
