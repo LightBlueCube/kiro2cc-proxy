@@ -100,6 +100,7 @@ details.key-advanced > summary { font-size: 13px; color: var(--muted); font-weig
 details.key-advanced[open] > summary { margin-bottom: 8px; }
 details.key-advanced label.check { display: inline-flex; padding-bottom: 0; color: var(--fg); font-size: 13px; }
 details.key-advanced .sub { margin: 4px 0 0; }
+details.key-advanced .sub + label.check { margin-top: 10px; }
 .nowrap { white-space: nowrap; }
 details.fold { margin-top: 16px; }
 details.fold > summary { cursor: pointer; font-weight: 600; }

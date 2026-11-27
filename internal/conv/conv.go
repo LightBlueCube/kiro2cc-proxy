@@ -151,6 +151,9 @@ type Caller struct {
 	// EvictWaiting lets this key's requests evict its own oldest worker
 	// waiting for tool results when worker caps are full.
 	EvictWaiting bool
+	// AutoRetry retries retryable errors internally instead of returning
+	// them to downstream callers.
+	AutoRetry bool
 	// LimitTotal caps the key's whole list-price spend in USD (it never
 	// resets); nil is no total limit.
 	LimitTotal *float64

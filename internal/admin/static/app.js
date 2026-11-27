@@ -286,13 +286,16 @@ function limitEditor(groups, k) {
 // advancedKeyEditor holds rare per-key options inside a collapsible fold.
 function advancedKeyEditor(k) {
   const evictWaiting = h("input", { type: "checkbox", checked: Boolean(k.evict_waiting) });
-  const node = h("details", { class: "fold key-advanced", open: Boolean(k.evict_waiting) },
+  const autoRetry = h("input", { type: "checkbox", checked: Boolean(k.auto_retry) });
+  const node = h("details", { class: "fold key-advanced", open: Boolean(k.evict_waiting || k.auto_retry) },
     h("summary", {}, t("keys.advanced")),
     h("label", { class: "check" }, evictWaiting, t("keys.evict_waiting")),
-    h("p", { class: "sub" }, t("keys.evict_waiting.hint")));
+    h("p", { class: "sub" }, t("keys.evict_waiting.hint")),
+    h("label", { class: "check" }, autoRetry, t("keys.auto_retry")),
+    h("p", { class: "sub" }, t("keys.auto_retry.hint")));
   return {
     node,
-    read: () => ({ evict_waiting: evictWaiting.checked }),
+    read: () => ({ evict_waiting: evictWaiting.checked, auto_retry: autoRetry.checked }),
   };
 }
 
@@ -320,7 +323,10 @@ function accessCell(k) {
   const evict = k.evict_waiting
     ? h("span", { class: "muted nowrap", title: t("keys.evict_waiting.hint") }, t("keys.evict_waiting.badge"))
     : null;
-  return stack(models, workers, evict);
+  const retry = k.auto_retry
+    ? h("span", { class: "muted nowrap", title: t("keys.auto_retry.hint") }, t("keys.auto_retry.badge"))
+    : null;
+  return stack(models, workers, evict, retry);
 }
 
 function spendBar(spent, limit) {
@@ -497,7 +503,7 @@ views.keys = container => {
       modelsBox.replaceChildren(newModels.node);
     }
     if (!newAdvanced) {
-      newAdvanced = advancedKeyEditor({ evict_waiting: false });
+      newAdvanced = advancedKeyEditor({ evict_waiting: false, auto_retry: false });
       advancedBox.replaceChildren(newAdvanced.node);
     }
     list.replaceChildren(table([

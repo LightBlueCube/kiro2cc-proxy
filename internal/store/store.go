@@ -66,6 +66,7 @@ var migrations = []string{
 		models        TEXT NOT NULL DEFAULT '[]',
 		max_workers   INTEGER,
 		evict_waiting INTEGER NOT NULL DEFAULT 0,
+		auto_retry    INTEGER NOT NULL DEFAULT 0,
 		limit_total   REAL,
 		limits        TEXT NOT NULL DEFAULT '{}',
 		created_at    INTEGER NOT NULL DEFAULT 0,

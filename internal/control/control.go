@@ -965,7 +965,7 @@ func (c *Control) CreateKey(ctx context.Context, u store.KeyUpdate) (token, hash
 	token = keyPrefix + rand.Text()
 	hash = keyHash(token)
 	err = c.cfg.Store.AddKey(ctx, store.Key{
-		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), MaxWorkers: u.MaxWorkers, EvictWaiting: u.EvictWaiting, LimitTotal: u.LimitTotal, Limits: u.Limits, CreatedAt: time.Now(),
+		Hash: hash, Name: name, Note: u.Note, Models: cleanModels(u.Models), MaxWorkers: u.MaxWorkers, EvictWaiting: u.EvictWaiting, AutoRetry: u.AutoRetry, LimitTotal: u.LimitTotal, Limits: u.Limits, CreatedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrExists) {
 		return "", "", &InputError{fmt.Sprintf("key name %q is taken (a revoked key keeps its name until it is deleted)", name)}
@@ -1149,7 +1149,7 @@ func (c *Control) reloadKeys(ctx context.Context) error {
 	for _, k := range keys {
 		all[k.Hash] = k
 		if k.RevokedAt.IsZero() {
-			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, EvictWaiting: k.EvictWaiting, LimitTotal: k.LimitTotal, Limits: k.Limits}
+			byHash[k.Hash] = conv.Caller{KeyHash: k.Hash, Name: k.Name, Models: k.Models, MaxWorkers: k.MaxWorkers, EvictWaiting: k.EvictWaiting, AutoRetry: k.AutoRetry, LimitTotal: k.LimitTotal, Limits: k.Limits}
 		}
 	}
 	c.mu.Lock()

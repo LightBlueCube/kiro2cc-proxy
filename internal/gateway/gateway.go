@@ -34,6 +34,13 @@ const (
 	defaultParkTTL        = 5 * time.Minute
 	janitorInterval       = 30 * time.Second
 	maxRetryableQuotaWait = time.Minute
+
+	// Auto-retry limits for keys with AutoRetry enabled. Each retry re-runs
+	// serve verbatim so existing cooldown, rewind, and account-switch rules apply.
+	autoRetryMaxRetries = 5
+	autoRetryBaseDelay  = time.Second
+	autoRetryMaxDelay   = 10 * time.Second
+	autoRetryBudget     = 90 * time.Second
 )
 
 type Config struct {
@@ -112,6 +119,10 @@ type Gateway struct {
 	sessions  map[string]*session // sessionRef → session
 	busyTotal int
 	busyByKey map[string]int
+
+	// now and sleep default to time.Now and sleepContext; tests override them.
+	now   func() time.Time
+	sleep func(context.Context, time.Duration) bool
 }
 
 // session is an ACP session known to this process.
@@ -204,6 +215,8 @@ func New(cfg Config) (*Gateway, error) {
 		sessions:      map[string]*session{},
 		conversations: newConversations(),
 		busyByKey:     map[string]int{},
+		now:           time.Now,
+		sleep:         sleepContext,
 	}
 	parkTTL := cfg.ParkTTL
 	if parkTTL <= 0 {
@@ -304,13 +317,71 @@ func (g *Gateway) Complete(ctx context.Context, caller conv.Caller, req conv.Req
 		defer close(out)
 		w := &response{ctx: ctx, out: out}
 		rec := Record{At: time.Now(), KeyHash: caller.KeyHash, KeyName: caller.Name, API: req.API, Stream: req.Stream, Model: req.Model, CallToken: rand.Text()}
-		err := g.serve(ctx, caller, req, w, &rec)
+		err := g.completeWithRetry(ctx, caller, req, w, &rec)
 		if err != nil {
 			w.fail(err)
 		}
 		g.report(rec, w, err)
 	}()
 	return out
+}
+
+// completeWithRetry runs serve and, when caller.AutoRetry is enabled, repeats
+// the request on retryable pre-output errors instead of returning them to the
+// caller. Re-running serve verbatim keeps all cooldown, rewind, and account-
+// switch semantics identical to a retrying client.
+func (g *Gateway) completeWithRetry(ctx context.Context, caller conv.Caller, req conv.Request, w *response, rec *Record) *conv.Error {
+	deadline := g.now().Add(autoRetryBudget)
+	for retry := 0; ; retry++ {
+		if retry > 0 {
+			rec.Account, rec.AccountName, rec.Slug, rec.Effort, rec.Mode, rec.ReplayReason, rec.SessionID = "", "", "", "", "", "", ""
+		}
+		err := g.serve(ctx, caller, req, w, rec)
+		if err == nil || !caller.AutoRetry || w.emitted || ctx.Err() != nil {
+			return err
+		}
+		if retry >= autoRetryMaxRetries || !isRetryableError(err) {
+			return err
+		}
+		wait := retryDelay(err, retry)
+		if g.now().Add(wait).After(deadline) {
+			return err
+		}
+		g.log.Warn("retrying request", "key", caller.Name, "model", rec.Model, "retry", retry+1, "wait", wait, "err", err.Message)
+		if !g.sleep(ctx, wait) {
+			return &conv.Error{Kind: conv.ErrCancelled, Message: "client disconnected"}
+		}
+	}
+}
+
+func isRetryableError(err *conv.Error) bool {
+	switch err.Kind {
+	case conv.ErrQuota:
+		// 403 insufficient_quota (all accounts in long cooldown) is not retryable.
+		return err.HTTPStatus == 0 || err.HTTPStatus == http.StatusTooManyRequests
+	case conv.ErrKeyBusy, conv.ErrOverloaded, conv.ErrUnavailable, conv.ErrUpstream:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryDelay(err *conv.Error, retry int) time.Duration {
+	if err.RetryAfterSeconds > 0 {
+		return time.Duration(err.RetryAfterSeconds) * time.Second
+	}
+	return min(autoRetryBaseDelay<<retry, autoRetryMaxDelay)
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (g *Gateway) report(rec Record, w *response, err *conv.Error) {

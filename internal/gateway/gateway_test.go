@@ -4044,3 +4044,339 @@ func TestCancelDuringSteerSettlesCleanly(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoRetry(t *testing.T) {
+	ctx := context.Background()
+	model := "gemini-3.8-flash"
+
+	installClock := func(gw *Gateway, onSleep func(time.Duration)) *[]time.Duration {
+		var mu sync.Mutex
+		now := time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC)
+		var waits []time.Duration
+		gw.now = func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		}
+		gw.sleep = func(ctx context.Context, d time.Duration) bool {
+			if ctx.Err() != nil {
+				return false
+			}
+			mu.Lock()
+			waits = append(waits, d)
+			now = now.Add(d)
+			mu.Unlock()
+			if onSleep != nil {
+				onSleep(d)
+			}
+			return ctx.Err() == nil
+		}
+		return &waits
+	}
+
+	t.Run("disabled_does_not_retry", func(t *testing.T) {
+		h := newHarness(t, 1, nil)
+		waits := installClock(h.gw, nil)
+		caller := testCaller("alice")
+		res := h.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("@failonce")}})
+		if res.err == nil || res.err.Kind != conv.ErrOverloaded {
+			t.Fatalf("res = %+v, want ErrOverloaded", res)
+		}
+		if len(*waits) != 0 {
+			t.Fatalf("waits = %v, want none when AutoRetry is false", *waits)
+		}
+	})
+
+	t.Run("transient_failure_retries_in_place_with_rewind", func(t *testing.T) {
+		h := newHarness(t, 1, nil)
+		waits := installClock(h.gw, nil)
+		caller := testCaller("alice")
+		caller.AutoRetry = true
+
+		first := h.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("one")}})
+		if first.err != nil {
+			t.Fatalf("first = %+v", first)
+		}
+		second := h.completeAs(ctx, caller, conv.Request{
+			Model: model,
+			Messages: []conv.Message{
+				user("one"),
+				{Role: conv.RoleAssistant, Text: first.text, Anchors: []string{first.anchor}},
+				user("@failonce"),
+			},
+		})
+		if second.err != nil || second.text != "reply to: @failonce" {
+			t.Fatalf("second = %+v, want reply after automatic retry", second)
+		}
+		if want := []time.Duration{time.Second}; !slices.Equal(*waits, want) {
+			t.Fatalf("waits = %v, want %v", *waits, want)
+		}
+		recs := h.records.all(t, 2)
+		if recs[1].Err != nil || recs[1].Mode != ModeRewind || recs[1].Account != "acct0" {
+			t.Fatalf("record = %+v, want ok ModeRewind on acct0", recs[1])
+		}
+	})
+
+	t.Run("repeated_503_switches_account_without_returning_error", func(t *testing.T) {
+		h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=503", "FAKE_AGY_FAIL_MSG=UNAVAILABLE (code 503): backend down"}})
+		waits := installClock(h.gw, nil)
+		name := userPreferring(t, h.p, "acct0")
+		caller := testCaller(name)
+		caller.AutoRetry = true
+
+		res := h.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("hi")}})
+		if res.err != nil || res.text != "reply to: hi" {
+			t.Fatalf("res = %+v, want reply after auto-switching to acct1", res)
+		}
+		if want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}; !slices.Equal(*waits, want) {
+			t.Fatalf("waits = %v, want %v", *waits, want)
+		}
+		recs := h.records.all(t, 1)
+		if recs[0].Err != nil || recs[0].Account != "acct1" {
+			t.Fatalf("record = %+v, want single ok record on acct1", recs[0])
+		}
+	})
+
+	t.Run("definite_quota_switches_and_stops_when_all_exhausted", func(t *testing.T) {
+		h := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}})
+		waits := installClock(h.gw, nil)
+		name := userPreferring(t, h.p, "acct0")
+		caller := testCaller(name)
+		caller.AutoRetry = true
+
+		res := h.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("hi")}})
+		if res.err != nil || res.text != "reply to: hi" {
+			t.Fatalf("res = %+v, want reply from acct1", res)
+		}
+		if want := []time.Duration{switchRetryAfterSeconds * time.Second}; !slices.Equal(*waits, want) {
+			t.Fatalf("waits = %v, want %v", *waits, want)
+		}
+		if recs := h.records.all(t, 1); recs[0].Account != "acct1" || recs[0].Err != nil {
+			t.Fatalf("record = %+v, want ok on acct1", recs[0])
+		}
+
+		// When every account hits long quota, finalizeFailure maps to 403 and
+		// auto-retry must stop immediately instead of retrying.
+		hAll := newHarness(t, 2, map[int][]string{0: {"FAKE_AGY_QUOTA=1"}, 1: {"FAKE_AGY_QUOTA=1"}})
+		waitsAll := installClock(hAll.gw, nil)
+		nameAll := userPreferring(t, hAll.p, "acct0")
+		callerAll := testCaller(nameAll)
+		callerAll.AutoRetry = true
+
+		exhausted := hAll.completeAs(ctx, callerAll, conv.Request{Model: model, Messages: []conv.Message{user("hi")}})
+		if exhausted.err == nil || exhausted.err.Kind != conv.ErrQuota || exhausted.err.HTTPStatus != http.StatusForbidden {
+			t.Fatalf("exhausted = %+v, want 403 ErrQuota", exhausted)
+		}
+		if want := []time.Duration{switchRetryAfterSeconds * time.Second}; !slices.Equal(*waitsAll, want) {
+			t.Fatalf("exhausted waits = %v, want single switch wait %v", *waitsAll, want)
+		}
+	})
+
+	t.Run("short_quota_waits_and_stops_when_budget_exceeded", func(t *testing.T) {
+		h := newHarness(t, 1, nil)
+		waits := installClock(h.gw, func(time.Duration) {
+			time.Sleep(60 * time.Millisecond)
+		})
+		caller := testCaller("alice")
+		caller.AutoRetry = true
+
+		// Establish a session on acct0, then put acct0 into a brief cooldown.
+		first := h.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("one")}})
+		if first.err != nil {
+			t.Fatalf("first = %+v", first)
+		}
+		h.p.Account("acct0").Cool("gemini", time.Now().Add(40*time.Millisecond))
+		second := h.completeAs(ctx, caller, conv.Request{
+			Model: model,
+			Messages: []conv.Message{
+				user("one"),
+				{Role: conv.RoleAssistant, Text: first.text, Anchors: []string{first.anchor}},
+				user("two"),
+			},
+		})
+		if second.err != nil || second.text != "reply to: two" {
+			t.Fatalf("second = %+v, want reply after short cooldown", second)
+		}
+		if want := []time.Duration{time.Second}; !slices.Equal(*waits, want) {
+			t.Fatalf("waits = %v, want %v", *waits, want)
+		}
+
+		// A 50s Retry-After fits once in the 90s budget; a second 50s wait
+		// exceeds the budget and must fail fast without sleeping again.
+		hBudget := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_QUOTA=1", "FAKE_AGY_QUOTA_WAIT=50s"}})
+		waitsBudget := installClock(hBudget.gw, func(time.Duration) {
+			// Clear the account cooldown so the second attempt actually reaches agy.
+			hBudget.p.Account("acct0").SetCooldown("gemini", time.Time{}, time.Now().Add(time.Second))
+		})
+		overBudget := hBudget.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("hi")}})
+		if overBudget.err == nil || overBudget.err.Kind != conv.ErrQuota || overBudget.err.RetryAfterSeconds != 50 {
+			t.Fatalf("overBudget = %+v, want 50s ErrQuota", overBudget)
+		}
+		if want := []time.Duration{50 * time.Second}; !slices.Equal(*waitsBudget, want) {
+			t.Fatalf("budget waits = %v, want %v", *waitsBudget, want)
+		}
+	})
+
+	t.Run("key_busy_retries_until_slot_frees", func(t *testing.T) {
+		h := newHarness(t, 1, nil)
+		one := 1
+		caller := testCaller("alice")
+		caller.MaxWorkers = &one
+		caller.AutoRetry = true
+
+		hangCtx, cancelHang := context.WithCancel(ctx)
+		defer cancelHang()
+		hangDone := make(chan result, 1)
+		go func() {
+			hangDone <- h.completeAs(hangCtx, caller, conv.Request{Model: model, Messages: []conv.Message{user("@hang")}})
+		}()
+		h.waitRun(1, true)
+
+		waits := installClock(h.gw, func(time.Duration) {
+			cancelHang()
+			<-hangDone
+		})
+		res := h.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("after busy")}})
+		if res.err != nil || res.text != "reply to: after busy" {
+			t.Fatalf("res = %+v, want reply once busy slot freed", res)
+		}
+		if want := []time.Duration{time.Second}; !slices.Equal(*waits, want) {
+			t.Fatalf("waits = %v, want %v", *waits, want)
+		}
+	})
+
+	t.Run("non_retryable_errors_never_retry", func(t *testing.T) {
+		h := newHarness(t, 2, nil)
+		waits := installClock(h.gw, nil)
+		caller := testCaller("alice")
+		caller.AutoRetry = true
+
+		cases := []struct {
+			name     string
+			caller   conv.Caller
+			req      conv.Request
+			wantKind conv.ErrorKind
+		}{
+			{
+				name:     "invalid_request",
+				caller:   caller,
+				req:      conv.Request{Model: model},
+				wantKind: conv.ErrInvalidRequest,
+			},
+			{
+				name:     "unknown_model",
+				caller:   caller,
+				req:      conv.Request{Model: "no-such-model", Messages: []conv.Message{user("hi")}},
+				wantKind: conv.ErrUnknownModel,
+			},
+			{
+				name:     "forbidden_model",
+				caller:   conv.Caller{KeyHash: "hash-restricted", Name: "restricted", Models: []string{"claude-opus-5-5"}, AutoRetry: true},
+				req:      conv.Request{Model: model, Messages: []conv.Message{user("hi")}},
+				wantKind: conv.ErrForbidden,
+			},
+			{
+				name:     "context_overflow",
+				caller:   caller,
+				req:      conv.Request{Model: model, Messages: []conv.Message{user("@overflow")}},
+				wantKind: conv.ErrContextLength,
+			},
+			{
+				name:     "risk_control",
+				caller:   caller,
+				req:      riskRequest(riskSystem, "@risk429"),
+				wantKind: conv.ErrRiskControl,
+			},
+		}
+		for _, tc := range cases {
+			*waits = nil
+			res := h.completeAs(ctx, tc.caller, tc.req)
+			if res.err == nil || res.err.Kind != tc.wantKind {
+				t.Fatalf("%s: res = %+v, want %v", tc.name, res, tc.wantKind)
+			}
+			if len(*waits) != 0 {
+				t.Fatalf("%s: waits = %v, must not retry", tc.name, *waits)
+			}
+		}
+	})
+
+	t.Run("mid_stream_failure_after_output_never_retries", func(t *testing.T) {
+		h := newHarness(t, 1, nil)
+		waits := installClock(h.gw, nil)
+		caller := testCaller("alice")
+		caller.AutoRetry = true
+
+		events := h.gw.Complete(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("@think-hang")}})
+		firstEv := <-events
+		if firstEv.Reasoning == "" {
+			t.Fatalf("first event = %+v, want reasoning output", firstEv)
+		}
+		// Killing the process fails the in-flight turn with retryable ErrUpstream,
+		// but output has already been emitted so auto-retry must not re-run.
+		h.p.Account("acct0").Restart()
+		var gotErr *conv.Error
+		for ev := range events {
+			if ev.Err != nil {
+				gotErr = ev.Err
+			}
+		}
+		if gotErr == nil || gotErr.Kind != conv.ErrUpstream {
+			t.Fatalf("err = %+v, want ErrUpstream", gotErr)
+		}
+		if len(*waits) != 0 {
+			t.Fatalf("waits = %v, must not retry after output emitted", *waits)
+		}
+	})
+
+	t.Run("client_disconnect_during_wait_returns_cancelled", func(t *testing.T) {
+		h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=503", "FAKE_AGY_FAIL_MSG=UNAVAILABLE (code 503): down"}})
+		reqCtx, cancel := context.WithCancel(ctx)
+		entered := make(chan struct{})
+		h.gw.sleep = func(ctx context.Context, _ time.Duration) bool {
+			close(entered)
+			<-ctx.Done()
+			return false
+		}
+		caller := testCaller("alice")
+		caller.AutoRetry = true
+
+		done := make(chan result, 1)
+		go func() {
+			done <- h.completeAs(reqCtx, caller, conv.Request{Model: model, Messages: []conv.Message{user("hi")}})
+		}()
+		<-entered
+		cancel()
+		res := <-done
+		if res.err != nil && res.err.Kind != conv.ErrCancelled {
+			t.Fatalf("res = %+v, want ErrCancelled or closed stream", res)
+		}
+		if recs := h.records.all(t, 1); recs[0].Err == nil || recs[0].Err.Kind != conv.ErrCancelled {
+			t.Fatalf("record = %+v, want ErrCancelled", recs[0])
+		}
+		if got := len(h.requests("session/prompt")); got != 1 {
+			t.Fatalf("prompts = %d, want 1 (no retry after disconnect)", got)
+		}
+	})
+
+	t.Run("respects_max_retries_and_backoff_schedule", func(t *testing.T) {
+		h := newHarness(t, 1, map[int][]string{0: {"FAKE_AGY_FAIL_CODE=503", "FAKE_AGY_FAIL_MSG=UNAVAILABLE (code 503): still down"}})
+		waits := installClock(h.gw, nil)
+		caller := testCaller("alice")
+		caller.AutoRetry = true
+
+		res := h.completeAs(ctx, caller, conv.Request{Model: model, Messages: []conv.Message{user("hi")}})
+		if res.err == nil || res.err.Kind != conv.ErrOverloaded {
+			t.Fatalf("res = %+v, want ErrOverloaded after exhausting retries", res)
+		}
+		want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second}
+		if !slices.Equal(*waits, want) {
+			t.Fatalf("waits = %v, want %v", *waits, want)
+		}
+		if got := len(h.requests("session/prompt")); got != autoRetryMaxRetries+1 {
+			t.Fatalf("prompts = %d, want %d", got, autoRetryMaxRetries+1)
+		}
+		if recs := h.records.all(t, 1); recs[0].Err == nil || recs[0].Err.Kind != conv.ErrOverloaded {
+			t.Fatalf("record = %+v, want single failed record", recs[0])
+		}
+	})
+}

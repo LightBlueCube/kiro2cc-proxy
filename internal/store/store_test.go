@@ -141,17 +141,17 @@ func TestDeleteKey(t *testing.T) {
 	ctx := context.Background()
 
 	maxWorkers := 3
-	if err := st.AddKey(ctx, Key{Hash: "h1", Name: "alice", MaxWorkers: &maxWorkers, EvictWaiting: true, CreatedAt: time.Now()}); err != nil {
+	if err := st.AddKey(ctx, Key{Hash: "h1", Name: "alice", MaxWorkers: &maxWorkers, EvictWaiting: true, AutoRetry: true, CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if keys, err := st.Keys(ctx); err != nil || len(keys) != 1 || keys[0].MaxWorkers == nil || *keys[0].MaxWorkers != 3 || !keys[0].EvictWaiting {
+	if keys, err := st.Keys(ctx); err != nil || len(keys) != 1 || keys[0].MaxWorkers == nil || *keys[0].MaxWorkers != 3 || !keys[0].EvictWaiting || !keys[0].AutoRetry {
 		t.Fatalf("keys = %+v, %v", keys, err)
 	}
 	if _, err := st.UpdateKey(ctx, "h1", KeyUpdate{Name: "alice", Note: "n"}); err != nil {
 		t.Fatal(err)
 	}
-	if keys, err := st.Keys(ctx); err != nil || keys[0].MaxWorkers != nil || keys[0].EvictWaiting {
-		t.Fatalf("after clearing max_workers and evict_waiting: %+v, %v", keys, err)
+	if keys, err := st.Keys(ctx); err != nil || keys[0].MaxWorkers != nil || keys[0].EvictWaiting || keys[0].AutoRetry {
+		t.Fatalf("after clearing max_workers, evict_waiting, and auto_retry: %+v, %v", keys, err)
 	}
 	cost := 0.5
 	if err := st.AddRequest(ctx, Request{At: time.Now(), KeyHash: "h1", KeyName: "alice", Account: "main", Model: "m", Status: StatusOK, QuotaGroup: "gemini", Input: 1, CostUSD: &cost}); err != nil {
@@ -504,7 +504,7 @@ func TestOpenInitializesMissingColumnsAndTables(t *testing.T) {
 		t.Fatalf("accounts after upgrade = %+v, %v", accounts, err)
 	}
 	keys, err := st.Keys(ctx)
-	if err != nil || len(keys) != 1 || keys[0].MaxWorkers != nil || keys[0].EvictWaiting || keys[0].LimitTotal != nil || len(keys[0].Limits) != 0 || len(keys[0].Models) != 0 {
+	if err != nil || len(keys) != 1 || keys[0].MaxWorkers != nil || keys[0].EvictWaiting || keys[0].AutoRetry || keys[0].LimitTotal != nil || len(keys[0].Limits) != 0 || len(keys[0].Models) != 0 {
 		t.Fatalf("keys after upgrade = %+v, %v", keys, err)
 	}
 	reqs, err := st.Requests(ctx, RequestFilter{}, 0, 10)

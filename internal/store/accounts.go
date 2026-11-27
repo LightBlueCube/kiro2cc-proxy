@@ -135,6 +135,9 @@ type Key struct {
 	// EvictWaiting lets this key's requests evict its own oldest worker
 	// waiting for tool results when worker caps are full.
 	EvictWaiting bool
+	// AutoRetry retries retryable errors internally instead of returning
+	// them to downstream callers.
+	AutoRetry bool
 	// LimitTotal caps the key's whole list-price spend (key_usage) in USD;
 	// nil is no total limit.
 	LimitTotal *float64
@@ -146,7 +149,7 @@ type Key struct {
 	RevokedAt time.Time
 }
 
-const keyColumns = `hash, name, note, models, max_workers, evict_waiting, limit_total, limits, created_at, revoked_at`
+const keyColumns = `hash, name, note, models, max_workers, evict_waiting, auto_retry, limit_total, limits, created_at, revoked_at`
 
 func scanKey(scan func(dest ...any) error) (Key, error) {
 	var k Key
@@ -155,7 +158,7 @@ func scanKey(scan func(dest ...any) error) (Key, error) {
 	var total sql.NullFloat64
 	var created int64
 	var revoked sql.NullInt64
-	if err := scan(&k.Hash, &k.Name, &k.Note, &models, &maxWorkers, &k.EvictWaiting, &total, &limits, &created, &revoked); err != nil {
+	if err := scan(&k.Hash, &k.Name, &k.Note, &models, &maxWorkers, &k.EvictWaiting, &k.AutoRetry, &total, &limits, &created, &revoked); err != nil {
 		return Key{}, err
 	}
 	if maxWorkers.Valid {
@@ -204,8 +207,8 @@ func (s *Store) AddKey(ctx context.Context, k Key) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, max_workers, evict_waiting, limit_total, limits, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		k.Hash, k.Name, k.Note, string(models), k.MaxWorkers, k.EvictWaiting, k.LimitTotal, string(limits), k.CreatedAt.Unix())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO api_keys (hash, name, note, models, max_workers, evict_waiting, auto_retry, limit_total, limits, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		k.Hash, k.Name, k.Note, string(models), k.MaxWorkers, k.EvictWaiting, k.AutoRetry, k.LimitTotal, string(limits), k.CreatedAt.Unix())
 	return uniqueErr(err)
 }
 
@@ -216,6 +219,7 @@ type KeyUpdate struct {
 	Models       []string
 	MaxWorkers   *int
 	EvictWaiting bool
+	AutoRetry    bool
 	LimitTotal   *float64
 	Limits       map[string]float64
 }
@@ -245,8 +249,8 @@ func (s *Store) UpdateKey(ctx context.Context, hash string, u KeyUpdate) (oldNam
 	if err != nil {
 		return "", err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET name = ?, note = ?, models = ?, max_workers = ?, evict_waiting = ?, limit_total = ?, limits = ? WHERE hash = ?`,
-		u.Name, u.Note, string(models), u.MaxWorkers, u.EvictWaiting, u.LimitTotal, string(limits), hash); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET name = ?, note = ?, models = ?, max_workers = ?, evict_waiting = ?, auto_retry = ?, limit_total = ?, limits = ? WHERE hash = ?`,
+		u.Name, u.Note, string(models), u.MaxWorkers, u.EvictWaiting, u.AutoRetry, u.LimitTotal, string(limits), hash); err != nil {
 		return "", uniqueErr(err)
 	}
 	if u.Name != oldName {
