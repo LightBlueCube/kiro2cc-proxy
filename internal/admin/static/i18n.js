@@ -92,6 +92,8 @@ function hoursAndMore(minutes) {
   return hrs < 48 ? t("duration.h_m", { h: hrs, m: minutes % 60 }) : t("duration.d_h", { d: Math.floor(hrs / 24), h: hrs % 24 });
 }
 
+const TIME_24H = { hourCycle: "h23" };
+
 const fmt = {
   int: n => numberFormat({}).format(n ?? 0),
   compact: n => {
@@ -104,9 +106,9 @@ const fmt = {
     : numberFormat({ style: "currency", currency: "USD", ...(v < 0.01 && v > 0 ? { minimumFractionDigits: 4, maximumFractionDigits: 4 } : {}) }).format(v),
   pct: (v, digits = 1) => v === null || v === undefined ? "—"
     : numberFormat({ style: "percent", minimumFractionDigits: digits, maximumFractionDigits: digits }).format(v),
-  time: s => s ? new Date(s).toLocaleString(locale) : "—",
+  time: s => s ? new Date(s).toLocaleString(locale, TIME_24H) : "—",
   date: s => s ? new Date(s).toLocaleDateString(locale) : "—",
-  clock: s => s ? new Date(s).toLocaleTimeString(locale) : "—",
+  clock: s => s ? new Date(s).toLocaleTimeString(locale, TIME_24H) : "—",
   ms: ms => ms === null || ms === undefined ? "—"
     : ms >= 10000 ? t("duration.s", { n: fixed(ms / 1000, 0) })
     : ms >= 1000 ? t("duration.s", { n: fixed(ms / 1000, 1) })
